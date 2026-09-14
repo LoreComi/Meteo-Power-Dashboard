@@ -1,0 +1,489 @@
+# Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
+# DBTITLE 1,Power Desk Sandbox Refresh
+"""
+Power Desk Sandbox Refresh
+==========================
+Populates dna_snbx_weather.power_desk.* from the Volue delta-share tables and
+the Meteomatics silver layer. Schedule: every 6 hours via Lakeflow Jobs
+(after the 00z / 12z EC-ENS runs land, ~05:00 and ~17:00 UTC, plus two
+in-between refreshes for the hydro / historical legs).
+
+Tables written (all read by weather-power-desk-app/_data.py):
+  fcst_runs             one row per (model_family, pattern, reference_date) kept
+  fcst_daily            daily ensemble stats per provider/model/run/metric/area:
+                        ens_mean, p10..p90, spread_std, min, max, n_members,
+                        normal, anomaly, lead_day
+  fcst_spread_clim      "normal" ensemble spread per metric/area/lead_day
+                        (and per run month) from the last 365 days of EC-ENS runs
+  fcst_members          latest EC-ENS run, per member daily values (Volue) and,
+                        if METEOMATICS_MEMBER_TABLE is set, Meteomatics
+                        EC-ENS / AIFS-ENS members as country means
+  hist_daily            Volue actuals + normal per metric/area/day since 2013
+  hydro_daily           Volue hydro reservoir components (WTR/SGW/BAL),
+                        actual (SA) and normal (N), per area/day since 2013
+  weather_indexes       CREATE IF NOT EXISTS — loaded separately
+  meteologica_members   CREATE IF NOT EXISTS — populated only if METEOLOGICA_TABLE set
+
+Lookup tables below mirror weather-power-desk-app/_config.py — update both.
+"""
+from datetime import datetime
+
+VOLUE = "dna_prod_silver.volue"                 # set to the delta-share catalog if mounted elsewhere
+MM = "dna_prod_silver.meteomatics"
+SBX = "dna_snbx_weather.power_desk"
+APP_SP = "34723e4c-6c84-42cb-8014-16478ddd2599"  # Databricks App service principal (same SP as the LPG app)
+
+METEOMATICS_MEMBER_TABLE = ""   # e.g. "dna_snbx_weather.meteomatics_members.temperature_forecast_members"
+METEOLOGICA_TABLE = ""          # e.g. "dna_snbx_weather.meteologica.ensext_daily"
+
+print(f"Refresh started: {datetime.now()}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {SBX}")
+try:
+    spark.sql(f"GRANT USE CATALOG ON CATALOG dna_snbx_weather TO `{APP_SP}`")
+    spark.sql(f"GRANT USE SCHEMA, SELECT ON SCHEMA {SBX} TO `{APP_SP}`")
+    print("Grants re-applied for the app SP")
+except Exception as e:  # governance jobs sometimes own these grants
+    print(f"Grant skipped: {e}")
+
+# COMMAND ----------
+
+# DBTITLE 1,Lookup tables (mirror _config.py)
+AREAS = ["DE", "FR", "IT", "ES", "UK", "NL", "BE", "PL", "CZ", "HU", "NO", "SE", "FI", "DK",
+         "PT", "SI", "SK", "HR", "EE", "LV", "LT"]
+AREA_SQL = ",".join(f"'{a}'" for a in AREAS)
+
+METRICS = {
+    # name: (category, forecast table, history table, scale to display unit)
+    "Temperature":          ("TT",  "temperature_consumption_forecast", "temperature_consumption", 1.0),
+    "Wind":                 ("WND", "production_forecast",              "production",              0.001),
+    "Solar":                ("SPV", "production_forecast",              "production",              0.001),
+    "Precipitation energy": ("RRE", "precipitation_forecast",           "precipitation",           1.0),
+}
+
+VOLUE_MODELS = {
+    "EC-ENS":      ["ec00ens", "ec12ens"],
+    "EC-Extended": ["ecmonthly"],
+    "GFS-ENS":     ["gfs00ens"],
+}
+N_RUNS_KEPT = 6
+
+METEOMATICS_MODELS = {
+    "Meteomatics EC-ENS":   ("ecmwf-ens",      "t_mean_2m_24h_c_ecmwf_ens_p1d"),
+    "Meteomatics AIFS-ENS": ("ecmwf-aifs-ens", "t_mean_2m_24h_c_ecmwf_aifs_ens_p1d"),
+}
+
+COUNTRY_BBOX = {
+    "DE": (47.5, 55.0, 6.0, 15.0),   "FR": (42.5, 51.0, -4.5, 8.0),   "IT": (37.0, 47.0, 7.0, 18.5),
+    "ES": (36.0, 43.5, -9.5, 3.0),   "UK": (50.0, 58.5, -7.5, 1.5),   "NL": (50.5, 53.5, 3.5, 7.0),
+    "BE": (49.5, 51.5, 2.5, 6.5),    "PL": (49.0, 54.5, 14.0, 24.0),  "CZ": (48.5, 51.0, 12.0, 18.5),
+    "HU": (45.5, 48.5, 16.0, 22.5),  "NO": (58.0, 64.0, 5.0, 12.0),   "SE": (55.5, 64.0, 11.5, 19.0),
+    "FI": (60.0, 66.0, 21.0, 30.0),  "DK": (54.5, 57.5, 8.0, 12.5),   "PT": (37.0, 42.0, -9.5, -6.5),
+    "SI": (45.5, 46.5, 13.5, 16.5),  "SK": (47.5, 49.5, 17.0, 22.5),  "HR": (42.5, 46.5, 13.5, 19.5),
+    "EE": (57.5, 59.5, 22.0, 28.0),  "LV": (55.5, 58.0, 21.0, 28.0),  "LT": (54.0, 56.5, 21.0, 26.5),
+}
+
+HYDRO_AREAS = ["FR", "CH", "AT", "IT", "NP", "ES", "SEE", "DE", "NO", "SE", "FI"]
+HYDRO_COMPONENTS = ["WTR", "SGW", "BAL"]
+
+
+def country_case_sql(lat="latitude", lon="longitude") -> str:
+    lines = ["CASE"]
+    for code, (la0, la1, lo0, lo1) in COUNTRY_BBOX.items():
+        lines.append(f"  WHEN {lat} >= {la0} AND {lat} <= {la1} AND {lon} >= {lo0} AND {lon} <= {lo1} THEN '{code}'")
+    lines.append("END")
+    return "\n".join(lines)
+
+
+COUNTRY_CASE = country_case_sql()
+CET_DAY = "DATE(from_utc_timestamp(delivery_start, 'CET'))"
+
+
+def count(table: str) -> None:
+    n = spark.sql(f"SELECT COUNT(*) FROM {SBX}.{table}").first()[0]
+    print(f"{table}: {n:,} rows")
+
+
+# COMMAND ----------
+
+# DBTITLE 1,1. Forecast runs kept per model family
+# Runs are identified by reference_date (data-arrival time, ~2 h after the NWP
+# init); the app snaps them to the nearest 00z/12z for display. Run discovery
+# is done on the temperature table — every other metric of the same run
+# arrives within minutes of it, and the daily stats query below matches each
+# metric's rows on its own reference_date within a ±3 h window.
+run_unions = []
+for family, patterns in VOLUE_MODELS.items():
+    for pat in patterns:
+        run_unions.append(f"""
+        SELECT '{family}' AS model_family, '{pat}' AS pattern, reference_date
+        FROM {VOLUE}.temperature_consumption_forecast
+        WHERE curve_name LIKE '%{pat}%' AND data_type = 'F' AND tag = 'Avg'
+          AND array_contains(categories, 'TT')
+          AND reference_date >= current_timestamp() - INTERVAL 14 DAYS
+        GROUP BY reference_date
+        """)
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {SBX}.fcst_runs AS
+WITH all_runs AS ({" UNION ALL ".join(run_unions)}),
+ranked AS (
+  SELECT model_family, pattern, reference_date,
+         DENSE_RANK() OVER (PARTITION BY model_family ORDER BY reference_date DESC) AS run_rank
+  FROM all_runs
+)
+SELECT model_family, pattern, reference_date, run_rank,
+       CASE WHEN run_rank = 1 THEN 'Latest' ELSE CONCAT('Latest -', run_rank - 1) END AS run_label,
+       current_timestamp() AS snapshot_ts
+FROM ranked WHERE run_rank <= {N_RUNS_KEPT}
+""")
+count("fcst_runs")
+
+# COMMAND ----------
+
+# DBTITLE 1,2. Daily ensemble statistics per run / metric / area (Volue)
+metric_blocks = []
+for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
+    metric_blocks.append(f"""
+    SELECT 'Volue' AS provider, r.model_family, r.pattern, r.reference_date, r.run_rank, r.run_label,
+           '{name}' AS metric, f.area, {CET_DAY} AS day, f.tag, AVG(f.value) * {scale} AS value
+    FROM {VOLUE}.{fcst_tbl} f
+    JOIN {SBX}.fcst_runs r
+      ON f.curve_name LIKE CONCAT('%', r.pattern, '%')
+     AND f.reference_date BETWEEN r.reference_date - INTERVAL 3 HOURS AND r.reference_date + INTERVAL 3 HOURS
+    WHERE array_contains(f.categories, '{cat}') AND f.data_type = 'F'
+      AND f.area IN ({AREA_SQL})
+      AND f.delivery_start >= current_date() - INTERVAL 2 DAYS
+    GROUP BY r.model_family, r.pattern, r.reference_date, r.run_rank, r.run_label, f.area, {CET_DAY}, f.tag
+    """)
+
+normal_blocks = []
+for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
+    normal_blocks.append(f"""
+    SELECT '{name}' AS metric, area, {CET_DAY} AS day, AVG(value) * {scale} AS normal
+    FROM {VOLUE}.{hist_tbl}
+    WHERE array_contains(categories, '{cat}') AND data_type = 'N'
+      AND area IN ({AREA_SQL})
+      AND delivery_start BETWEEN current_date() - INTERVAL 2 DAYS AND current_date() + INTERVAL 50 DAYS
+    GROUP BY area, {CET_DAY}
+    """)
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {SBX}.fcst_daily AS
+WITH member_daily AS ({" UNION ALL ".join(metric_blocks)}),
+agg AS (
+  SELECT provider, model_family, pattern, reference_date, run_rank, run_label, metric, area, day,
+         MAX(CASE WHEN tag = 'Avg' THEN value END)                          AS ens_mean,
+         percentile_approx(CASE WHEN tag != 'Avg' THEN value END, 0.10)     AS p10,
+         percentile_approx(CASE WHEN tag != 'Avg' THEN value END, 0.25)     AS p25,
+         percentile_approx(CASE WHEN tag != 'Avg' THEN value END, 0.50)     AS p50,
+         percentile_approx(CASE WHEN tag != 'Avg' THEN value END, 0.75)     AS p75,
+         percentile_approx(CASE WHEN tag != 'Avg' THEN value END, 0.90)     AS p90,
+         STDDEV(CASE WHEN tag != 'Avg' THEN value END)                      AS spread_std,
+         MIN(CASE WHEN tag != 'Avg' THEN value END)                         AS ens_min,
+         MAX(CASE WHEN tag != 'Avg' THEN value END)                         AS ens_max,
+         COUNT(DISTINCT CASE WHEN tag != 'Avg' THEN tag END)                AS n_members
+  FROM member_daily
+  GROUP BY provider, model_family, pattern, reference_date, run_rank, run_label, metric, area, day
+),
+normals AS ({" UNION ALL ".join(normal_blocks)})
+SELECT a.provider, a.model_family, a.pattern, a.reference_date, a.run_rank, a.run_label,
+       a.metric, a.area, a.day,
+       DATEDIFF(a.day, DATE(a.reference_date)) AS lead_day,
+       COALESCE(a.ens_mean, a.p50) AS ens_mean,
+       a.p10, a.p25, a.p50, a.p75, a.p90, a.spread_std, a.ens_min, a.ens_max, a.n_members,
+       n.normal,
+       COALESCE(a.ens_mean, a.p50) - n.normal AS anomaly,
+       CASE WHEN n.normal IS NOT NULL AND n.normal != 0
+            THEN (COALESCE(a.ens_mean, a.p50) / n.normal - 1) * 100 END AS anomaly_pct,
+       current_timestamp() AS snapshot_ts
+FROM agg a
+LEFT JOIN normals n ON n.metric = a.metric AND n.area = a.area AND n.day = a.day
+""")
+count("fcst_daily")
+
+# COMMAND ----------
+
+# DBTITLE 1,2b. Meteomatics EC-ENS / AIFS-ENS ensemble means as country averages
+# The silver Meteomatics tables only hold the ensemble mean (no members), so
+# they contribute a second and third "mean" line to the forecast values view.
+mm_blocks = []
+for label, (model, curve) in METEOMATICS_MODELS.items():
+    mm_blocks.append(f"""
+    SELECT 'Meteomatics' AS provider, '{label}' AS model_family, '{model}' AS pattern,
+           created_at AS reference_date, 1 AS run_rank, 'Latest' AS run_label,
+           'Temperature' AS metric, {COUNTRY_CASE} AS area, DATE(delivery_start) AS day,
+           AVG(value) AS ens_mean
+    FROM {MM}.temperature_forecast
+    WHERE model = '{model}' AND curve_name = '{curve}'
+      AND created_at = (SELECT MAX(created_at) FROM {MM}.temperature_forecast WHERE model = '{model}')
+      AND latitude BETWEEN 36 AND 66 AND longitude BETWEEN -10 AND 30
+    GROUP BY created_at, {COUNTRY_CASE}, DATE(delivery_start)
+    """)
+
+spark.sql(f"""
+INSERT INTO {SBX}.fcst_daily
+WITH mm AS ({" UNION ALL ".join(mm_blocks)}),
+normals AS (
+  SELECT area, {CET_DAY} AS day, AVG(value) AS normal
+  FROM {VOLUE}.temperature_consumption
+  WHERE array_contains(categories, 'TT') AND data_type = 'N' AND area IN ({AREA_SQL})
+    AND delivery_start BETWEEN current_date() - INTERVAL 2 DAYS AND current_date() + INTERVAL 50 DAYS
+  GROUP BY area, {CET_DAY}
+)
+SELECT m.provider, m.model_family, m.pattern, m.reference_date, m.run_rank, m.run_label,
+       m.metric, m.area, m.day, DATEDIFF(m.day, DATE(m.reference_date)) AS lead_day,
+       m.ens_mean, NULL AS p10, NULL AS p25, NULL AS p50, NULL AS p75, NULL AS p90,
+       NULL AS spread_std, NULL AS ens_min, NULL AS ens_max, 0 AS n_members,
+       n.normal, m.ens_mean - n.normal AS anomaly,
+       CASE WHEN n.normal IS NOT NULL AND n.normal != 0 THEN (m.ens_mean / n.normal - 1) * 100 END AS anomaly_pct,
+       current_timestamp() AS snapshot_ts
+FROM mm m LEFT JOIN normals n ON n.area = m.area AND n.day = m.day
+WHERE m.area IS NOT NULL
+""")
+count("fcst_daily")
+
+# COMMAND ----------
+
+# DBTITLE 1,3. Normal ensemble spread per lead day (uncertainty baseline)
+# For every EC-ENS 00z run in the last year: per member daily mean, then the
+# across-member std per (metric, area, lead_day). Aggregated two ways — all
+# runs, and runs grouped by calendar month — so the app can compare today's
+# spread with "a normal spread for this lead day at this time of year".
+spread_blocks = []
+for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
+    if name == "Precipitation energy":
+        continue
+    spread_blocks.append(f"""
+    SELECT '{name}' AS metric, area, reference_date, tag,
+           {CET_DAY} AS day, AVG(value) * {scale} AS value
+    FROM {VOLUE}.{fcst_tbl}
+    WHERE array_contains(categories, '{cat}') AND data_type = 'F' AND tag != 'Avg'
+      AND curve_name LIKE '%ec00ens%'
+      AND area IN ({AREA_SQL})
+      AND reference_date >= current_timestamp() - INTERVAL 365 DAYS
+      AND delivery_start >= reference_date
+    GROUP BY area, reference_date, tag, {CET_DAY}
+    """)
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {SBX}.fcst_spread_clim AS
+WITH member_daily AS ({" UNION ALL ".join(spread_blocks)}),
+per_run AS (
+  SELECT metric, area, reference_date, DATEDIFF(day, DATE(reference_date)) AS lead_day,
+         MONTH(reference_date) AS run_month,
+         STDDEV(value) AS spread_std, percentile_approx(value, 0.9) - percentile_approx(value, 0.1) AS spread_p90_p10,
+         COUNT(DISTINCT tag) AS n_members
+  FROM member_daily
+  GROUP BY metric, area, reference_date, DATEDIFF(day, DATE(reference_date)), MONTH(reference_date)
+  HAVING COUNT(DISTINCT tag) >= 5
+)
+SELECT metric, area, lead_day, 0 AS run_month,
+       AVG(spread_std) AS spread_std_mean, percentile_approx(spread_std, 0.25) AS spread_std_p25,
+       percentile_approx(spread_std, 0.75) AS spread_std_p75,
+       AVG(spread_p90_p10) AS spread_p90_p10_mean, COUNT(*) AS n_runs
+FROM per_run GROUP BY metric, area, lead_day
+UNION ALL
+SELECT metric, area, lead_day, run_month,
+       AVG(spread_std), percentile_approx(spread_std, 0.25), percentile_approx(spread_std, 0.75),
+       AVG(spread_p90_p10), COUNT(*)
+FROM per_run GROUP BY metric, area, lead_day, run_month
+""")
+count("fcst_spread_clim")
+
+# COMMAND ----------
+
+# DBTITLE 1,4. Per-member daily values of the latest EC-ENS run (scenario inputs)
+member_blocks = []
+for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
+    if name == "Precipitation energy":
+        continue
+    member_blocks.append(f"""
+    SELECT 'Volue' AS provider, 'EC-ENS' AS model, r.reference_date, '{name}' AS metric, f.area,
+           {CET_DAY} AS day, f.tag AS member, AVG(f.value) * {scale} AS value
+    FROM {VOLUE}.{fcst_tbl} f
+    JOIN (SELECT pattern, reference_date FROM {SBX}.fcst_runs WHERE model_family = 'EC-ENS' AND run_rank = 1) r
+      ON f.curve_name LIKE CONCAT('%', r.pattern, '%')
+     AND f.reference_date BETWEEN r.reference_date - INTERVAL 3 HOURS AND r.reference_date + INTERVAL 3 HOURS
+    WHERE array_contains(f.categories, '{cat}') AND f.data_type = 'F' AND f.tag != 'Avg'
+      AND f.area IN ({AREA_SQL}) AND f.delivery_start >= current_date()
+    GROUP BY r.reference_date, f.area, {CET_DAY}, f.tag
+    """)
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {SBX}.fcst_members AS
+WITH members AS ({" UNION ALL ".join(member_blocks)}),
+normals AS (
+  SELECT 'Temperature' AS metric, area, {CET_DAY} AS day, AVG(value) AS normal
+  FROM {VOLUE}.temperature_consumption
+  WHERE array_contains(categories, 'TT') AND data_type = 'N' AND area IN ({AREA_SQL})
+    AND delivery_start BETWEEN current_date() AND current_date() + INTERVAL 20 DAYS
+  GROUP BY area, {CET_DAY}
+  UNION ALL
+  SELECT 'Wind', area, {CET_DAY}, AVG(value) * 0.001
+  FROM {VOLUE}.production
+  WHERE array_contains(categories, 'WND') AND data_type = 'N' AND area IN ({AREA_SQL})
+    AND delivery_start BETWEEN current_date() AND current_date() + INTERVAL 20 DAYS
+  GROUP BY area, {CET_DAY}
+  UNION ALL
+  SELECT 'Solar', area, {CET_DAY}, AVG(value) * 0.001
+  FROM {VOLUE}.production
+  WHERE array_contains(categories, 'SPV') AND data_type = 'N' AND area IN ({AREA_SQL})
+    AND delivery_start BETWEEN current_date() AND current_date() + INTERVAL 20 DAYS
+  GROUP BY area, {CET_DAY}
+)
+SELECT m.provider, m.model, m.reference_date, m.metric, m.area, m.day,
+       DATEDIFF(m.day, DATE(m.reference_date)) AS lead_day,
+       m.member, m.value, n.normal, m.value - n.normal AS anomaly,
+       current_timestamp() AS snapshot_ts
+FROM members m LEFT JOIN normals n ON n.metric = m.metric AND n.area = m.area AND n.day = m.day
+""")
+count("fcst_members")
+
+# COMMAND ----------
+
+# DBTITLE 1,4b. Meteomatics per-member country means (only if a member table exists)
+if METEOMATICS_MEMBER_TABLE:
+    cols = {f.name.lower() for f in spark.table(METEOMATICS_MEMBER_TABLE).schema.fields}
+    member_col = next((c for c in ("member", "ens_member", "perturbation", "number") if c in cols), None)
+    run_col = "created_at" if "created_at" in cols else "reference_date"
+    if member_col is None:
+        print(f"{METEOMATICS_MEMBER_TABLE} has no member column — skipping Meteomatics members")
+    else:
+        for label, (model, curve) in METEOMATICS_MODELS.items():
+            spark.sql(f"""
+            INSERT INTO {SBX}.fcst_members
+            WITH latest AS (SELECT MAX({run_col}) AS rd FROM {METEOMATICS_MEMBER_TABLE} WHERE model = '{model}'),
+            country AS (
+              SELECT {run_col} AS reference_date, {COUNTRY_CASE} AS area, DATE(delivery_start) AS day,
+                     CAST({member_col} AS STRING) AS member, AVG(value) AS value
+              FROM {METEOMATICS_MEMBER_TABLE}, latest
+              WHERE model = '{model}' AND {run_col} = latest.rd
+                AND latitude BETWEEN 36 AND 66 AND longitude BETWEEN -10 AND 30
+              GROUP BY {run_col}, {COUNTRY_CASE}, DATE(delivery_start), {member_col}
+            ),
+            normals AS (
+              SELECT area, {CET_DAY} AS day, AVG(value) AS normal
+              FROM {VOLUE}.temperature_consumption
+              WHERE array_contains(categories, 'TT') AND data_type = 'N' AND area IN ({AREA_SQL})
+                AND delivery_start BETWEEN current_date() AND current_date() + INTERVAL 20 DAYS
+              GROUP BY area, {CET_DAY}
+            )
+            SELECT 'Meteomatics' AS provider, '{model}' AS model, c.reference_date, 'Temperature' AS metric,
+                   c.area, c.day, DATEDIFF(c.day, DATE(c.reference_date)) AS lead_day,
+                   c.member, c.value, n.normal, c.value - n.normal AS anomaly, current_timestamp() AS snapshot_ts
+            FROM country c LEFT JOIN normals n ON n.area = c.area AND n.day = c.day
+            WHERE c.area IS NOT NULL
+            """)
+        count("fcst_members")
+else:
+    print("METEOMATICS_MEMBER_TABLE not set — Meteomatics members not available; "
+          "scenarios will cluster Volue EC-ENS members")
+
+# COMMAND ----------
+
+# DBTITLE 1,5. Historical actuals + normals per metric/area/day (since 2013)
+hist_blocks = []
+for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
+    hist_blocks.append(f"""
+    SELECT '{name}' AS metric, area, {CET_DAY} AS day, data_type, AVG(value) * {scale} AS value
+    FROM {VOLUE}.{hist_tbl}
+    WHERE array_contains(categories, '{cat}') AND data_type IN ('AF', 'N')
+      AND area IN ({AREA_SQL})
+      AND delivery_start >= '2013-01-01' AND delivery_start < current_date()
+    GROUP BY area, {CET_DAY}, data_type
+    """)
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {SBX}.hist_daily AS
+WITH raw AS ({" UNION ALL ".join(hist_blocks)}),
+pivoted AS (
+  SELECT metric, area, day,
+         MAX(CASE WHEN data_type = 'AF' THEN value END) AS actual,
+         MAX(CASE WHEN data_type = 'N'  THEN value END) AS normal_dated
+  FROM raw GROUP BY metric, area, day
+),
+-- day-of-year normal from whatever years the N curve covers, as a fallback
+-- for older dates where the dated normal is absent
+doy_normal AS (
+  SELECT metric, area, DAYOFYEAR(day) AS doy, AVG(normal_dated) AS normal_doy
+  FROM pivoted WHERE normal_dated IS NOT NULL GROUP BY metric, area, DAYOFYEAR(day)
+)
+SELECT p.metric, p.area, p.day, YEAR(p.day) AS year, MONTH(p.day) AS month,
+       WEEKOFYEAR(p.day) AS iso_week, DATE_TRUNC('week', p.day) AS week_start,
+       p.actual, COALESCE(p.normal_dated, d.normal_doy) AS normal,
+       p.actual - COALESCE(p.normal_dated, d.normal_doy) AS anomaly,
+       CASE WHEN COALESCE(p.normal_dated, d.normal_doy) != 0
+            THEN (p.actual / COALESCE(p.normal_dated, d.normal_doy) - 1) * 100 END AS anomaly_pct
+FROM pivoted p LEFT JOIN doy_normal d ON d.metric = p.metric AND d.area = p.area AND d.doy = DAYOFYEAR(p.day)
+WHERE p.actual IS NOT NULL
+""")
+count("hist_daily")
+
+# COMMAND ----------
+
+# DBTITLE 1,6. Hydro components — actual (SA) and normal (N) since 2013
+hydro_area_sql = ",".join(f"'{a}'" for a in HYDRO_AREAS)
+comp_blocks = []
+for comp in HYDRO_COMPONENTS:
+    comp_blocks.append(f"""
+    SELECT area, '{comp}' AS component, {CET_DAY} AS day, data_type, AVG(value) AS value
+    FROM {VOLUE}.hydro_reservoir
+    WHERE UPPER(area) IN ({hydro_area_sql}) AND data_type IN ('SA', 'N')
+      AND array_contains(categories, 'RES') AND array_contains(categories, 'HYDRO')
+      AND array_contains(categories, '{comp}')
+      AND delivery_start >= '2013-01-01'
+    GROUP BY area, {CET_DAY}, data_type
+    """)
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {SBX}.hydro_daily AS
+SELECT UPPER(area) AS area, component, day, data_type, value, current_timestamp() AS snapshot_ts
+FROM ({" UNION ALL ".join(comp_blocks)})
+""")
+count("hydro_daily")
+
+# COMMAND ----------
+
+# DBTITLE 1,7. Placeholders — weather indexes and Meteologica
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {SBX}.weather_indexes (
+  index_name STRING COMMENT 'NAO, AO, EA, SCAND, PNA, ONI, MJO_AMP, MJO_PHASE, QBO, SSW',
+  date       DATE,
+  value      DOUBLE,
+  source     STRING COMMENT 'e.g. NOAA CPC, BoM, ERA5-derived',
+  loaded_at  TIMESTAMP
+) COMMENT 'Daily/monthly teleconnection indexes for the analogue tab. Loaded by a separate job.'
+""")
+
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {SBX}.meteologica_members (
+  provider       STRING,
+  model          STRING,
+  reference_date TIMESTAMP,
+  metric         STRING COMMENT 'Temperature | Wind | Solar | Hydro',
+  area           STRING,
+  day            DATE,
+  lead_day       INT,
+  member         STRING,
+  value          DOUBLE,
+  snapshot_ts    TIMESTAMP
+) COMMENT 'Meteologica ECMWF ENS / ENSEXT members, same layout as fcst_members. Empty until ingested.'
+""")
+
+if METEOLOGICA_TABLE:
+    spark.sql(f"""
+    INSERT OVERWRITE {SBX}.meteologica_members
+    WITH latest AS (SELECT MAX(reference_date) AS rd FROM {METEOLOGICA_TABLE})
+    SELECT 'Meteologica', 'ECMWF ENS', reference_date, metric, UPPER(area), delivery_date,
+           DATEDIFF(delivery_date, DATE(reference_date)), CAST(member AS STRING), value, current_timestamp()
+    FROM {METEOLOGICA_TABLE}, latest WHERE reference_date = latest.rd
+    """)
+    count("meteologica_members")
+else:
+    print("METEOLOGICA_TABLE not set — meteologica_members left as-is")
+
+print(f"Refresh finished: {datetime.now()}")

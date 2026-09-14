@@ -1,0 +1,31 @@
+command:
+  - streamlit
+  - run
+  - app.py
+  - --server.port
+  - "8000"
+  - --server.address
+  - "0.0.0.0"
+
+env:
+  - name: DATABRICKS_SQL_WAREHOUSE_HTTP_PATH
+    description: "HTTP path of the SQL warehouse"
+    value: "/sql/1.0/warehouses/2f4ff6b7c65abb1a"
+  - name: POWER_DESK_SCHEMA
+    description: "Sandbox schema written by power_desk_refresh.py"
+    value: "dna_snbx_weather.power_desk"
+  - name: VOLUE_SCHEMA
+    description: "Volue delta-share schema (only used for documentation in the app; the job reads it)"
+    value: "dna_prod_silver.volue"
+  - name: METEOMATICS_MEMBER_TABLE
+    description: "Optional per-member Meteomatics table; empty = cluster on Volue members"
+    value: ""
+  - name: METEOLOGICA_TABLE
+    description: "Optional Meteologica table; empty = tab shows not-ingested notice"
+    value: ""
+
+resources:
+  - name: sql-warehouse
+    sql_warehouse:
+      id: "2f4ff6b7c65abb1a"
+      permission: CAN_USE
