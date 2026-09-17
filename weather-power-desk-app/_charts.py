@@ -12,6 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 
 from _config import AREAS, MONTH_NAMES, SPREAD_RATIO_HIGH, SPREAD_RATIO_LOW
 from _style import (
@@ -21,6 +22,8 @@ from _style import (
     HYDRO_HIST_GREY, HYDRO_CURRENT_RED, hydro_recent_colours, hex_to_rgba,
     CAT_BLUE, CAT_ORANGE,
 )
+
+from _config import MAP_EUROPE_BBOX
 
 AREA_COLORS: dict[str, str] = {code: CATEGORICAL[i % len(CATEGORICAL)] for i, code in enumerate(AREAS)}
 RUN_OPACITY = {1: 1.0, 2: 0.55, 3: 0.4, 4: 0.3, 5: 0.22, 6: 0.16}
@@ -134,6 +137,112 @@ def make_multi_area_lines(df: pd.DataFrame, value_col: str, unit: str, title: st
     fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
     fig.update_yaxes(title_text=unit)
     return fig
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HISTORICAL — gridded anomaly maps
+# ══════════════════════════════════════════════════════════════════════════════
+
+_MPL_STYLE = {
+    'figure.facecolor': '#fafaf8',
+    'axes.facecolor':   '#ffffff',
+    'text.color':       INK_PRIMARY,
+    'axes.labelcolor':  INK_SECONDARY,
+    'xtick.color':      INK_MUTED,
+    'ytick.color':      INK_MUTED,
+    'axes.titlecolor':  INK_PRIMARY,
+    'axes.edgecolor':   GRIDLINE,
+    'grid.color':       GRIDLINE,
+    'axes.titlesize':   13,
+    'font.family':      'sans-serif',
+}
+_LAND_COLOR  = '#e2e8f0'
+_OCEAN_COLOR = '#dbeafe'
+_COAST_COLOR = '#475569'
+_BORDER_CLR  = '#94a3b8'
+
+
+def make_geo_anomaly_map(df: pd.DataFrame, unit: str, title: str,
+                         symmetric: bool = True, warm_is_positive: bool = True):
+    """Smooth contourf anomaly map over Europe — matplotlib + cartopy,
+    same style as the coal desk weather app (country outlines, ocean mask,
+    filled contours).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from scipy.interpolate import griddata
+
+    bb = MAP_EUROPE_BBOX
+    if df.empty:
+        fig_mpl, ax = plt.subplots(figsize=(12, 7))
+        ax.set_title(title)
+        return fig_mpl
+
+    z = df["anomaly"].values.astype(float)
+    lim = float(np.nanmax(np.abs(z))) if np.isfinite(z).any() else 1.0
+    lim = max(lim, 0.5)
+    cmap = "RdBu_r" if warm_is_positive else "RdBu"
+    levels = np.linspace(-lim, lim, 21)
+
+    # Build regular grid and interpolate
+    lats_raw, lons_raw = df["latitude"].values, df["longitude"].values
+    lon_fine = np.arange(bb["lon_min"], bb["lon_max"] + 0.01, 0.25)
+    lat_fine = np.arange(bb["lat_min"], bb["lat_max"] + 0.01, 0.25)
+    lon_grid, lat_grid = np.meshgrid(lon_fine, lat_fine)
+    z_grid = griddata((lons_raw, lats_raw), z, (lon_grid, lat_grid), method="cubic")
+
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        has_cartopy = True
+    except ImportError:
+        has_cartopy = False
+
+    with plt.rc_context(_MPL_STYLE):
+        if has_cartopy:
+            fig_mpl, ax = plt.subplots(
+                1, 1, figsize=(12, 7),
+                subplot_kw={"projection": ccrs.PlateCarree()},
+            )
+            ax.set_facecolor(_OCEAN_COLOR)
+            ax.set_extent(
+                [bb["lon_min"], bb["lon_max"], bb["lat_min"], bb["lat_max"]],
+                crs=ccrs.PlateCarree(),
+            )
+            ax.add_feature(cfeature.OCEAN, color=_OCEAN_COLOR, zorder=0)
+            ax.add_feature(cfeature.LAND,  color=_LAND_COLOR,  zorder=0)
+            ax.add_feature(cfeature.BORDERS, linewidth=0.5,
+                           edgecolor=_BORDER_CLR, zorder=2)
+            ax.coastlines(linewidth=0.8, color=_COAST_COLOR, zorder=2)
+            cf = ax.contourf(
+                lon_grid, lat_grid, z_grid, levels=levels,
+                cmap=cmap, extend="both",
+                transform=ccrs.PlateCarree(), zorder=1,
+            )
+            gl = ax.gridlines(draw_labels=True, linewidth=0.4,
+                              color="#e2e8f0", alpha=0.9)
+            gl.top_labels = False
+            gl.right_labels = False
+            gl.xlabel_style = {"color": INK_MUTED, "size": 7}
+            gl.ylabel_style = {"color": INK_MUTED, "size": 7}
+        else:
+            fig_mpl, ax = plt.subplots(1, 1, figsize=(12, 7))
+            cf = ax.contourf(lon_grid, lat_grid, z_grid, levels=levels,
+                             cmap=cmap, extend="both")
+            ax.set_xlim(bb["lon_min"], bb["lon_max"])
+            ax.set_ylim(bb["lat_min"], bb["lat_max"])
+            ax.set_xlabel("Longitude")
+            ax.set_ylabel("Latitude")
+
+        cbar = fig_mpl.colorbar(cf, ax=ax, orientation="horizontal",
+                                pad=0.06, fraction=0.046, label=f"Anomaly ({unit})")
+        cbar.ax.xaxis.label.set_color(INK_SECONDARY)
+        cbar.ax.tick_params(labelsize=7, colors=INK_MUTED)
+        cbar.outline.set_edgecolor(GRIDLINE)
+        ax.set_title(title, pad=8, fontsize=13, fontweight="bold")
+        plt.tight_layout()
+    return fig_mpl
 
 
 # ══════════════════════════════════════════════════════════════════════════════

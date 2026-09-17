@@ -18,10 +18,12 @@ Method (trading-week version)
    products share the same 50 perturbed members, so member 07 is the same
    atmosphere in each.
 
-The proper input is 500 hPa geopotential members (regime clustering). That
-field is not in Databricks yet; when it lands, build its member × feature
-matrix and call cluster_members() unchanged — everything downstream is
-provider-agnostic.
+Spatial variant: spatial_member_matrix() builds the same member × feature
+matrix from the gridded Meteomatics member anomaly (fcst_member_spatial),
+weekly-averaged per grid point, reduced with PCA. The proper input is 500 hPa
+geopotential members (regime clustering); only ecmwf-aifs-ens carries Z500
+members today, so temperature is the proxy (SCENARIO_USE_GEOPOTENTIAL flag).
+Everything downstream of cluster_members() is provider-agnostic.
 
 Member ID normalisation: 'M07' / '07' / 7 / 'ens07' / 'pf07' -> 7.
 """
@@ -35,7 +37,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
-from _config import SCENARIO_K_DEFAULT, SCENARIO_MIN_MEMBERS, SCENARIO_MIN_WEEK_DAYS
+from _config import SCENARIO_K_DEFAULT, SCENARIO_MIN_MEMBERS, SCENARIO_MIN_WEEK_DAYS, SPATIAL_N_PCA
 
 OTHER_LABEL = 0   # scenario id reserved for the "Other" fold
 
@@ -116,11 +118,54 @@ def weekly_member_matrix(members: pd.DataFrame, areas: list[str], weeks: list[pd
     return wide
 
 
+def spatial_member_matrix(grid_by_week: dict, n_components: int = SPATIAL_N_PCA) -> pd.DataFrame:
+    """PCA-reduced member × feature matrix from gridded member anomalies, per trading week.
+
+    `grid_by_week` maps week_start -> DataFrame(member, latitude, longitude, anomaly)
+    already averaged over that week's days (load_member_spatial_days). Each week's
+    grid becomes a block of columns; the blocks are concatenated so a member's
+    row is its weekly anomaly map for every clustered week, then PCA keeps the
+    dominant spatial modes (~1 800 grid points at 1° would otherwise swamp
+    k-means). Returns DataFrame(member_id × PC1..PCn) with attrs
+    explained_variance_pct and n_grid_points.
+    """
+    from sklearn.decomposition import PCA
+
+    blocks = []
+    for ws, g in grid_by_week.items():
+        if g is None or g.empty:
+            continue
+        d = g.copy()
+        d["member_id"] = d["member"].map(normalise_member)
+        d = d.dropna(subset=["member_id"])
+        d["gp"] = pd.Timestamp(ws).strftime("%Y%m%d") + "_" + d["latitude"].astype(str) + "_" + d["longitude"].astype(str)
+        wide = d.pivot_table(index="member_id", columns="gp", values="anomaly")
+        blocks.append(wide.dropna(axis=1, how="all"))
+    if not blocks:
+        return pd.DataFrame()
+    wide = pd.concat(blocks, axis=1, join="inner").dropna(axis=0, how="any")
+    if wide.empty or wide.shape[0] < 4:
+        return pd.DataFrame()
+    n_comp = int(min(n_components, wide.shape[0] - 1, wide.shape[1]))
+    pca = PCA(n_components=n_comp)
+    pcs = pca.fit_transform(wide.values)
+    out = pd.DataFrame(pcs, index=wide.index.astype(int), columns=[f"PC{i + 1}" for i in range(pcs.shape[1])])
+    out.index.name = "member_id"
+    out.attrs["explained_variance_pct"] = float(pca.explained_variance_ratio_.sum() * 100)
+    out.attrs["n_grid_points"] = int(wide.shape[1] // max(1, len(blocks)))
+    return out
+
+
 # ─── clustering ─────────────────────────────────────────────────────────────────
 
 def cluster_members(features: pd.DataFrame, k: int = SCENARIO_K_DEFAULT, seed: int = 42,
-                    min_members: int = SCENARIO_MIN_MEMBERS) -> dict:
+                    min_members: int = SCENARIO_MIN_MEMBERS, scale: bool = True) -> dict:
     """K-means with a fixed k on the member feature matrix.
+
+    `scale=True` standardises each column (country × week anomalies in °C, so
+    every feature weighs the same). Use `scale=False` for PCA scores: their
+    variance ordering IS the signal, and standardising would give the noise
+    components the same weight as the leading mode.
 
     Returns dict with:
       assignments  DataFrame(member_id, scenario, raw_label)
@@ -131,7 +176,7 @@ def cluster_members(features: pd.DataFrame, k: int = SCENARIO_K_DEFAULT, seed: i
     """
     if features.empty or features.shape[0] < 4:
         return {}
-    X = StandardScaler().fit_transform(features.values)
+    X = StandardScaler().fit_transform(features.values) if scale else features.values.astype(float)
     k = int(max(2, min(k, features.shape[0] - 1)))
     km = KMeans(n_clusters=k, n_init=20, random_state=seed).fit(X)
     labels = km.labels_

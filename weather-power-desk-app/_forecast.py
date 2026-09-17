@@ -23,11 +23,12 @@ from _config import (
     AREAS, DEFAULT_AREAS, METRICS, DEFAULT_METRIC, VOLUE_MODELS, DEFAULT_MODEL,
     METEOMATICS_MODELS, SPREAD_RATIO_HIGH, SPREAD_RATIO_LOW, SCENARIO_SOURCES,
     SCENARIO_DEFAULT_AREAS, SCENARIO_OUTPUT_AREAS, SCENARIO_K_DEFAULT, SCENARIO_K_MAX,
+    SCENARIO_USE_GEOPOTENTIAL, SPATIAL_N_PCA, SPATIAL_GRID_RES,
     area_label,
 )
 from _data import (
     load_runs, load_fcst_daily, load_spread_clim, load_member_sources, load_members,
-    load_meteologica_members, format_run, snap_to_init_time,
+    load_meteologica_members, load_member_spatial_days, format_run, snap_to_init_time,
 )
 from _charts import (
     AREA_COLORS, make_fan_chart, make_anomaly_heatmap,
@@ -35,8 +36,9 @@ from _charts import (
     make_scenario_table_heatmap, make_country_scenario_panel, scenario_color,
 )
 from _scenarios import (
-    available_weeks, weekly_member_matrix, cluster_members, apply_scenarios, scenario_daily_summary,
-    scenario_weekly_values, scenario_table, scenario_name, describe_scenario, silhouette_for_k,
+    available_weeks, weekly_member_matrix, spatial_member_matrix, cluster_members, apply_scenarios,
+    scenario_daily_summary, scenario_weekly_values, scenario_table, scenario_name, describe_scenario,
+    silhouette_for_k,
 )
 from _ui import anomaly_kpi, kpi_card, kpi_row, status_banner
 
@@ -315,16 +317,23 @@ def _render_scenarios(runs: pd.DataFrame):
                       "if the Volue tags are percentiles rather than members, clustering is not possible.", "critical")
         return
     if not any(v["provider"] == "Meteomatics" for v in avail.values()):
-        status_banner("Meteomatics EC-ENS / AIFS-ENS members are not in the silver tables (ensemble mean only), and "
-                      "geopotential members are not in Databricks yet. Clustering runs on Volue EC-ENS member "
-                      "temperatures — the same 50 ECMWF perturbations. Set METEOMATICS_MEMBER_TABLE to switch.", "warning")
+        status_banner("No Meteomatics EC-ENS / AIFS-ENS member rows in fcst_members yet (the refresh job reads them "
+                      "from curve_member in the silver temperature table). Country-mean clustering runs on Volue "
+                      "EC-ENS member temperatures — the same 50 ECMWF perturbations.", "warning")
 
-    c1, c2 = st.columns([1.6, 4])
+    c1, c2, c3 = st.columns([1.6, 3.2, 1.6])
     with c1:
         source = st.selectbox("Cluster on", list(avail.keys()), key="fs_source")
     with c2:
         areas = st.multiselect("Feature countries (weekly-mean temperature anomaly)", list(AREAS.keys()),
                                [a for a in SCENARIO_DEFAULT_AREAS if a in AREAS], format_func=area_label, key="fs_areas")
+    with c3:
+        use_spatial = st.checkbox(
+            "Spatial grid clustering", value=False, key="fs_spatial",
+            help=f"Cluster on the full European weekly-mean anomaly FIELD (Meteomatics ecmwf-ens members, "
+                 f"{SPATIAL_GRID_RES:g}° grid, PCA to {SPATIAL_N_PCA} components) instead of country averages. "
+                 + ("Field: Z500 geopotential." if SCENARIO_USE_GEOPOTENTIAL else
+                    "Field: temperature as a proxy — Z500 members exist only for ecmwf-aifs-ens today."))
     if not areas:
         st.info("Select at least one feature country.")
         return
@@ -365,26 +374,68 @@ def _render_scenarios(runs: pd.DataFrame):
         return
     weeks_sel = usable[usable["week_start"].isin(weeks_pick)].sort_values("week_start")
 
-    features = weekly_member_matrix(temp_m, areas, list(weeks_sel["week_start"]), "anomaly")
+    spatial_ref = None
+    if use_spatial:
+        grid_by_week = {}
+        try:
+            for _, wk in weeks_sel.iterrows():
+                g = load_member_spatial_days(wk["first_day"], wk["last_day"])
+                if not g.empty:
+                    grid_by_week[wk["week_start"]] = g
+                    spatial_ref = g["reference_date"].max()
+        except Exception as e:
+            st.error(f"Failed to load spatial member data: {e}")
+            return
+        if not grid_by_week:
+            status_banner("fcst_member_spatial has no rows for these weeks — run power_desk_refresh.py.", "warning")
+            return
+        features = spatial_member_matrix(grid_by_week)
+    else:
+        features = weekly_member_matrix(temp_m, areas, list(weeks_sel["week_start"]), "anomaly")
     if features.empty or features.shape[0] < 6:
         status_banner("Not enough complete members to cluster for this selection.", "warning")
         return
-    res = cluster_members(features, int(k))
+    res = cluster_members(features, int(k), scale=not use_spatial)   # PCA scores keep their variance ordering
     if not res:
         status_banner("Clustering failed — too few members.", "warning")
         return
     assign = res["assignments"]
     n_tot = res["n_members"]
-    st.caption(f"{source} · run {pd.Timestamp(cfg['reference_date']):%a %d %b %H:%M} UTC · {n_tot} members · "
-               f"features: weekly-mean T anomaly × {len(areas)} countries × {len(weeks_sel)} week(s) "
-               f"({', '.join(weeks_sel['week_label'])}) · k={res['k']} fixed · silhouette {res['silhouette']:.2f} (diagnostic)")
+    if use_spatial:
+        field = "Z500 geopotential" if SCENARIO_USE_GEOPOTENTIAL else "temperature (proxy for Z500)"
+        st.caption(f"Spatial clustering · Meteomatics ecmwf-ens · run {pd.Timestamp(spatial_ref):%a %d %b %H:%M} UTC · "
+                   f"{n_tot} members · {features.attrs.get('n_grid_points', 0)} grid points ({SPATIAL_GRID_RES:g}°) × "
+                   f"{len(weeks_sel)} week(s) ({', '.join(weeks_sel['week_label'])}) · PCA {features.shape[1]} PCs "
+                   f"({features.attrs.get('explained_variance_pct', 0):.0f}% var) · {field} · k={res['k']} fixed · "
+                   f"silhouette {res['silhouette']:.2f} (diagnostic)")
+        if not SCENARIO_USE_GEOPOTENTIAL:
+            status_banner("Spatial clustering uses weekly temperature maps as a proxy for Z500 — switch "
+                          "SCENARIO_USE_GEOPOTENTIAL on when ecmwf-ens geopotential members are ingested.", "warning")
+    else:
+        st.caption(f"{source} · run {pd.Timestamp(cfg['reference_date']):%a %d %b %H:%M} UTC · {n_tot} members · "
+                   f"features: weekly-mean T anomaly × {len(areas)} countries × {len(weeks_sel)} week(s) "
+                   f"({', '.join(weeks_sel['week_label'])}) · k={res['k']} fixed · silhouette {res['silhouette']:.2f} (diagnostic)")
 
+    tagged_t = apply_scenarios(temp_m, assign)
     scen_ids = sorted(s for s in res["sizes"] if s != 0) + ([0] if 0 in res["sizes"] else [])
     cards = []
     for s in scen_ids:
         share = res["sizes"][s] / n_tot
-        desc = (describe_scenario(res["centroids"].loc[s], share) if s != 0
-                else f"{share:.0%} of members in clusters too small to keep")
+        if s == 0:
+            desc = f"{share:.0%} of members in clusters too small to keep"
+        elif use_spatial:
+            # centroids are PC scores — describe the cluster through its members' country temperatures
+            st_ = tagged_t[(tagged_t["scenario"] == s) & tagged_t["week_start"].isin(weeks_sel["week_start"])]
+            if st_.empty or st_["anomaly"].isna().all():
+                desc = f"{share:.0%} of members"
+            else:
+                by_area = st_.groupby("area")["anomaly"].mean().sort_values()
+                ma = float(st_["anomaly"].mean())
+                tone = "warm" if ma > 0.75 else ("cold" if ma < -0.75 else "near-normal")
+                desc = (f"{share:.0%} of members · {tone} on average ({ma:+.1f}°C) · coldest {by_area.index[0]} "
+                        f"({by_area.iloc[0]:+.1f}), warmest {by_area.index[-1]} ({by_area.iloc[-1]:+.1f})")
+        else:
+            desc = describe_scenario(res["centroids"].loc[s], share)
         cards.append(
             f'<div class="kpi-card" style="border-top:3px solid {scenario_color(s)}; text-align:left;">'
             f'<div class="kpi-label">{scenario_name(s)}</div>'

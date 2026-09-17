@@ -35,7 +35,7 @@ from datetime import datetime
 VOLUE = "dna_prod_silver.volue"                 # set to the delta-share catalog if mounted elsewhere
 MM = "dna_prod_silver.meteomatics"
 SBX = "dna_snbx_weather.power_desk"
-APP_SP = "34723e4c-6c84-42cb-8014-16478ddd2599"  # Databricks App service principal (same SP as the LPG app)
+APP_SP = "82058742-a661-4413-9d6c-9fffe0f6e45d"  # weather-power-desk-app service principal
 
 METEOMATICS_MEMBER_TABLE = ""   # e.g. "dna_snbx_weather.meteomatics_members.temperature_forecast_members"
 METEOLOGICA_TABLE = ""          # e.g. "dna_snbx_weather.meteologica.ensext_daily"
@@ -110,16 +110,17 @@ def count(table: str) -> None:
 # COMMAND ----------
 
 # DBTITLE 1,1. Forecast runs kept per model family
-# Runs are identified by reference_date (data-arrival time, ~2 h after the NWP
-# init); the app snaps them to the nearest 00z/12z for display. Run discovery
-# is done on the temperature table — every other metric of the same run
-# arrives within minutes of it, and the daily stats query below matches each
-# metric's rows on its own reference_date within a ±3 h window.
+# Runs are identified by reference_date (data-arrival time) + init_hour
+# (derived from the pattern name: ec00ens → 0, ec12ens → 12, etc.).
+# Volue publishes both 00z and 12z with the SAME reference_date (~22:00 UTC),
+# so init_hour is essential to keep them as distinct runs.
 run_unions = []
 for family, patterns in VOLUE_MODELS.items():
     for pat in patterns:
+        init_hour = 12 if "12" in pat else 0
         run_unions.append(f"""
-        SELECT '{family}' AS model_family, '{pat}' AS pattern, reference_date
+        SELECT '{family}' AS model_family, '{pat}' AS pattern,
+               {init_hour} AS init_hour, reference_date
         FROM {VOLUE}.temperature_consumption_forecast
         WHERE curve_name LIKE '%{pat}%' AND data_type = 'F' AND tag = 'Avg'
           AND array_contains(categories, 'TT')
@@ -131,11 +132,12 @@ spark.sql(f"""
 CREATE OR REPLACE TABLE {SBX}.fcst_runs AS
 WITH all_runs AS ({" UNION ALL ".join(run_unions)}),
 ranked AS (
-  SELECT model_family, pattern, reference_date,
-         DENSE_RANK() OVER (PARTITION BY model_family ORDER BY reference_date DESC) AS run_rank
+  SELECT model_family, pattern, init_hour, reference_date,
+         DENSE_RANK() OVER (PARTITION BY model_family
+                            ORDER BY reference_date DESC, init_hour DESC) AS run_rank
   FROM all_runs
 )
-SELECT model_family, pattern, reference_date, run_rank,
+SELECT model_family, pattern, init_hour, reference_date, run_rank,
        CASE WHEN run_rank = 1 THEN 'Latest' ELSE CONCAT('Latest -', run_rank - 1) END AS run_label,
        current_timestamp() AS snapshot_ts
 FROM ranked WHERE run_rank <= {N_RUNS_KEPT}
@@ -148,7 +150,7 @@ count("fcst_runs")
 metric_blocks = []
 for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
     metric_blocks.append(f"""
-    SELECT 'Volue' AS provider, r.model_family, r.pattern, r.reference_date, r.run_rank, r.run_label,
+    SELECT 'Volue' AS provider, r.model_family, r.pattern, r.init_hour, r.reference_date, r.run_rank, r.run_label,
            '{name}' AS metric, f.area, {CET_DAY} AS day, f.tag, AVG(f.value) * {scale} AS value
     FROM {VOLUE}.{fcst_tbl} f
     JOIN {SBX}.fcst_runs r
@@ -157,7 +159,7 @@ for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
     WHERE array_contains(f.categories, '{cat}') AND f.data_type = 'F'
       AND f.area IN ({AREA_SQL})
       AND f.delivery_start >= current_date() - INTERVAL 2 DAYS
-    GROUP BY r.model_family, r.pattern, r.reference_date, r.run_rank, r.run_label, f.area, {CET_DAY}, f.tag
+    GROUP BY r.model_family, r.pattern, r.init_hour, r.reference_date, r.run_rank, r.run_label, f.area, {CET_DAY}, f.tag
     """)
 
 normal_blocks = []
@@ -175,7 +177,7 @@ spark.sql(f"""
 CREATE OR REPLACE TABLE {SBX}.fcst_daily AS
 WITH member_daily AS ({" UNION ALL ".join(metric_blocks)}),
 agg AS (
-  SELECT provider, model_family, pattern, reference_date, run_rank, run_label, metric, area, day,
+  SELECT provider, model_family, pattern, init_hour, reference_date, run_rank, run_label, metric, area, day,
          MAX(CASE WHEN tag = 'Avg' THEN value END)                          AS ens_mean,
          percentile_approx(CASE WHEN tag != 'Avg' THEN value END, 0.10)     AS p10,
          percentile_approx(CASE WHEN tag != 'Avg' THEN value END, 0.25)     AS p25,
@@ -187,10 +189,10 @@ agg AS (
          MAX(CASE WHEN tag != 'Avg' THEN value END)                         AS ens_max,
          COUNT(DISTINCT CASE WHEN tag != 'Avg' THEN tag END)                AS n_members
   FROM member_daily
-  GROUP BY provider, model_family, pattern, reference_date, run_rank, run_label, metric, area, day
+  GROUP BY provider, model_family, pattern, init_hour, reference_date, run_rank, run_label, metric, area, day
 ),
 normals AS ({" UNION ALL ".join(normal_blocks)})
-SELECT a.provider, a.model_family, a.pattern, a.reference_date, a.run_rank, a.run_label,
+SELECT a.provider, a.model_family, a.pattern, a.init_hour, a.reference_date, a.run_rank, a.run_label,
        a.metric, a.area, a.day,
        DATEDIFF(a.day, DATE(a.reference_date)) AS lead_day,
        COALESCE(a.ens_mean, a.p50) AS ens_mean,
@@ -234,7 +236,7 @@ normals AS (
     AND delivery_start BETWEEN current_date() - INTERVAL 2 DAYS AND current_date() + INTERVAL 50 DAYS
   GROUP BY area, {CET_DAY}
 )
-SELECT m.provider, m.model_family, m.pattern, m.reference_date, m.run_rank, m.run_label,
+SELECT m.provider, m.model_family, m.pattern, 0 AS init_hour, m.reference_date, m.run_rank, m.run_label,
        m.metric, m.area, m.day, DATEDIFF(m.day, DATE(m.reference_date)) AS lead_day,
        m.ens_mean, NULL AS p10, NULL AS p25, NULL AS p50, NULL AS p75, NULL AS p90,
        NULL AS spread_std, NULL AS ens_min, NULL AS ens_max, 0 AS n_members,
@@ -345,23 +347,89 @@ count("fcst_members")
 
 # COMMAND ----------
 
-# DBTITLE 1,4b. Meteomatics per-member country means (only if a member table exists)
-if METEOMATICS_MEMBER_TABLE:
-    cols = {f.name.lower() for f in spark.table(METEOMATICS_MEMBER_TABLE).schema.fields}
-    member_col = next((c for c in ("member", "ens_member", "perturbation", "number") if c in cols), None)
-    run_col = "created_at" if "created_at" in cols else "reference_date"
-    if member_col is None:
-        print(f"{METEOMATICS_MEMBER_TABLE} has no member column — skipping Meteomatics members")
-    else:
-        for label, (model, curve) in METEOMATICS_MODELS.items():
-            spark.sql(f"""
+# DBTITLE 1,4b. Gridded member spatial anomaly (for spatial k-means clustering)
+# ---------------------------------------------------------------------------
+# Gridded per-member temperature anomaly for spatial k-means clustering.
+#
+# TODO(lorenzo): Switch to geopotential_height_forecast (Z500) when ecmwf-ens
+# gets geopotential members. Currently only ecmwf-aifs-ens has Z500; the
+# standard ecmwf-ens (whose 50 perturbations match Volue member IDs) does not.
+# Using temperature spatial anomaly as a proxy until then.
+# ---------------------------------------------------------------------------
+SPATIAL_MODEL = "ecmwf-ens"
+SPATIAL_CURVE = "t_mean_2m_24h_c_ecmwf_ens_p1d"
+BB_LAT = (35, 72)
+BB_LON = (-12, 35)
+GRID_RES = 1.0  # coarsen from native 0.5° to 1° for manageable feature space
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {SBX}.fcst_member_spatial AS
+WITH latest AS (
+  SELECT MAX(created_at) AS max_ca
+  FROM {MM}.temperature_forecast
+  WHERE model = '{SPATIAL_MODEL}' AND curve_name = '{SPATIAL_CURVE}'
+),
+raw AS (
+  SELECT curve_member AS member,
+         DATE(delivery_start) AS day,
+         ROUND(CAST(latitude AS DOUBLE) / {GRID_RES}) * {GRID_RES} AS latitude,
+         ROUND(CAST(longitude AS DOUBLE) / {GRID_RES}) * {GRID_RES} AS longitude,
+         AVG(value) AS value
+  FROM {MM}.temperature_forecast, latest
+  WHERE model = '{SPATIAL_MODEL}' AND curve_name = '{SPATIAL_CURVE}'
+    AND created_at = latest.max_ca
+    AND latitude BETWEEN {BB_LAT[0]} AND {BB_LAT[1]}
+    AND longitude BETWEEN {BB_LON[0]} AND {BB_LON[1]}
+    AND curve_member IS NOT NULL AND curve_member != ''
+  GROUP BY curve_member, DATE(delivery_start),
+           ROUND(CAST(latitude AS DOUBLE) / {GRID_RES}) * {GRID_RES},
+           ROUND(CAST(longitude AS DOUBLE) / {GRID_RES}) * {GRID_RES}
+),
+ens_mean AS (
+  SELECT day, latitude, longitude, AVG(value) AS ens_mean
+  FROM raw GROUP BY day, latitude, longitude
+)
+SELECT 'Meteomatics' AS provider, '{SPATIAL_MODEL}' AS model,
+       (SELECT max_ca FROM latest) AS reference_date,
+       'Temperature' AS metric,
+       r.member, r.day,
+       DATEDIFF(r.day, DATE((SELECT max_ca FROM latest))) AS lead_day,
+       r.latitude, r.longitude, r.value,
+       e.ens_mean, r.value - e.ens_mean AS anomaly,
+       current_timestamp() AS snapshot_ts
+FROM raw r
+JOIN ens_mean e ON e.day = r.day AND e.latitude = r.latitude AND e.longitude = r.longitude
+""")
+count("fcst_member_spatial")
+
+# COMMAND ----------
+
+# DBTITLE 1,4c. Meteomatics per-member country means (curve_member in the silver table)
+# The silver temperature_forecast table carries individual members in
+# `curve_member` (the spatial cell above relies on it). Country means of those
+# members feed the "Meteomatics EC-ENS / AIFS-ENS members" scenario sources.
+# METEOMATICS_MEMBER_TABLE can still point at another member table.
+MEMBER_SRC = METEOMATICS_MEMBER_TABLE or f"{MM}.temperature_forecast"
+cols = {f.name.lower() for f in spark.table(MEMBER_SRC).schema.fields}
+member_col = next((c for c in ("curve_member", "member", "ens_member", "perturbation", "number") if c in cols), None)
+run_col = "created_at" if "created_at" in cols else "reference_date"
+if member_col is None:
+    print(f"{MEMBER_SRC} has no member column — Meteomatics members not available; "
+          "scenarios will cluster Volue EC-ENS members")
+else:
+    for label, (model, curve) in METEOMATICS_MODELS.items():
+        curve_filter = f"AND curve_name = '{curve}'" if "curve_name" in cols else ""
+        spark.sql(f"""
             INSERT INTO {SBX}.fcst_members
-            WITH latest AS (SELECT MAX({run_col}) AS rd FROM {METEOMATICS_MEMBER_TABLE} WHERE model = '{model}'),
+            WITH latest AS (SELECT MAX({run_col}) AS rd FROM {MEMBER_SRC}
+                            WHERE model = '{model}' {curve_filter}
+                              AND {member_col} IS NOT NULL AND CAST({member_col} AS STRING) != ''),
             country AS (
               SELECT {run_col} AS reference_date, {COUNTRY_CASE} AS area, DATE(delivery_start) AS day,
                      CAST({member_col} AS STRING) AS member, AVG(value) AS value
-              FROM {METEOMATICS_MEMBER_TABLE}, latest
-              WHERE model = '{model}' AND {run_col} = latest.rd
+              FROM {MEMBER_SRC}, latest
+              WHERE model = '{model}' {curve_filter} AND {run_col} = latest.rd
+                AND {member_col} IS NOT NULL AND CAST({member_col} AS STRING) != ''
                 AND latitude BETWEEN 36 AND 66 AND longitude BETWEEN -10 AND 30
               GROUP BY {run_col}, {COUNTRY_CASE}, DATE(delivery_start), {member_col}
             ),
@@ -378,10 +446,7 @@ if METEOMATICS_MEMBER_TABLE:
             FROM country c LEFT JOIN normals n ON n.area = c.area AND n.day = c.day
             WHERE c.area IS NOT NULL
             """)
-        count("fcst_members")
-else:
-    print("METEOMATICS_MEMBER_TABLE not set — Meteomatics members not available; "
-          "scenarios will cluster Volue EC-ENS members")
+    count("fcst_members")
 
 # COMMAND ----------
 
@@ -596,3 +661,47 @@ else:
     print("METEOLOGICA_TABLE not set — meteologica_members left as-is")
 
 print(f"Refresh finished: {datetime.now()}")
+
+# COMMAND ----------
+
+# DBTITLE 1,8. Anomaly maps — monthly grid-point averages from gold layer (ERA5)
+# Pre-aggregate the ERA5 climatology from the gold layer into monthly
+# grid-point means. The app reads this sandbox table instead of querying
+# the gold catalog directly (the app SP has no USE CATALOG on dna_prod_gold).
+#
+# Same approach as the gas desk anomaly_map table: notebook runs as the user
+# (who does have access), sandbox table inherits the SP grants.
+
+GOLD = "dna_prod_gold.weather"
+BBOX = "CAST(latitude AS DOUBLE) BETWEEN 35 AND 72 AND CAST(longitude AS DOUBLE) BETWEEN -12 AND 35"
+
+MAP_SOURCES = [
+    ("Temperature",          "temperature_meteomatics_climatology",              "t_mean_2m_24h_c_ecmwf_era5_p1d",      "°C"),
+    ("Wind speed (200 hPa)", "wind_speed_meteomatics_climatology",               "wind_speed_200hpa_ms_ecmwf_era5_p1d",  "m/s"),
+    ("Precipitation",        "precipitation_forecast_meteomatics_climatology",   "precip_24h_mm_mix_p1d",                "mm"),
+]
+
+blocks = []
+for metric_name, table, curve, unit in MAP_SOURCES:
+    blocks.append(f"""
+    SELECT '{metric_name}' AS metric,
+           CAST(latitude AS DOUBLE) AS latitude,
+           CAST(longitude AS DOUBLE) AS longitude,
+           FIRST(city) AS city,
+           YEAR(delivery_start) AS year,
+           MONTH(delivery_start) AS month,
+           AVG(value) AS value,
+           AVG(normal) AS normal,
+           AVG(anomaly) AS anomaly
+    FROM {GOLD}.{table}
+    WHERE curve_name = '{curve}' AND {BBOX}
+    GROUP BY latitude, longitude, YEAR(delivery_start), MONTH(delivery_start)
+    """)
+
+full_sql = " UNION ALL ".join(blocks)
+spark.sql(f"""
+    CREATE OR REPLACE TABLE {SBX}.anomaly_map AS
+    SELECT *, current_timestamp() AS snapshot_ts
+    FROM ({full_sql})
+""")
+count("anomaly_map")

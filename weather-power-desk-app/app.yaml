@@ -23,6 +23,9 @@ env:
   - name: METEOLOGICA_TABLE
     description: "Optional Meteologica table; empty = tab shows not-ingested notice"
     value: ""
+  - name: GOLD_SCHEMA
+    description: "Gold-layer Meteomatics climatology schema (ERA5 gridded anomalies for maps)"
+    value: "dna_prod_gold.weather"
 
 resources:
   - name: sql-warehouse
