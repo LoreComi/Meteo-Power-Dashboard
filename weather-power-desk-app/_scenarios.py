@@ -31,7 +31,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
-from _config import SCENARIO_K_RANGE, SCENARIO_MIN_MEMBERS
+from _config import SCENARIO_K_RANGE, SCENARIO_MIN_MEMBERS, SPATIAL_N_PCA
 
 OTHER_LABEL = 0   # scenario id reserved for the "Other" fold
 
@@ -76,6 +76,55 @@ def member_matrix(members: pd.DataFrame, areas: list[str], lead_days: tuple[int,
     wide = wide.dropna(axis=1, how="all").dropna(axis=0, how="any")
     wide.index = wide.index.astype(int)
     return wide
+
+
+def spatial_member_matrix(grid_df: pd.DataFrame,
+                          n_components: int = SPATIAL_N_PCA) -> pd.DataFrame:
+    """Build a PCA-reduced feature matrix from gridded member anomaly data.
+
+    The input *grid_df* is already averaged across days by the SQL loader
+    (``load_member_spatial``), so each row is one (member, lat, lon) with a
+    single anomaly value.
+
+    Steps
+    -----
+    1. Pivot to (member × grid_points).
+    2. PCA to *n_components* — the 50 members live in a very high-dimensional
+       space (~1 800 grid points at 1°); PCA keeps the dominant modes of
+       spatial variability while discarding noise.
+    3. Return DataFrame with member_id index and PC columns, ready for
+       ``cluster_members()``.
+    """
+    from sklearn.decomposition import PCA
+
+    if grid_df.empty:
+        return pd.DataFrame()
+    df = grid_df.copy()
+    df["member_id"] = df["member"].map(normalise_member)
+    df = df.dropna(subset=["member_id"])
+
+    # Pivot to wide: member × grid_points (already day-averaged by SQL)
+    df["gp"] = df["latitude"].astype(str) + "_" + df["longitude"].astype(str)
+    wide = df.pivot_table(index="member_id", columns="gp", values="anomaly")
+    wide = wide.dropna(axis=1, how="all").dropna(axis=0, how="any")
+
+    if wide.empty or wide.shape[0] < 4:
+        return pd.DataFrame()
+
+    n_comp = min(n_components, wide.shape[0] - 1, wide.shape[1])
+    pca = PCA(n_components=n_comp)
+    pcs = pca.fit_transform(wide.values)
+
+    result = pd.DataFrame(
+        pcs,
+        index=wide.index.astype(int),
+        columns=[f"PC{i+1}" for i in range(pcs.shape[1])],
+    )
+    result.index.name = "member_id"
+    # Stash explained variance for captions downstream
+    result.attrs["explained_variance_pct"] = float(pca.explained_variance_ratio_.sum() * 100)
+    result.attrs["n_grid_points"] = int(wide.shape[1])
+    return result
 
 
 def choose_k(X: np.ndarray, k_range: tuple[int, int] = SCENARIO_K_RANGE, seed: int = 42) -> tuple[int, dict[int, float]]:

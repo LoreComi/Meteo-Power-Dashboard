@@ -42,6 +42,37 @@ METEOMATICS_MEMBER_TABLE = os.environ.get("METEOMATICS_MEMBER_TABLE", "")
 #   member STRING, value DOUBLE
 METEOLOGICA_TABLE = os.environ.get("METEOLOGICA_TABLE", "")
 
+# Gold-layer Meteomatics climatology tables (ERA5 reanalysis, 0.5° grid,
+# value/normal/anomaly per grid point per day). Used for the anomaly maps tab
+# in the Historical section — read directly, not via the sandbox.
+GOLD_SCHEMA = os.environ.get("GOLD_SCHEMA", "dna_prod_gold.weather")
+
+MAP_METRICS: dict[str, dict] = {
+    "Temperature": {
+        "gold_table": "temperature_meteomatics_climatology",
+        "curve_name": "t_mean_2m_24h_c_ecmwf_era5_p1d",
+        "unit": "°C",
+        "symmetric": True,
+        "warm_is_positive": True,
+    },
+    "Wind speed (200 hPa)": {
+        "gold_table": "wind_speed_meteomatics_climatology",
+        "curve_name": "wind_speed_200hpa_ms_ecmwf_era5_p1d",
+        "unit": "m/s",
+        "symmetric": True,
+        "warm_is_positive": False,
+    },
+    "Precipitation": {
+        "gold_table": "precipitation_forecast_meteomatics_climatology",
+        "curve_name": "precip_24h_mm_mix_p1d",
+        "unit": "mm",
+        "symmetric": True,
+        "warm_is_positive": False,
+    },
+}
+
+MAP_EUROPE_BBOX = {"lat_min": 35, "lat_max": 72, "lon_min": -12, "lon_max": 35}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTIONS (landing tiles + sidebar)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -171,6 +202,17 @@ SPREAD_RATIO_LOW = 0.7               # below this = unusually confident
 SCENARIO_K_RANGE = (2, 5)            # k chosen by silhouette inside this range unless fixed
 SCENARIO_DEFAULT_HORIZON = (1, 10)   # lead days clustered on
 SCENARIO_MIN_MEMBERS = 3             # clusters smaller than this are folded into "Other"
+
+# ---------------------------------------------------------------------------
+# Spatial clustering (gridded member maps)
+# ---------------------------------------------------------------------------
+# TODO(lorenzo): Switch to Z500 geopotential when ecmwf-ens gets Z500 members.
+# Currently only ecmwf-aifs-ens has geopotential_height_500hpa members; the
+# standard ecmwf-ens (whose 50 perturbations match Volue member IDs) does not.
+# Using temperature spatial anomaly as a proxy until geopotential is available.
+SCENARIO_USE_GEOPOTENTIAL = False   # flip to True + update SPATIAL_* when Z500 lands
+SPATIAL_N_PCA = 10                  # PCA components for dimensionality reduction before k-means
+SPATIAL_GRID_RES = 1.0              # degrees (refresh notebook coarsens to this from native 0.5°)
 
 # Which member sources the scenario tab can cluster on. `table` is the sandbox
 # table power_desk_refresh.py writes; `available` is resolved at runtime.

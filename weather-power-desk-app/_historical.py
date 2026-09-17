@@ -17,11 +17,12 @@ import streamlit as st
 
 from _config import (
     AREAS, DEFAULT_AREAS, METRICS, DEFAULT_METRIC, MONTH_NAMES, WEATHER_INDEXES, ANALOG_N_YEARS,
-    SBX_SCHEMA, area_label,
+    SBX_SCHEMA, area_label, MAP_METRICS,
 )
-from _data import load_hist_years, load_hist_daily, load_hist_monthly_all, load_weather_indexes
+from _data import load_hist_years, load_hist_daily, load_hist_monthly_all, load_weather_indexes, load_anomaly_map
 from _charts import (
     make_year_month_heatmap, make_period_bars, make_period_lines, make_index_chart, make_anomaly_heatmap,
+    make_geo_anomaly_map,
 )
 from _ui import anomaly_kpi, kpi_row, status_banner
 
@@ -201,12 +202,63 @@ def _render_analogues():
                                      m["warm_is_positive"]), use_container_width=True)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — ANOMALY MAPS (gold layer)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _render_maps():
+    """Gridded ERA5 anomaly maps from dna_prod_gold.weather for temperature,
+    wind and precipitation. User selects metric, year(s) and month(s); the
+    query averages the anomaly per grid point over the selection."""
+    from datetime import datetime as _dt
+    cur_year = _dt.now().year
+    c1, c2, c3 = st.columns([1.4, 2.2, 3])
+    with c1:
+        metric = st.selectbox("Variable", list(MAP_METRICS.keys()), key="map_metric")
+    with c2:
+        years = st.multiselect("Years", list(range(cur_year, 1977, -1)), [cur_year], key="map_years")
+    with c3:
+        months = st.multiselect("Months", list(range(1, 13)),
+                                [_dt.now().month],
+                                format_func=lambda m: MONTH_NAMES[m - 1], key="map_months")
+    if not (years and months):
+        st.info("Select at least one year and one month.")
+        return
+
+    m = MAP_METRICS[metric]
+    with st.spinner("Loading anomaly map..."):
+        try:
+            df = load_anomaly_map(metric, tuple(sorted(years)), tuple(sorted(months)))
+        except Exception as e:
+            st.error(f"Failed to load anomaly map: {e}")
+            return
+    if df.empty:
+        st.warning("No data for that selection.")
+        return
+
+    period_label = ", ".join(MONTH_NAMES[mm - 1] for mm in sorted(months))
+    year_label = ", ".join(str(y) for y in sorted(years))
+    title = f"{metric} anomaly \u2014 {period_label} {year_label}"
+
+    fig_mpl = make_geo_anomaly_map(df, m["unit"], title, m["symmetric"], m["warm_is_positive"])
+    st.pyplot(fig_mpl, use_container_width=True)
+    import matplotlib.pyplot as plt
+    plt.close(fig_mpl)
+
+    # Summary stats
+    mean_anom = df["anomaly"].mean()
+    st.caption(f"{len(df):,} grid points \u00b7 mean anomaly {mean_anom:+.2f} {m['unit']} "
+               f"\u00b7 source: {SBX_SCHEMA}.anomaly_map (ERA5 via gold layer)")
+
+
 def render_historical():
     st.markdown("#### HISTORICAL & ANALYSIS")
     st.caption("Volue actuals vs 30-year normal by country since 2013 · monthly and weekly · multi-year and "
-               "multi-month selections · analogues from weather indexes.")
-    tabs = st.tabs(["History by country", "Analogues (weather indexes)"])
+               "multi-month selections · ERA5 anomaly maps · analogues from weather indexes.")
+    tabs = st.tabs(["History by country", "Anomaly Maps", "Analogues (weather indexes)"])
     with tabs[0]:
         _render_history()
     with tabs[1]:
+        _render_maps()
+    with tabs[2]:
         _render_analogues()

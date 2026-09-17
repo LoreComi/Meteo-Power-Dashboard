@@ -21,11 +21,12 @@ from _config import (
     AREAS, DEFAULT_AREAS, METRICS, DEFAULT_METRIC, VOLUE_MODELS, DEFAULT_MODEL,
     METEOMATICS_MODELS, SPREAD_RATIO_HIGH, SPREAD_RATIO_LOW, SCENARIO_SOURCES,
     SCENARIO_DEFAULT_AREAS, SCENARIO_DEFAULT_HORIZON, SCENARIO_K_RANGE, METEOMATICS_MEMBER_TABLE,
+    SCENARIO_USE_GEOPOTENTIAL, SPATIAL_N_PCA,
     area_label,
 )
 from _data import (
     load_runs, load_fcst_daily, load_spread_clim, load_member_sources, load_members,
-    load_meteologica_members, format_run,
+    load_meteologica_members, load_member_spatial, format_run,
 )
 from _charts import (
     AREA_COLORS, make_fan_chart, make_anomaly_heatmap, make_multi_area_lines,
@@ -33,8 +34,8 @@ from _charts import (
     make_scenario_lines, make_scenario_table_heatmap, make_silhouette_chart, scenario_color,
 )
 from _scenarios import (
-    member_matrix, cluster_members, apply_scenarios, scenario_daily_summary, scenario_table,
-    scenario_name, describe_scenario,
+    member_matrix, spatial_member_matrix, cluster_members, apply_scenarios, scenario_daily_summary,
+    scenario_table, scenario_name, describe_scenario,
 )
 from _ui import anomaly_kpi, kpi_card, kpi_row, status_banner
 
@@ -296,27 +297,53 @@ def _render_scenarios(runs: pd.DataFrame):
         k_fixed = st.slider("k", SCENARIO_K_RANGE[0], SCENARIO_K_RANGE[1], 3, key="fs_k",
                             disabled=(k_mode != "Fixed"))
     with o3:
+        use_spatial = st.checkbox(
+            "🌍 Spatial grid clustering (PCA + k-means on gridded temperature anomaly)",
+            value=False, key="fs_spatial",
+            help="Clusters on the full European temperature anomaly field instead of country "
+                 "averages. Uses PCA for dimensionality reduction. "
+                 + ("" if not SCENARIO_USE_GEOPOTENTIAL else "Using Z500 geopotential height.")
+                 + ("\n⚠️ Using temperature maps as proxy — Z500 geopotential not yet available "
+                    "for ecmwf-ens." if not SCENARIO_USE_GEOPOTENTIAL else ""),
+        )
         use_wind = st.checkbox("Also cluster on wind anomaly (Volue members)", value=False, key="fs_wind",
+                               disabled=use_spatial,
                                help="Adds Volue EC-ENS wind-production anomaly to the feature space")
-    if not areas:
+    if not use_spatial and not areas:
         st.info("Select at least one feature country.")
         return
 
-    cfg = avail[source]
-    try:
-        temp_m = load_members(cfg["provider"], cfg["model"], "Temperature", tuple(areas))
-        wind_m = load_members("Volue", "EC-ENS", "Wind", tuple(areas)) if use_wind else pd.DataFrame()
-    except Exception as e:
-        st.error(f"Failed to load members: {e}")
-        return
+    # ---- build feature matrix ------------------------------------------------
+    spatial_ref = None
+    if use_spatial:
+        try:
+            grid_df = load_member_spatial(lead_day_min=horizon[0], lead_day_max=horizon[1])
+        except Exception as e:
+            st.error(f"Failed to load spatial member data: {e}")
+            return
+        if grid_df.empty:
+            status_banner("No spatial member data — fcst_member_spatial is empty. "
+                          "Run power_desk_refresh.py to populate it.", "warning")
+            return
+        features = spatial_member_matrix(grid_df)
+        parts = {"Spatial T anomaly": features}
+        spatial_ref = grid_df["reference_date"].max()
+    else:
+        cfg = avail[source]
+        try:
+            temp_m = load_members(cfg["provider"], cfg["model"], "Temperature", tuple(areas))
+            wind_m = load_members("Volue", "EC-ENS", "Wind", tuple(areas)) if use_wind else pd.DataFrame()
+        except Exception as e:
+            st.error(f"Failed to load members: {e}")
+            return
+        feat_t = member_matrix(temp_m, areas, (horizon[0], horizon[1]), "anomaly")
+        parts = {"Temperature": feat_t}
+        if use_wind and not wind_m.empty:
+            feat_w = member_matrix(wind_m, areas, (horizon[0], horizon[1]), "anomaly")
+            common = feat_t.index.intersection(feat_w.index)
+            parts = {"Temperature": feat_t.loc[common], "Wind": feat_w.loc[common]}
 
-    feat_t = member_matrix(temp_m, areas, (horizon[0], horizon[1]), "anomaly")
-    parts = {"Temperature": feat_t}
-    if use_wind and not wind_m.empty:
-        feat_w = member_matrix(wind_m, areas, (horizon[0], horizon[1]), "anomaly")
-        common = feat_t.index.intersection(feat_w.index)
-        parts = {"Temperature": feat_t.loc[common], "Wind": feat_w.loc[common]}
-    features = pd.concat(parts, axis=1)
+    features = pd.concat(parts, axis=1) if not use_spatial else features
     if features.empty or features.shape[0] < 6:
         status_banner("Not enough complete members to cluster for this selection.", "warning")
         return
@@ -326,10 +353,32 @@ def _render_scenarios(runs: pd.DataFrame):
         status_banner("Clustering failed — too few members.", "warning")
         return
     assign = res["assignments"]
-    ref = cfg["reference_date"]
-    st.caption(f"{source} · run {pd.Timestamp(ref):%a %d %b %H:%M} UTC · {res['n_members']} members · "
-               f"features: {', '.join(parts.keys())} anomaly × {len(areas)} countries × lead days "
-               f"{horizon[0]}–{horizon[1]} · k={res['k']} · silhouette {res['silhouette']:.2f}")
+    if use_spatial:
+        ev = features.attrs.get("explained_variance_pct", 0)
+        ngp = features.attrs.get("n_grid_points", 0)
+        ref_ts = pd.Timestamp(spatial_ref) if spatial_ref is not None else pd.Timestamp("NaT")
+        var_label = "Z500 geopotential" if SCENARIO_USE_GEOPOTENTIAL else "temperature (proxy for Z500)"
+        st.caption(
+            f"Spatial clustering · Meteomatics ecmwf-ens · run {ref_ts:%a %d %b %H:%M} UTC · "
+            f"{res['n_members']} members · {ngp} grid points (1°) · "
+            f"PCA {features.shape[1]} PCs ({ev:.0f}% var) · {var_label} · "
+            f"lead days {horizon[0]}–{horizon[1]} · k={res['k']} · silhouette {res['silhouette']:.2f}"
+        )
+        if not SCENARIO_USE_GEOPOTENTIAL:
+            st.info("⚠️ Clustering uses temperature maps as proxy. Switch to Z500 geopotential "
+                    "when ecmwf-ens members become available (set SCENARIO_USE_GEOPOTENTIAL=True).")
+    else:
+        cfg = avail[source]
+        ref = cfg["reference_date"]
+        st.caption(f"{source} · run {pd.Timestamp(ref):%a %d %b %H:%M} UTC · {res['n_members']} members · "
+                   f"features: {', '.join(parts.keys())} anomaly × {len(areas)} countries × lead days "
+                   f"{horizon[0]}–{horizon[1]} · k={res['k']} · silhouette {res['silhouette']:.2f}")
+
+    # For power-curve mapping we always need Volue EC-ENS temperature members
+    display_areas = tuple(areas) if areas else tuple(SCENARIO_DEFAULT_AREAS)
+    if use_spatial:
+        temp_m = load_members("Volue", "EC-ENS", "Temperature", display_areas)
+    tagged_t = apply_scenarios(temp_m, assign)
 
     # Scenario cards
     n_tot = res["n_members"]
@@ -338,7 +387,22 @@ def _render_scenarios(runs: pd.DataFrame):
     for s in scen_ids:
         share = res["sizes"][s] / n_tot
         row = res["centroids"].loc[s]
-        desc = describe_scenario(row.xs("Temperature", level=0), share) if s != 0 else f"{share:.0%} of members in clusters too small to keep"
+        if s == 0:
+            desc = f"{share:.0%} of members in clusters too small to keep"
+        elif use_spatial:
+            # Spatial centroids are PC scores — describe via tagged Volue T anomaly
+            if not tagged_t.empty:
+                scen_t = tagged_t[tagged_t["scenario"] == s]
+                mean_anom = float(scen_t["anomaly"].mean()) if scen_t["anomaly"].notna().any() else 0
+                by_area = scen_t.groupby("area")["anomaly"].mean().sort_values()
+                tone = "warm" if mean_anom > 0.75 else ("cold" if mean_anom < -0.75 else "near-normal")
+                desc = (f"{share:.0%} of members · {tone} on average ({mean_anom:+.1f}°C)")
+                if len(by_area) >= 2:
+                    desc += f" · coldest {by_area.index[0]} ({by_area.iloc[0]:+.1f}), warmest {by_area.index[-1]} ({by_area.iloc[-1]:+.1f})"
+            else:
+                desc = f"{share:.0%} of members"
+        else:
+            desc = describe_scenario(row.xs("Temperature", level=0), share)
         color = scenario_color(s)
         cards.append(
             f'<div class="kpi-card" style="border-top:3px solid {color}; text-align:left;">'
@@ -347,8 +411,6 @@ def _render_scenarios(runs: pd.DataFrame):
             f'<div class="kpi-delta kpi-delta-flat">{desc}</div></div>'
         )
     kpi_row(cards, max_cols=4)
-
-    tagged_t = apply_scenarios(temp_m, assign)
     g1, g2 = st.columns([2.2, 1])
     with g1:
         st.plotly_chart(make_scenario_table_heatmap(

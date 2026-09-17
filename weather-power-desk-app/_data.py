@@ -106,6 +106,20 @@ def snap_to_init_time(ref_dt: pd.Timestamp, init_hours: list[int]) -> pd.Timesta
     return min(cands, key=lambda c: abs((ref_dt - c).total_seconds()))
 
 
+def init_time_from_hour(ref_dt: pd.Timestamp, init_hour: int) -> pd.Timestamp:
+    """Build init time from reference_date and the explicit init_hour stored in
+    fcst_runs.  Volue publishes 00z and 12z with the same reference_date
+    (~22:00 UTC), so init_hour (derived from the pattern name) is the only
+    reliable way to tell them apart."""
+    base = ref_dt.normalize()  # midnight of the reference_date day
+    cand = base + pd.Timedelta(hours=init_hour)
+    # If reference_date is late evening and init_hour is 0, the init belongs
+    # to the next calendar day (e.g. ref 22:00 Sep 12 → 00z Sep 13).
+    if init_hour == 0 and ref_dt.hour >= 18:
+        cand += pd.Timedelta(days=1)
+    return cand
+
+
 def format_run(init_dt: pd.Timestamp) -> str:
     return init_dt.strftime("%a %d %b") + f" {init_dt.hour:02d}z"
 
@@ -117,17 +131,26 @@ def format_run(init_dt: pd.Timestamp) -> str:
 @st.cache_data(ttl=900, show_spinner=False)
 def load_runs() -> pd.DataFrame:
     df = run_query(f"""
-        SELECT model_family, pattern, reference_date, run_rank, run_label, snapshot_ts
+        SELECT model_family, pattern, init_hour, reference_date, run_rank, run_label, snapshot_ts
         FROM {SBX_SCHEMA}.fcst_runs ORDER BY model_family, run_rank
     """)
     if df.empty:
         return df
     df = _dt(df, ["reference_date", "snapshot_ts"], utc=True)
-    df = _num(df, ["run_rank"])
-    df["init_time"] = [
-        snap_to_init_time(r, VOLUE_MODELS.get(m, {"init_hours": [0]})["init_hours"])
-        for r, m in zip(df["reference_date"], df["model_family"])
-    ]
+    df = _num(df, ["run_rank", "init_hour"])
+    # Use the explicit init_hour when available (new schema); fall back to
+    # snap_to_init_time for backward compatibility with old sandbox data.
+    if "init_hour" in df.columns and df["init_hour"].notna().any():
+        df["init_time"] = [
+            init_time_from_hour(r, int(h)) if pd.notna(h)
+            else snap_to_init_time(r, VOLUE_MODELS.get(m, {"init_hours": [0]})["init_hours"])
+            for r, m, h in zip(df["reference_date"], df["model_family"], df["init_hour"])
+        ]
+    else:
+        df["init_time"] = [
+            snap_to_init_time(r, VOLUE_MODELS.get(m, {"init_hours": [0]})["init_hours"])
+            for r, m in zip(df["reference_date"], df["model_family"])
+        ]
     df["run_display"] = [f"{lbl} — {format_run(t)}" for lbl, t in zip(df["run_label"], df["init_time"])]
     return df
 
@@ -139,7 +162,7 @@ def load_fcst_daily(metric: str, areas: tuple[str, ...], model_families: tuple[s
     if not areas or not model_families:
         return pd.DataFrame()
     df = run_query(f"""
-        SELECT provider, model_family, pattern, reference_date, run_rank, run_label, metric, area, day,
+        SELECT provider, model_family, pattern, init_hour, reference_date, run_rank, run_label, metric, area, day,
                lead_day, ens_mean, p10, p25, p50, p75, p90, spread_std, ens_min, ens_max, n_members,
                normal, anomaly, anomaly_pct
         FROM {SBX_SCHEMA}.fcst_daily
@@ -206,6 +229,31 @@ def load_members(provider: str, model: str, metric: str, areas: tuple[str, ...])
     df = _dt(df, ["reference_date"], utc=True)
     df = _dt(df, ["day"])
     return _num(df, ["lead_day", "value", "normal", "anomaly"])
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_member_spatial(lead_day_min: int = 1, lead_day_max: int = 15) -> pd.DataFrame:
+    """Gridded per-member temperature anomaly for spatial k-means clustering.
+
+    Reads fcst_member_spatial (created by the refresh notebook from Meteomatics
+    ecmwf-ens temperature members, coarsened to 1° over Europe).
+
+    The full table is ~1.4 M rows (50 members × 15 days × 1 824 grid points)
+    which exceeds the 25 MB inline-result limit.  We aggregate across days
+    here in SQL so only ~91 k rows (50 × 1 824) come back.
+    """
+    df = run_query(f"""
+        SELECT provider, model, MAX(reference_date) AS reference_date, metric,
+               member, latitude, longitude,
+               AVG(anomaly) AS anomaly, AVG(value) AS value, AVG(ens_mean) AS ens_mean
+        FROM {SBX_SCHEMA}.fcst_member_spatial
+        WHERE lead_day BETWEEN {int(lead_day_min)} AND {int(lead_day_max)}
+        GROUP BY provider, model, metric, member, latitude, longitude
+    """)
+    if df.empty:
+        return df
+    df = _dt(df, ["reference_date"], utc=True)
+    return _num(df, ["latitude", "longitude", "value", "ens_mean", "anomaly"])
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -286,6 +334,36 @@ def load_weather_indexes() -> pd.DataFrame:
         return df
     df = _dt(df, ["date"])
     return _num(df, ["value"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 2b — ANOMALY MAPS (gold layer)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_anomaly_map(metric: str, years: tuple[int, ...],
+                     months: tuple[int, ...]) -> pd.DataFrame:
+    """Average anomaly per grid point for the selected metric/months/years.
+
+    Reads the pre-aggregated sandbox table (written by power_desk_refresh from
+    the gold layer). The notebook runs as the user who has gold access; the app
+    SP only needs sandbox access.
+    """
+    if not years or not months:
+        return pd.DataFrame()
+    df = run_query(f"""
+        SELECT latitude, longitude,
+               FIRST(city) AS city,
+               AVG(anomaly) AS anomaly,
+               AVG(value) AS value,
+               AVG(normal) AS normal
+        FROM {SBX_SCHEMA}.anomaly_map
+        WHERE metric = '{metric}'
+          AND year IN ({",".join(str(int(y)) for y in years)})
+          AND month IN ({",".join(str(int(m)) for m in months)})
+        GROUP BY latitude, longitude
+    """)
+    return _num(df, ["latitude", "longitude", "anomaly", "value", "normal"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
