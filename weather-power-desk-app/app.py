@@ -19,6 +19,7 @@ import streamlit as st
 
 from _config import SECTIONS
 from _style import CUSTOM_CSS
+from _morning import render_morning_call
 from _forecast import render_forecast
 from _historical import render_historical
 from _hydro import render_hydro
@@ -29,6 +30,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 HOME = "Home"
 RENDERERS = {
+    "Morning Call": render_morning_call,
     "Forecast": render_forecast,
     "Historical & Analysis": render_historical,
     "Hydro Monitoring": render_hydro,
@@ -81,25 +83,33 @@ with st.sidebar:
 
 
 # ─── Landing page ────────────────────────────────────────────────────────────────
+def _tile(name: str, cfg: dict, min_height: int = 210) -> None:
+    locked = cfg["locked"]
+    lock_html = '<span class="wip-pill">🔒 Work in progress</span>' if locked else ""
+    st.markdown(f"""
+    <div class="section-tile {'section-tile-locked' if locked else ''}" style="min-height:{min_height}px;">
+        <div class="section-tile-accent" style="background:{cfg['color']};"></div>
+        <div class="section-tile-num">{'Daily' if cfg.get('wide') else 'Section ' + cfg['num']}</div>
+        <div class="section-tile-title">{name}</div>
+        <div class="section-tile-desc">{cfg['desc']}</div>
+        <div style="margin-top:12px;">{lock_html}</div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.button(f"Open {name}" if not locked else f"{name} — locked", key=f"tile_{cfg['num']}",
+              use_container_width=True, on_click=go, args=(name,))
+
+
 def render_home():
     st.markdown("#### CHOOSE A SECTION")
-    st.caption("Four entry points. Strategy is locked while under construction.")
+    st.caption("Morning Call is the daily table; below it the four sections. Strategy is locked while under construction.")
+    wide = {n: c for n, c in SECTIONS.items() if c.get("wide")}
+    grid = {n: c for n, c in SECTIONS.items() if not c.get("wide")}
+    for name, cfg in wide.items():
+        _tile(name, cfg, min_height=120)
     cols = st.columns(2)
-    for i, (name, cfg) in enumerate(SECTIONS.items()):
-        locked = cfg["locked"]
+    for i, (name, cfg) in enumerate(grid.items()):
         with cols[i % 2]:
-            lock_html = '<span class="wip-pill">🔒 Work in progress</span>' if locked else ""
-            st.markdown(f"""
-            <div class="section-tile {'section-tile-locked' if locked else ''}">
-                <div class="section-tile-accent" style="background:{cfg['color']};"></div>
-                <div class="section-tile-num">Section {cfg['num']}</div>
-                <div class="section-tile-title">{name}</div>
-                <div class="section-tile-desc">{cfg['desc']}</div>
-                <div style="margin-top:12px;">{lock_html}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            st.button(f"Open {name}" if not locked else f"{name} — locked", key=f"tile_{cfg['num']}",
-                      use_container_width=True, on_click=go, args=(name,))
+            _tile(name, cfg)
 
 
 section = st.session_state["section"]

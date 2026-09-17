@@ -448,7 +448,116 @@ count("hydro_daily")
 
 # COMMAND ----------
 
-# DBTITLE 1,7. Placeholders — weather indexes and Meteologica
+# DBTITLE 1,7. Morning Call — daily values per run for the report's exact Volue curves
+# Port of Morning_Report/import_00z_add_solar_np_tot.py. The wapi script asks
+# for `tt fr con ec00ens °c cet min15 f` etc.; here the same curve names are
+# matched on LOWER(curve_name) so the `area` column convention is irrelevant.
+# Daily CET mean (tt/wnd/spv) or daily sum (rre) of the 'Avg' tag, for every
+# run of the last MORNING_RUN_HISTORY_DAYS days of each model pattern, plus the
+# normal curve on the same days. The app picks today's 00z and the previous
+# 00z (Friday's on a Monday) and forms the weekly windows.
+MORNING_REGIONS = ["fr", "de", "uk", "it", "hu", "np", "ib", "see", "cwe", "it-nord"]
+MORNING_PATTERNS = ["ec00ens", "ec12ens", "gfs00ens", "ecmonthly"]
+MORNING_FAMILIES = {
+    # family: (table, forecast curve template, normal table, normal curve template, daily agg)
+    "tt":  ("temperature_consumption_forecast", "tt {r} con {run} °c cet min15 f",
+            "temperature_consumption",          "tt {r} con °c cet min15 n",           "AVG"),
+    "wnd": ("production_forecast",              "pro {r} wnd {run} mwh/h cet min15 f",
+            "production",                       "pro {r} wnd mwh/h cet min15 n",       "AVG"),
+    "spv": ("production_forecast",              "pro {r} spv {run} mwh/h cet min15 f",
+            "production",                       "pro {r} spv mwh/h cet min15 n",       "AVG"),
+    "rre": ("precipitation_forecast",           "rre {r} {run} gwh cet min15 f",
+            "precipitation",                    "rre {r} gwh cet min15 n",             "SUM"),
+}
+MORNING_RUN_HISTORY_DAYS = 8
+
+fcst_blocks, norm_blocks = [], []
+for fam, (ftbl, ftpl, ntbl, ntpl, agg) in MORNING_FAMILIES.items():
+    fcst_names = ",".join(f"'{ftpl.format(r=r, run=p).lower()}'" for r in MORNING_REGIONS for p in MORNING_PATTERNS)
+    norm_names = ",".join(f"'{ntpl.format(r=r).lower()}'" for r in MORNING_REGIONS)
+    fcst_blocks.append(f"""
+    SELECT '{fam}' AS family, LOWER(curve_name) AS curve_name, reference_date,
+           {CET_DAY} AS day, {agg}(value) AS value, COUNT(*) AS n_points
+    FROM {VOLUE}.{ftbl}
+    WHERE LOWER(curve_name) IN ({fcst_names}) AND data_type = 'F' AND tag = 'Avg'
+      AND reference_date >= current_timestamp() - INTERVAL {MORNING_RUN_HISTORY_DAYS} DAYS
+      AND delivery_start >= current_date() - INTERVAL {MORNING_RUN_HISTORY_DAYS + 1} DAYS
+    GROUP BY LOWER(curve_name), reference_date, {CET_DAY}
+    """)
+    norm_blocks.append(f"""
+    SELECT '{fam}' AS family, LOWER(curve_name) AS curve_name, {CET_DAY} AS day, {agg}(value) AS normal
+    FROM {VOLUE}.{ntbl}
+    WHERE LOWER(curve_name) IN ({norm_names}) AND data_type = 'N'
+      AND delivery_start BETWEEN current_date() - INTERVAL {MORNING_RUN_HISTORY_DAYS + 1} DAYS
+                             AND current_date() + INTERVAL 50 DAYS
+    GROUP BY LOWER(curve_name), {CET_DAY}
+    """)
+
+# region / pattern are parsed back out of the curve name so the app can pivot on them
+region_case = "CASE " + " ".join(
+    f"WHEN f.curve_name LIKE '% {r} %' OR f.curve_name LIKE 'rre {r} %' THEN '{r}'"
+    for r in sorted(MORNING_REGIONS, key=len, reverse=True)) + " END"
+pattern_case = "CASE " + " ".join(f"WHEN f.curve_name LIKE '%{p}%' THEN '{p}'" for p in MORNING_PATTERNS) + " END"
+norm_region_case = "CASE " + " ".join(
+    f"WHEN n.curve_name LIKE '% {r} %' OR n.curve_name LIKE 'rre {r} %' THEN '{r}'"
+    for r in sorted(MORNING_REGIONS, key=len, reverse=True)) + " END"
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {SBX}.morning_daily AS
+WITH f AS ({" UNION ALL ".join(fcst_blocks)}),
+n AS ({" UNION ALL ".join(norm_blocks)}),
+f2 AS (
+  SELECT f.family, f.curve_name, {region_case} AS region, {pattern_case} AS pattern,
+         f.reference_date, f.day, f.value, f.n_points
+  FROM f
+),
+n2 AS (SELECT n.family, {norm_region_case} AS region, n.day, n.normal FROM n)
+SELECT 'Volue' AS provider, f2.family, f2.region, f2.pattern, f2.curve_name, f2.reference_date,
+       f2.day, f2.value, f2.n_points, n2.normal, current_timestamp() AS snapshot_ts
+FROM f2 LEFT JOIN n2 ON n2.family = f2.family AND n2.region = f2.region AND n2.day = f2.day
+WHERE f2.region IS NOT NULL AND f2.pattern IS NOT NULL
+""")
+count("morning_daily")
+
+# Meteomatics EC-ENS / AIFS-ENS temperature means on the report's regions, for the model comparison
+MM_REGION_GROUPS = {"fr": ["FR"], "de": ["DE"], "uk": ["UK"], "it": ["IT"], "hu": ["HU"],
+                    "np": ["NO", "SE", "FI", "DK"], "ib": ["ES", "PT"], "see": ["SI", "HR", "SK", "HU"]}
+mm_region_case = "CASE " + " ".join(
+    f"WHEN country IN ({','.join(repr(c) for c in cs)}) THEN '{r}'" for r, cs in MM_REGION_GROUPS.items()) + " END"
+mm_blocks = []
+for label, (model, curve) in METEOMATICS_MODELS.items():
+    mm_blocks.append(f"""
+    SELECT 'tt' AS family, {mm_region_case} AS region, '{model}' AS pattern, created_at AS reference_date,
+           DATE(delivery_start) AS day, AVG(value) AS value
+    FROM (SELECT created_at, delivery_start, value, {COUNTRY_CASE} AS country
+          FROM {MM}.temperature_forecast
+          WHERE model = '{model}' AND curve_name = '{curve}'
+            AND created_at >= current_timestamp() - INTERVAL {MORNING_RUN_HISTORY_DAYS} DAYS
+            AND latitude BETWEEN 36 AND 66 AND longitude BETWEEN -10 AND 30)
+    WHERE country IS NOT NULL
+    GROUP BY {mm_region_case}, created_at, DATE(delivery_start)
+    """)
+spark.sql(f"""
+INSERT INTO {SBX}.morning_daily
+WITH mm AS ({" UNION ALL ".join(mm_blocks)}),
+n AS (
+  SELECT {CET_DAY} AS day, LOWER(curve_name) AS curve_name, AVG(value) AS normal
+  FROM {VOLUE}.temperature_consumption
+  WHERE LOWER(curve_name) IN ({",".join(f"'tt {r} con °c cet min15 n'" for r in MM_REGION_GROUPS)}) AND data_type = 'N'
+    AND delivery_start BETWEEN current_date() - INTERVAL 2 DAYS AND current_date() + INTERVAL 20 DAYS
+  GROUP BY {CET_DAY}, LOWER(curve_name)
+),
+n2 AS (SELECT day, normal, {"CASE " + " ".join(f"WHEN curve_name = 'tt {r} con °c cet min15 n' THEN '{r}'" for r in MM_REGION_GROUPS) + " END"} AS region FROM n)
+SELECT 'Meteomatics', mm.family, mm.region, mm.pattern, mm.pattern AS curve_name, mm.reference_date, mm.day, mm.value,
+       96 AS n_points, n2.normal, current_timestamp()
+FROM mm LEFT JOIN n2 ON n2.region = mm.region AND n2.day = mm.day
+WHERE mm.region IS NOT NULL
+""")
+count("morning_daily")
+
+# COMMAND ----------
+
+# DBTITLE 1,8. Placeholders — weather indexes and Meteologica
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {SBX}.weather_indexes (
   index_name STRING COMMENT 'NAO, AO, EA, SCAND, PNA, ONI, MJO_AMP, MJO_PHASE, QBO, SSW',

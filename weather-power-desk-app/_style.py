@@ -338,6 +338,54 @@ hr {{ border-color: var(--border) !important; }}
     border-color: var(--border) !important;
     border-radius: var(--radius-md) !important;
 }}
+/* Morning Call table — the Excel sheet, as HTML */
+.mc-block {{
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 12px 16px 6px;
+    margin-bottom: 14px;
+    box-shadow: var(--shadow-card);
+}}
+.mc-title {{
+    font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.10em;
+    color: var(--text-secondary); margin-bottom: 6px;
+}}
+.mc-table {{ width: 100%; border-collapse: collapse; font-size: 0.86rem; }}
+.mc-table th {{
+    text-align: right; font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text-muted); padding: 4px 8px; border-bottom: 1px solid var(--border);
+}}
+.mc-table th:first-child, .mc-table td:first-child {{ text-align: left; }}
+.mc-table td {{
+    padding: 5px 8px; border-bottom: 1px solid var(--border); text-align: right;
+    font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; color: var(--text-primary);
+}}
+.mc-table td.mc-region {{ font-family: 'Inter', sans-serif; font-weight: 600; }}
+.mc-table tr:last-child td {{ border-bottom: none; }}
+.mc-pos {{ color: {CAT_GREEN} !important; font-weight: 600; }}
+.mc-neg {{ color: {CAT_RED} !important; font-weight: 600; }}
+.mc-zero {{ color: var(--text-muted) !important; }}
+.mc-muted {{ color: var(--text-muted) !important; font-size: 0.78rem; }}
+.mc-week {{
+    font-size: 1.05rem; font-weight: 800; letter-spacing: -0.01em; color: var(--text-primary);
+}}
+.mc-sub {{ font-size: 0.78rem; color: var(--text-muted); margin-bottom: 8px; }}
+
+/* Scenario side-by-side table */
+.sc-table {{ width: 100%; border-collapse: collapse; font-size: 0.84rem; }}
+.sc-table th {{
+    font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text-muted); padding: 4px 8px; border-bottom: 1px solid var(--border); text-align: right;
+}}
+.sc-table th.sc-scen {{ color: var(--text-primary); font-size: 0.72rem; border-bottom: 2px solid; }}
+.sc-table td {{
+    padding: 5px 8px; border-bottom: 1px solid var(--border); text-align: right;
+    font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums;
+}}
+.sc-table th:first-child, .sc-table td:first-child {{ text-align: left; font-family: 'Inter', sans-serif; font-weight: 600; }}
+.sc-table tr:last-child td {{ border-bottom: none; }}
+
 .stTabs [data-baseweb="tab-list"] {{ gap: 4px; }}
 .stTabs [data-baseweb="tab"] {{
     border-radius: var(--radius-md) var(--radius-md) 0 0;

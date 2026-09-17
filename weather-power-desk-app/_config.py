@@ -46,6 +46,13 @@ METEOLOGICA_TABLE = os.environ.get("METEOLOGICA_TABLE", "")
 # SECTIONS (landing tiles + sidebar)
 # ══════════════════════════════════════════════════════════════════════════════
 SECTIONS: dict[str, dict] = {
+    "Morning Call": {
+        "num": "00",
+        "desc": "The Morning Report table, live: EC-ENS 00z weekly means per region for temperature, "
+                "wind, solar and 2-week precipitation — absolute value, change vs the previous 00z, "
+                "deviation from normal — plus a side-by-side of the other models.",
+        "color": CATEGORICAL[3], "locked": False, "wide": True,
+    },
     "Forecast": {
         "num": "01",
         "desc": "Volue ensemble values by country, spread of the distribution vs its normal, "
@@ -166,11 +173,75 @@ SPREAD_RATIO_HIGH = 1.3              # spread / normal spread above this = unusu
 SPREAD_RATIO_LOW = 0.7               # below this = unusually confident
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MORNING CALL (port of Morning_Report/import_00z_add_solar_np_tot.py)
+# ══════════════════════════════════════════════════════════════════════════════
+# Blocks of the Excel table, in order. Each row: (display label, Volue area code
+# used inside the curve name). Curve names are exactly the wapi ones, so the
+# job matches on LOWER(curve_name) and never depends on the `area` column.
+MORNING_BLOCKS: dict[str, dict] = {
+    "Temperatures": {
+        "family": "tt", "unit": "°C", "scale": 1.0, "agg": "mean", "fmt": "{:.1f}",
+        "rows": [("FRA", "fr"), ("DE", "de"), ("UK", "uk"), ("ITA", "it"), ("HUN", "hu"),
+                 ("Nordic", "np"), ("Iberia", "ib")],
+    },
+    "Wind": {
+        "family": "wnd", "unit": "GW", "scale": 0.001, "agg": "mean", "fmt": "{:.1f}",
+        "rows": [("DE", "de"), ("UK", "uk"), ("FRA", "fr"), ("ITA", "it"), ("SEE", "see"),
+                 ("Nordic", "np"), ("Iberia", "ib")],
+    },
+    "Solar PV": {
+        "family": "spv", "unit": "GW", "scale": 0.001, "agg": "mean", "fmt": "{:.1f}",
+        "rows": [("DE", "de"), ("FRA", "fr"), ("ITA", "it"), ("SEE", "see"), ("Nordic", "np"), ("Iberia", "ib")],
+    },
+    "Precip (sum of coming 2 weeks)": {
+        "family": "rre", "unit": "TWh", "scale": 0.001, "agg": "sum", "fmt": "{:.1f}",
+        # Alps = cwe + it-nord, exactly as the report does
+        "rows": [("Alps", ["cwe", "it-nord"]), ("Nordic", "np"), ("SEE", "see"), ("Iberia", "ib")],
+    },
+}
+
+MORNING_CURVES: dict[str, dict] = {
+    # family: forecast curve template, normal curve template  ({r} = region, {run} = run pattern)
+    "tt":  {"fcst": "tt {r} con {run} °c cet min15 f",     "norm": "tt {r} con °c cet min15 n"},
+    "wnd": {"fcst": "pro {r} wnd {run} mwh/h cet min15 f", "norm": "pro {r} wnd mwh/h cet min15 n"},
+    "spv": {"fcst": "pro {r} spv {run} mwh/h cet min15 f", "norm": "pro {r} spv mwh/h cet min15 n"},
+    "rre": {"fcst": "rre {r} {run} gwh cet min15 f",       "norm": "rre {r} gwh cet min15 n"},
+}
+MORNING_REGION_CODES = ["fr", "de", "uk", "it", "hu", "np", "ib", "see", "cwe", "it-nord"]
+
+# Runs materialised for the Morning Call. EC 00z is the report's run; the rest
+# power the "confront the models" view. Label -> Volue curve pattern.
+MORNING_MODELS: dict[str, str] = {
+    "EC-ENS 00z": "ec00ens",
+    "EC-ENS 12z": "ec12ens",
+    "GFS-ENS 00z": "gfs00ens",
+    "EC-Extended": "ecmonthly",
+}
+MORNING_DEFAULT_MODEL = "EC-ENS 00z"
+MORNING_RUN_HISTORY_DAYS = 8         # runs kept so Δ vs yesterday / Friday is always available
+MORNING_MIN_DAY_COVERAGE = 0.9       # drop partial forecast days (report drops the half-day tail)
+
+# Meteomatics country means mapped onto the report's regions (temperature only)
+MORNING_METEOMATICS_REGIONS: dict[str, list[str]] = {
+    "fr": ["FR"], "de": ["DE"], "uk": ["UK"], "it": ["IT"], "hu": ["HU"],
+    "np": ["NO", "SE", "FI", "DK"], "ib": ["ES", "PT"], "see": ["SI", "HR", "SK", "HU"],
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SCENARIOS (member clustering)
 # ══════════════════════════════════════════════════════════════════════════════
-SCENARIO_K_RANGE = (2, 5)            # k chosen by silhouette inside this range unless fixed
-SCENARIO_DEFAULT_HORIZON = (1, 10)   # lead days clustered on
+# Method: k-means on WEEKLY-MEAN temperature anomaly per country, weeks being
+# real ISO weeks (Mon-Sun) because the desk trades weekly products. Two
+# scenarios by default (the Morning Report's "alternative scenario"). No
+# silhouette-based k selection. The proper method is clustering on 500 hPa
+# geopotential members; that field is not in Databricks yet — when it lands,
+# feed its member matrix into cluster_members() unchanged.
+SCENARIO_K_DEFAULT = 2
+SCENARIO_K_MAX = 4
 SCENARIO_MIN_MEMBERS = 3             # clusters smaller than this are folded into "Other"
+SCENARIO_MIN_WEEK_DAYS = 4           # a forecast week needs >= this many days to be a feature
+# Regions shown side by side per scenario (Volue area codes present in fcst_members)
+SCENARIO_OUTPUT_AREAS = ["DE", "FR", "UK", "IT", "ES", "NL", "BE", "PL"]
 
 # Which member sources the scenario tab can cluster on. `table` is the sandbox
 # table power_desk_refresh.py writes; `available` is resolved at runtime.

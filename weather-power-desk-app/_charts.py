@@ -283,6 +283,67 @@ def make_scenario_table_heatmap(table: pd.DataFrame, unit: str, title: str) -> g
     return fig
 
 
+def make_country_scenario_panel(summaries: dict[str, pd.DataFrame], area: str, units: dict[str, str],
+                                weeks: list[pd.Timestamp] | None = None, height: int = 320) -> go.Figure:
+    """One country, three panels side by side (Temperature | Wind | Solar): each scenario's
+    daily mean path in its fixed hue, the full-ensemble mean in ink, the normal dashed, and
+    Monday gridlines so the trading weeks are visible."""
+    from plotly.subplots import make_subplots
+    metrics = [m for m in ("Temperature", "Wind", "Solar") if m in summaries]
+    fig = make_subplots(rows=1, cols=max(1, len(metrics)), subplot_titles=[f"{m} ({units.get(m, '')})" for m in metrics],
+                        horizontal_spacing=0.06)
+    shown_legend: set = set()
+    for i, m in enumerate(metrics, start=1):
+        s = summaries[m]
+        s = s[s["area"] == area].sort_values("day") if not s.empty else s
+        if s.empty:
+            continue
+        for scen, g in s.groupby("scenario"):
+            name = "Other" if scen == 0 else f"Scenario {scen}"
+            fig.add_trace(go.Scatter(x=g["day"], y=g["mean"], mode="lines", name=name,
+                                     line=dict(color=scenario_color(scen), width=2.6),
+                                     legendgroup=name, showlegend=name not in shown_legend,
+                                     hovertemplate=f"{name} %{{y:.1f}}<extra></extra>"), row=1, col=i)
+            shown_legend.add(name)
+        ens = s.drop_duplicates("day").sort_values("day")
+        fig.add_trace(go.Scatter(x=ens["day"], y=ens["ens_mean"], mode="lines", name="Ensemble mean",
+                                 line=dict(color=INK_PRIMARY, width=1.6), legendgroup="ens",
+                                 showlegend="ens" not in shown_legend), row=1, col=i)
+        shown_legend.add("ens")
+        if "normal" in ens.columns and ens["normal"].notna().any():
+            fig.add_trace(go.Scatter(x=ens["day"], y=ens["normal"], mode="lines", name="Normal",
+                                     line=dict(color=INK_PRIMARY, width=1.3, dash="dash"), legendgroup="nrm",
+                                     showlegend="nrm" not in shown_legend), row=1, col=i)
+            shown_legend.add("nrm")
+        for w in weeks or []:
+            fig.add_vline(x=pd.Timestamp(w), line_color=BASELINE, line_width=1, line_dash="dot", row=1, col=i)
+    layout = dict(PLOTLY_LAYOUT)
+    layout["legend"] = dict(layout["legend"], y=-0.28)
+    fig.update_layout(**layout, title=dict(text=f"{_area_name(area)} — scenarios side by side", font=dict(size=14)),
+                      height=height)
+    for ann in fig.layout.annotations:
+        ann.font.size = 12
+    return fig
+
+
+def make_model_compare_chart(df: pd.DataFrame, unit: str, title: str, model_colors: dict[str, str]) -> go.Figure:
+    """Grouped bars: one group per region, one bar per model — the 'confront the models' view."""
+    fig = _base_fig(title, height=340)
+    if df.empty:
+        return fig
+    for model, g in df.groupby("model", sort=False):
+        fig.add_trace(go.Bar(x=g["region"], y=g["value"], name=model, marker_color=model_colors.get(model, INK_MUTED),
+                             marker_line_width=0, hovertemplate=f"{model} · %{{x}}<br>%{{y:.1f}} {unit}<extra></extra>"))
+    if "normal" in df.columns and df["normal"].notna().any():
+        n = df.drop_duplicates("region")
+        fig.add_trace(go.Scatter(x=n["region"], y=n["normal"], mode="markers", name="Normal",
+                                 marker=dict(symbol="line-ew-open", size=26, color=INK_PRIMARY, line=dict(width=2)),
+                                 hovertemplate="normal %{y:.1f}<extra></extra>"))
+    fig.update_layout(barmode="group", bargap=0.2, bargroupgap=0.05, hovermode="closest")
+    fig.update_yaxes(title_text=unit)
+    return fig
+
+
 def make_silhouette_chart(sil_by_k: dict[int, float], chosen_k: int) -> go.Figure:
     fig = _base_fig("Cluster count selection (silhouette)", height=220)
     if not sil_by_k:

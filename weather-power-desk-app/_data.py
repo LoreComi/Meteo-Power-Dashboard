@@ -229,6 +229,35 @@ def load_meteologica_members(metric: str, areas: tuple[str, ...]) -> pd.DataFram
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MORNING CALL
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_morning_daily() -> pd.DataFrame:
+    """Daily 'Avg' values per run for the Morning Report's Volue curves (+ Meteomatics means).
+
+    Columns: provider, family (tt/wnd/spv/rre), region (fr/de/uk/it/hu/np/ib/see/cwe/it-nord),
+    pattern (ec00ens/ec12ens/gfs00ens/ecmonthly/ecmwf-ens/ecmwf-aifs-ens), reference_date,
+    init_date (00z-snapped run date), day, value, n_points, normal.
+    """
+    df = run_query(f"""
+        SELECT provider, family, region, pattern, reference_date, day, value, n_points, normal
+        FROM {SBX_SCHEMA}.morning_daily ORDER BY family, region, pattern, reference_date, day
+    """)
+    if df.empty:
+        return df
+    df = _dt(df, ["reference_date"], utc=True)
+    df = _dt(df, ["day"])
+    df = _num(df, ["value", "n_points", "normal"])
+    init_hours = {"ec00ens": [0], "ec12ens": [12], "gfs00ens": [0], "ecmonthly": [0],
+                  "ecmwf-ens": [0, 12], "ecmwf-aifs-ens": [0, 12]}
+    df["init_time"] = [snap_to_init_time(r, init_hours.get(p, [0, 12]))
+                       for r, p in zip(df["reference_date"], df["pattern"])]
+    df["init_date"] = df["init_time"].dt.normalize()
+    return df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SECTION 2 — HISTORICAL
 # ══════════════════════════════════════════════════════════════════════════════
 
