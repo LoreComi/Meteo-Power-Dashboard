@@ -124,6 +124,28 @@ def format_run(init_dt: pd.Timestamp) -> str:
     return init_dt.strftime("%a %d %b") + f" {init_dt.hour:02d}z"
 
 
+def pick_run(df: pd.DataFrame, pattern: str, target_date: pd.Timestamp
+             ) -> tuple[pd.DataFrame, pd.Timestamp | None]:
+    """Rows of `pattern`'s run initialised on target_date; else its latest run before it.
+
+    Works on any frame carrying `pattern` and `init_date` (morning_daily,
+    gas_demand_daily). Falling back to the newest earlier run is what keeps the
+    page usable before today's cycle has landed — the caller compares the
+    returned init date with what it asked for and says so.
+    """
+    p = df[df["pattern"] == pattern]
+    if p.empty:
+        return p, None
+    exact = p[p["init_date"] == target_date]
+    if not exact.empty:
+        return exact, target_date
+    earlier = p[p["init_date"] < target_date]
+    if earlier.empty:
+        return earlier, None
+    latest = earlier["init_date"].max()
+    return p[p["init_date"] == latest], latest
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 1 — FORECAST
 # ══════════════════════════════════════════════════════════════════════════════
@@ -322,6 +344,64 @@ def load_morning_daily() -> pd.DataFrame:
                        for r, p in zip(df["reference_date"], df["pattern"])]
     df["init_date"] = df["init_time"].dt.normalize()
     return df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GAS DEMAND
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_gas_demand_daily() -> pd.DataFrame:
+    """Daily ensemble-mean ('Avg') temperature / wind / solar per run, with the normal.
+
+    Columns: provider, family (tt/wnd/spv), pattern (ec00ens/ec12ens/gfs00ens),
+    area (DE/UK/FR/BE/NL/IT/ES/PT), reference_date, init_date (00z/12z-snapped
+    run date), day, value, n_points, normal.
+
+    Units, matching what ldz_forecast.py / rdl_forecast.py work in after their
+    own conversions: tt in °C, wnd and spv in GW (MWh/h × 0.001).
+    """
+    df = run_query(f"""
+        SELECT provider, family, pattern, area, reference_date, day, value, n_points, normal
+        FROM {SBX_SCHEMA}.gas_demand_daily
+        ORDER BY family, area, pattern, reference_date, day
+    """)
+    if df.empty:
+        return df
+    df = _dt(df, ["reference_date"], utc=True)
+    df = _dt(df, ["day"])
+    df = _num(df, ["value", "n_points", "normal"])
+    init_hours = {"ec00ens": [0], "ec12ens": [12], "gfs00ens": [0], "gfs12ens": [12]}
+    df["init_time"] = [snap_to_init_time(r, init_hours.get(p, [0, 12]))
+                       for r, p in zip(df["reference_date"], df["pattern"])]
+    df["init_date"] = df["init_time"].dt.normalize()
+    return df
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_recent_actual_temp(areas: tuple[str, ...], days: int = 30) -> pd.DataFrame:
+    """Trailing daily actual temperature per area — seeds the LDZ curves' multi-day
+    effective temperature so the first forecast day is not cold-started.
+
+    ldz_forecast.py approximated actuals with the 1-day-ahead deterministic
+    forecast (`get_relative(data_offset='P1D')`) because it could not find a
+    confirmed actuals curve on wapi. hist_daily already holds Volue's actual
+    ('AF') temperature per area per day, so the app uses that instead — the
+    same quantity the script was approximating, without the proxy.
+    """
+    if not areas:
+        return pd.DataFrame()
+    df = run_query(f"""
+        SELECT area, day, actual, normal
+        FROM {SBX_SCHEMA}.hist_daily
+        WHERE metric = 'Temperature' AND area IN ({_sql_list(areas)})
+          AND day >= current_date() - INTERVAL {int(days)} DAYS
+        ORDER BY area, day
+    """)
+    if df.empty:
+        return df
+    df = _dt(df, ["day"])
+    return _num(df, ["actual", "normal"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════

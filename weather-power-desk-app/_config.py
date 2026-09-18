@@ -1,6 +1,6 @@
 """Configuration — Power Desk Weather Dashboard.
 
-Four sections: Forecast, Historical & Analysis, Hydro Monitoring, Strategy.
+Sections: Forecast, Historical & Analysis, Hydro Monitoring, Gas Demand, Strategy.
 
 Data sources
 ------------
@@ -102,8 +102,15 @@ SECTIONS: dict[str, dict] = {
                 "Hydro Report quantify_* figures and stats, live.",
         "color": CATEGORICAL[4], "locked": False,
     },
-    "Strategy": {
+    "Gas Demand": {
         "num": "04",
+        "desc": "EU gas demand from the weather: LDZ heating demand from the fitted "
+                "temperature-response curves, and wind + solar as gas-for-power "
+                "displacement — run-over-run deltas and the trade signal per country.",
+        "color": CATEGORICAL[5], "locked": False,
+    },
+    "Strategy": {
+        "num": "05",
         "desc": "Positioning views built on the other three sections.",
         "color": CATEGORICAL[6], "locked": True,
     },
@@ -257,6 +264,80 @@ MORNING_METEOMATICS_REGIONS: dict[str, list[str]] = {
     "fr": ["FR"], "de": ["DE"], "uk": ["UK"], "it": ["IT"], "hu": ["HU"],
     "np": ["NO", "SE", "FI", "DK"], "ib": ["ES", "PT"], "see": ["SI", "HR", "SK", "HU"],
 }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GAS DEMAND (port of EU-gas-demand/ldz_forecast.py + rdl_forecast.py)
+# ══════════════════════════════════════════════════════════════════════════════
+# Two legs, both answering "how did this run move gas demand versus the run we
+# compared against yesterday", which is what the desk trades off:
+#
+#   LDZ   temperature → local-distribution-zone (heating) gas demand, through
+#         the fitted hinge curves in curve_models.json (gas_demand_model.py).
+#         Warmer run = less heating = bearish; the delta sign is the signal.
+#   RDL   wind + solar → the gas-fired generation they displace. Converted at
+#         GAS_EFFICIENCY / GAS_LOWER_LOAD, so more renewables = less gas burn
+#         = bearish. Sign is therefore the opposite of LDZ.
+#
+# Curves are fitted offline by EU-gas-demand/fit_demand_curves.py and shipped
+# with the app as curve_models.json — refresh that file when the fit is redone.
+GAS_CURVE_MODELS_FILE = "curve_models.json"
+
+# LDZ: countries with a fitted curve. ldz_forecast.py runs de/uk/fr/be/nl
+# (Italy is commented out there); Italy has a curve, so it is offered as an
+# opt-in rather than dropped.
+GAS_LDZ_AREAS: dict[str, str] = {"DE": "de", "UK": "uk", "FR": "fr", "BE": "be", "NL": "nl", "IT": "it"}
+GAS_LDZ_DEFAULT_AREAS = ["DE", "UK", "FR", "BE", "NL"]
+
+# RDL: label -> Volue area codes summed to form it. rdl_forecast.py uses
+# Volue's 'ib' Iberia aggregate; the sandbox table carries countries, so
+# Iberia is ES + PT — the same two grids that aggregate covers.
+GAS_RDL_REGIONS: dict[str, list[str]] = {
+    "DE": ["DE"], "UK": ["UK"], "FR": ["FR"], "BE": ["BE"], "NL": ["NL"],
+    "IT": ["IT"], "Iberia": ["ES", "PT"],
+}
+GAS_RDL_DEFAULT_REGIONS = ["DE", "UK", "FR", "BE", "NL", "Iberia", "IT"]
+
+# Gas-for-power conversion (rdl_forecast.py): GW of wind+solar -> GWh/day of
+# gas not burned = GW * 24 / efficiency * lower_load.
+GAS_EFFICIENCY = 0.5        # CCGT thermal efficiency
+GAS_LOWER_LOAD = 0.8        # share of the renewable swing that actually displaces gas
+
+# Runs compared. Each is scored against the run the script pairs it with:
+# a 00z run vs the same pattern's previous 00z (Friday's on a Monday);
+# a 12z run vs the same day's 00z (or the 00z two days earlier on a Monday).
+GAS_RUNS: dict[str, str] = {"EC-ENS 00z": "ec00ens", "EC-ENS 12z": "ec12ens", "GFS-ENS 00z": "gfs00ens"}
+GAS_DEFAULT_RUNS = ["EC-ENS 00z", "GFS-ENS 00z"]
+
+GAS_FORECAST_DAYS = 14               # horizon pulled per run, as in dwld_fct
+GAS_HIST_LOOKBACK_DAYS = 10          # trailing actual days: MAX_LAG_DAYS (6) + 4
+GAS_TOTAL_SIGNAL_GWH = 1000          # |cumulative delta| above this = a trade signal
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AI MORNING BRIEF (two agent families)
+# ══════════════════════════════════════════════════════════════════════════════
+# Replaces the Morning Report's free-text Pattern / Comment boxes. Each family
+# reads the Morning Call numbers that are already on screen — nothing else —
+# and writes a few sentences on what they mean for its own market.
+#
+#   Power family   temperature -> load · wind & solar -> residual load and the
+#                  merit order · precipitation -> hydro. Then a synthesis.
+#   Gas family     temperature -> LDZ heating demand · wind & solar -> gas-for-
+#                  power displacement. Then a synthesis. When the Gas Demand
+#                  section has been run, its LDZ / RDL deltas are handed to
+#                  this family as quantified evidence.
+AI_BRIEF_MODEL = os.environ.get("AI_BRIEF_MODEL", "gpt-4o")
+AI_BRIEF_MAX_TOKENS = 320            # a few sentences, not a report
+AI_BRIEF_SYNTHESIS_MAX_TOKENS = 420
+
+AI_POWER_AGENTS: list[tuple[str, str, str]] = [
+    ("pw_temp",       "🌡 Temperature",   "Load"),
+    ("pw_wind_solar", "🌬 Wind & Solar",  "Residual load"),
+    ("pw_precip",     "💧 Precipitation", "Hydro"),
+]
+AI_GAS_AGENTS: list[tuple[str, str, str]] = [
+    ("gas_temp",       "🌡 Temperature",  "LDZ heating"),
+    ("gas_wind_solar", "🌬 Wind & Solar", "Gas-for-power"),
+]
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SCENARIOS (member clustering)

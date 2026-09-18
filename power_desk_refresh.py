@@ -25,6 +25,9 @@ Tables written (all read by weather-power-desk-app/_data.py):
   hist_daily            Volue actuals + normal per metric/area/day since 2013
   hydro_daily           Volue hydro reservoir components (WTR/SGW/BAL),
                         actual (SA) and normal (N), per area/day since 2013
+  gas_demand_daily      daily ens-mean ('Avg') temperature / wind / solar with
+                        the normal, per pattern and run, last 8 days of runs —
+                        feeds the Gas Demand section (LDZ + wind/solar RDL)
   weather_indexes       CREATE IF NOT EXISTS — loaded separately
   meteologica_members   CREATE IF NOT EXISTS — populated only if METEOLOGICA_TABLE set
 
@@ -619,6 +622,70 @@ FROM mm LEFT JOIN n2 ON n2.region = mm.region AND n2.day = mm.day
 WHERE mm.region IS NOT NULL
 """)
 count("morning_daily")
+
+# COMMAND ----------
+
+# DBTITLE 1,7b. Gas Demand — daily ens-mean temperature / wind / solar per run
+# Feeds the Gas Demand section, which ports EU-gas-demand/ldz_forecast.py and
+# rdl_forecast.py. Both scripts pull, through wapi, the ensemble-MEAN daily
+# value of one curve per country for TODAY's run and for the run they compare
+# against (yesterday's, or Friday's on a Monday) — so what the app needs is
+# the same daily 'Avg' series, per run, for several days back.
+#
+# fcst_daily cannot serve this: it keeps only N_RUNS_KEPT=6 runs *per model
+# family*, and the EC-ENS family interleaves 00z and 12z, so a Monday's
+# "ec00ens vs the ec00ens of 3 days ago" comparison falls outside the window.
+# This table is therefore keyed by pattern and keeps GAS_RUN_HISTORY_DAYS of
+# runs, the same way morning_daily does.
+#
+# Units match the scripts' arithmetic after their own conversions:
+#   tt  → °C          (scale 1.0)
+#   wnd → GW          (MWh/h * 0.001;  rdl_forecast.py's `fcst_mean/1000`)
+#   spv → GW          (same)
+# The normal ('N') curve is joined on the same day, in the same units, which is
+# rdl_forecast.py's `norm` line.
+GAS_AREAS = ["DE", "UK", "FR", "BE", "NL", "IT", "ES", "PT"]
+GAS_AREA_SQL = ",".join(f"'{a}'" for a in GAS_AREAS)
+GAS_PATTERNS = ["ec00ens", "ec12ens", "gfs00ens"]
+GAS_FAMILIES = {
+    # family: (category, forecast table, history table, scale)
+    "tt":  ("TT",  "temperature_consumption_forecast", "temperature_consumption", 1.0),
+    "wnd": ("WND", "production_forecast",              "production",              0.001),
+    "spv": ("SPV", "production_forecast",              "production",              0.001),
+}
+GAS_RUN_HISTORY_DAYS = 8
+
+gas_fcst_blocks, gas_norm_blocks = [], []
+for fam, (cat, ftbl, ntbl, scale) in GAS_FAMILIES.items():
+    for pat in GAS_PATTERNS:
+        gas_fcst_blocks.append(f"""
+        SELECT '{fam}' AS family, '{pat}' AS pattern, area, reference_date,
+               {CET_DAY} AS day, AVG(value) * {scale} AS value, COUNT(*) AS n_points
+        FROM {VOLUE}.{ftbl}
+        WHERE curve_name LIKE '%{pat}%' AND data_type = 'F' AND tag = 'Avg'
+          AND array_contains(categories, '{cat}') AND area IN ({GAS_AREA_SQL})
+          AND reference_date >= current_timestamp() - INTERVAL {GAS_RUN_HISTORY_DAYS} DAYS
+          AND delivery_start >= current_date() - INTERVAL {GAS_RUN_HISTORY_DAYS + 1} DAYS
+        GROUP BY area, reference_date, {CET_DAY}
+        """)
+    gas_norm_blocks.append(f"""
+    SELECT '{fam}' AS family, area, {CET_DAY} AS day, AVG(value) * {scale} AS normal
+    FROM {VOLUE}.{ntbl}
+    WHERE data_type = 'N' AND array_contains(categories, '{cat}') AND area IN ({GAS_AREA_SQL})
+      AND delivery_start BETWEEN current_date() - INTERVAL {GAS_RUN_HISTORY_DAYS + 1} DAYS
+                             AND current_date() + INTERVAL 30 DAYS
+    GROUP BY area, {CET_DAY}
+    """)
+
+spark.sql(f"""
+CREATE OR REPLACE TABLE {SBX}.gas_demand_daily AS
+WITH f AS ({" UNION ALL ".join(gas_fcst_blocks)}),
+n AS ({" UNION ALL ".join(gas_norm_blocks)})
+SELECT 'Volue' AS provider, f.family, f.pattern, f.area, f.reference_date, f.day,
+       f.value, f.n_points, n.normal, current_timestamp() AS snapshot_ts
+FROM f LEFT JOIN n ON n.family = f.family AND n.area = f.area AND n.day = f.day
+""")
+count("gas_demand_daily")
 
 # COMMAND ----------
 

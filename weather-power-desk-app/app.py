@@ -1,11 +1,13 @@
 """Power Desk Weather Dashboard — entry point (Databricks App, Streamlit).
 
-Landing page with four big section tiles; the sidebar mirrors them and adds
-a Home button. Sections:
+Landing page with the Morning Call tile plus a grid of section tiles; the
+sidebar mirrors them and adds a Home button. Sections:
+  0. Morning Call           — the Morning Report table, live, with two agent families commenting
   1. Forecast               — Volue ensemble values, spread vs normal spread, member scenarios
   2. Historical & Analysis  — monthly / weekly history by country, anomalies, index analogues
   3. Hydro Monitoring       — Hydro Report quantify_* figures and stats, live
-  4. Strategy               — locked, work in progress
+  4. Gas Demand             — LDZ heating demand and wind/solar as displaced gas, run over run
+  5. Strategy               — locked, work in progress
 
 Structure follows the LPG desk dashboard (weather-lpg-desk-app): _config /
 _data / _charts / _style modules, one render function per section, sandbox
@@ -23,6 +25,7 @@ from _morning import render_morning_call
 from _forecast import render_forecast
 from _historical import render_historical
 from _hydro import render_hydro
+from _gas import render_gas_demand
 from _strategy import render_strategy
 
 st.set_page_config(page_title="Power Desk — Weather Dashboard", layout="wide", initial_sidebar_state="expanded")
@@ -34,6 +37,7 @@ RENDERERS = {
     "Forecast": render_forecast,
     "Historical & Analysis": render_historical,
     "Hydro Monitoring": render_hydro,
+    "Gas Demand": render_gas_demand,
     "Strategy": render_strategy,
 }
 
@@ -101,7 +105,8 @@ def _tile(name: str, cfg: dict, min_height: int = 210) -> None:
 
 def render_home():
     st.markdown("#### CHOOSE A SECTION")
-    st.caption("Morning Call is the daily table; below it the four sections. Strategy is locked while under construction.")
+    st.caption("Morning Call is the daily table; below it the analysis sections. "
+               "Strategy is locked while under construction.")
     wide = {n: c for n, c in SECTIONS.items() if c.get("wide")}
     grid = {n: c for n, c in SECTIONS.items() if not c.get("wide")}
     for name, cfg in wide.items():

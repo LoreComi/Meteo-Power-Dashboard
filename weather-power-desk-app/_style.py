@@ -395,6 +395,49 @@ hr {{ border-color: var(--border) !important; }}
 </style>
 """
 
+# Agent-family commentary (Morning Call). Signal colour is a status job, not a
+# series identity: bullish = critical red (tightening), bearish = blue, neutral
+# = muted ink — and the arrow and the word carry it too, never colour alone.
+BRIEF_CSS = f"""
+<style>
+.brief-box {{
+    background: var(--bg-card);
+    border: 1px solid {BORDER};
+    border-left: 3px solid {CAT_BLUE};
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin: 10px 0 14px;
+    font-size: 0.91rem;
+    line-height: 1.6;
+    color: {INK_PRIMARY};
+}}
+.agent-card {{
+    background: {SURFACE};
+    border: 1px solid {BORDER};
+    border-top: 3px solid {INK_MUTED};
+    border-radius: 10px;
+    padding: 12px 14px;
+    text-align: center;
+    box-shadow: 0 1px 6px rgba(20,20,15,0.05);
+}}
+.agent-card-label {{
+    font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+    color: {INK_MUTED};
+}}
+.agent-card-signal {{ font-size: 1.0rem; font-weight: 800; margin: 5px 0 3px; }}
+.agent-card-sub {{ font-size: 0.7rem; color: {INK_MUTED}; }}
+.agent-overall {{
+    border-radius: 10px; padding: 10px 22px; text-align: center; margin: 10px 0 0;
+    display: flex; align-items: center; justify-content: center; gap: 14px;
+}}
+.agent-overall-label {{
+    font-size: 0.7rem; color: rgba(255,255,255,0.88); font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.07em;
+}}
+.agent-overall-value {{ font-size: 1.15rem; font-weight: 900; color: #ffffff; }}
+</style>
+"""
+
 PLOTLY_LAYOUT = dict(
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor=SURFACE,

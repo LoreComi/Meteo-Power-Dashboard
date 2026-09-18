@@ -601,3 +601,109 @@ def make_hydro_anomaly_bars(rows: list[dict], title: str = "Anomaly vs normal to
     fig.update_layout(hovermode="closest", bargap=0.3)
     fig.update_yaxes(title_text="GWh")
     return fig
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GAS DEMAND
+# ══════════════════════════════════════════════════════════════════════════════
+# Colour job here is "which run": the previous run is the same hue at lower
+# weight, the current run solid — so the eye reads the shift, not two series.
+GAS_PREV_COLOR = "#86b6ef"       # previous run  (royalblue in the scripts)
+GAS_CURR_COLOR = CAT_BLUE        # current run   (blue in the scripts)
+GAS_NORM_COLOR = INK_MUTED       # normal        (grey in the scripts)
+
+
+def _delta_window_shading(fig, d_in, d_out, row: int | None = None) -> None:
+    """The two red vertical lines the scripts draw around the delta window."""
+    kw = {"row": row, "col": 1} if row else {}
+    for x in (d_in, d_out):
+        fig.add_vline(x=x, line_color=DIV_POS, line_width=1.2, line_dash="dot", **kw)
+
+
+def make_ldz_panel(eff_prev: pd.Series, eff_cur: pd.Series, ldz_prev: pd.Series, ldz_cur: pd.Series,
+                   d_in, d_out, prev_label: str, cur_label: str, title: str,
+                   norm: pd.Series | None = None) -> go.Figure:
+    """Two panels for one country — the figure ldz_forecast.py plots:
+    left the effective temperature of both runs, right the LDZ demand they imply,
+    with the delta window marked."""
+    from plotly.subplots import make_subplots
+
+    fig = make_subplots(rows=1, cols=2, subplot_titles=("Effective temperature", "LDZ demand"),
+                        horizontal_spacing=0.09)
+    layout = {k: v for k, v in PLOTLY_LAYOUT.items() if k not in ("xaxis", "yaxis")}
+    fig.update_layout(**layout, title=dict(text=title, font=dict(size=14)), height=360)
+
+    for col, (prev, cur, unit) in enumerate(
+            ((eff_prev, eff_cur, "°C"), (ldz_prev, ldz_cur, "GWh/d")), start=1):
+        if prev is not None and not prev.empty:
+            fig.add_trace(go.Scatter(x=prev.index, y=prev.values, name=prev_label, legendgroup="prev",
+                                     showlegend=(col == 1), line=dict(color=GAS_PREV_COLOR, width=2),
+                                     hovertemplate=f"{prev_label} %{{x|%a %d %b}}<br>%{{y:.1f}} {unit}<extra></extra>"),
+                          row=1, col=col)
+        if cur is not None and not cur.empty:
+            fig.add_trace(go.Scatter(x=cur.index, y=cur.values, name=cur_label, legendgroup="cur",
+                                     showlegend=(col == 1), line=dict(color=GAS_CURR_COLOR, width=2.4),
+                                     hovertemplate=f"{cur_label} %{{x|%a %d %b}}<br>%{{y:.1f}} {unit}<extra></extra>"),
+                          row=1, col=col)
+
+    if norm is not None and not norm.empty:
+        fig.add_trace(go.Scatter(x=norm.index, y=norm.values, name="Normal temp", legendgroup="norm",
+                                 line=dict(color=GAS_NORM_COLOR, width=1.4, dash="dash"),
+                                 hovertemplate="normal %{y:.1f} °C<extra></extra>"), row=1, col=1)
+
+    for col in (1, 2):
+        for x in (d_in, d_out):
+            fig.add_vline(x=x, line_color=DIV_POS, line_width=1.2, line_dash="dot", row=1, col=col)
+        fig.update_xaxes(gridcolor=GRIDLINE, linecolor=GRIDLINE, tickfont=dict(color=INK_MUTED, size=10),
+                         row=1, col=col)
+    fig.update_yaxes(title_text="°C", gridcolor=GRIDLINE, linecolor=GRIDLINE,
+                     tickfont=dict(color=INK_MUTED, size=10), row=1, col=1)
+    fig.update_yaxes(title_text="GWh/d", gridcolor=GRIDLINE, linecolor=GRIDLINE,
+                     tickfont=dict(color=INK_MUTED, size=10), row=1, col=2)
+    for ann in fig.layout.annotations:
+        ann.font = dict(size=11, color=INK_SECONDARY)
+    return fig
+
+
+def make_rdl_chart(prev: pd.Series, cur: pd.Series, norm: pd.Series | None,
+                   d_in, d_out, prev_label: str, cur_label: str, title: str) -> go.Figure:
+    """Wind + solar expressed as displaced gas — the figure rdl_forecast.py plots:
+    both runs plus the normal, with the delta window marked."""
+    fig = _base_fig(title, height=320)
+    if norm is not None and not norm.empty:
+        fig.add_trace(go.Scatter(x=norm.index, y=norm.values, name="Normal",
+                                 line=dict(color=GAS_NORM_COLOR, width=1.6, dash="dash"),
+                                 hovertemplate="normal %{y:,.0f} GWh<extra></extra>"))
+    if prev is not None and not prev.empty:
+        fig.add_trace(go.Scatter(x=prev.index, y=prev.values, name=prev_label,
+                                 line=dict(color=GAS_PREV_COLOR, width=2),
+                                 hovertemplate=f"{prev_label} %{{x|%a %d %b}}<br>%{{y:,.0f}} GWh<extra></extra>"))
+    if cur is not None and not cur.empty:
+        fig.add_trace(go.Scatter(x=cur.index, y=cur.values, name=cur_label,
+                                 line=dict(color=GAS_CURR_COLOR, width=2.4),
+                                 hovertemplate=f"{cur_label} %{{x|%a %d %b}}<br>%{{y:,.0f}} GWh<extra></extra>"))
+    _delta_window_shading(fig, d_in, d_out)
+    fig.update_yaxes(title_text="GWh of gas displaced", rangemode="tozero")
+    return fig
+
+
+def make_gas_delta_bars(labels: list[str], values: list[float], title: str,
+                        bullish_positive: bool = True) -> go.Figure:
+    """Run-over-run demand delta per country. Colour is the price read, not the
+    sign: bullish gas red, bearish blue — so LDZ and wind/solar, whose signs
+    mean opposite things, stay comparable side by side."""
+    fig = _base_fig(title, height=300)
+    if not labels:
+        return fig
+    colors = []
+    for v in values:
+        bullish = (v > 0) if bullish_positive else (v < 0)
+        colors.append(DIV_POS if bullish else DIV_NEG)
+    fig.add_trace(go.Bar(x=labels, y=values, marker_color=colors, marker_line_width=0,
+                         text=[f"{v:+,.0f}" for v in values], textposition="outside",
+                         textfont=dict(color=INK_PRIMARY, size=11), showlegend=False,
+                         hovertemplate="%{x}<br>%{y:+,.0f} GWh<extra></extra>"))
+    fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
+    fig.update_layout(hovermode="closest", bargap=0.35)
+    fig.update_yaxes(title_text="Δ GWh over the window")
+    return fig

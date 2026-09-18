@@ -26,9 +26,37 @@ env:
   - name: GOLD_SCHEMA
     description: "Gold-layer Meteomatics climatology schema (ERA5 gridded anomalies for maps)"
     value: "dna_prod_gold.weather"
+  - name: AI_BRIEF_MODEL
+    description: "Azure OpenAI deployment used by the Morning Call agent families"
+    value: "gpt-4o"
+  - name: AZURE_TENANT_ID
+    valueFrom: azure-tenant-id
+  - name: AZURE_CLIENT_ID
+    valueFrom: azure-client-id
+  - name: AZURE_CLIENT_SECRET
+    valueFrom: azure-client-secret
 
 resources:
   - name: sql-warehouse
     sql_warehouse:
       id: "2f4ff6b7c65abb1a"
       permission: CAN_USE
+  # Azure OpenAI service principal for the Morning Call agent families. Same
+  # scope and keys the coal dashboard uses, so a workspace already set up for
+  # that app needs nothing new. Without these the Morning Call still renders
+  # the full table; only the commentary is unavailable.
+  - name: azure-tenant-id
+    secret:
+      scope: "commodity-news-secrets"
+      key: "azure-tenant-id"
+      permission: READ
+  - name: azure-client-id
+    secret:
+      scope: "commodity-news-secrets"
+      key: "azure-client-id"
+      permission: READ
+  - name: azure-client-secret
+    secret:
+      scope: "commodity-news-secrets"
+      key: "azure-client-secret"
+      permission: READ

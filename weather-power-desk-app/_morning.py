@@ -12,7 +12,13 @@ Port of P:/QFA/TonyWeather/Lorenzo_Trainee/Morning_Report/import_00z_add_solar_n
                       Solar PV [GW]      DE FRA ITA SEE Nordic Iberia
                       Precip [TWh]       Alps(cwe+it-nord) Nordic SEE Iberia   (sum of the coming 2 weeks, block 1 only)
   Columns             abs. value | Δ vs previous 00z (Δ -24h, Δ -72h on Monday) | Δ norm
-  Block 3             week after — free-text pattern / temperature / wind-precip-solar commentary
+
+The Excel's free-text boxes — Pattern and Comment per window, and the Week 3
+commentary block — are gone. In their place two agent families read these same
+numbers and write the commentary: one on the power market, one on gas (see
+_ai_brief.py). Week 3 is still reached: it is handed to the agents whenever the
+selected run has at least three days in it, which is normal for EC-Extended and
+rare for EC-ENS.
 
 On top of the Excel: the same table for the other runs (EC 12z, GFS 00z,
 EC-Extended, Meteomatics EC-ENS / AIFS-ENS means) side by side with EC 00z —
@@ -31,10 +37,12 @@ import streamlit as st
 
 from _config import (
     MORNING_BLOCKS, MORNING_MODELS, MORNING_DEFAULT_MODEL, MORNING_MIN_DAY_COVERAGE, SBX_SCHEMA,
+    AI_BRIEF_MODEL, AI_BRIEF_MAX_TOKENS, AI_BRIEF_SYNTHESIS_MAX_TOKENS, AI_POWER_AGENTS, AI_GAS_AGENTS,
+    SCENARIO_MIN_WEEK_DAYS,
 )
-from _data import load_morning_daily
+from _data import load_morning_daily, pick_run as _pick_run
 from _charts import make_model_compare_chart
-from _style import CATEGORICAL, PROVIDER_COLORS
+from _style import CATEGORICAL, PROVIDER_COLORS, BRIEF_CSS, INK_MUTED, CAT_BLUE, STATUS_CRITICAL
 from _ui import status_banner
 
 MODEL_COLORS = {
@@ -76,7 +84,11 @@ def morning_windows(time_ref: pd.Timestamp) -> dict:
         w2s, w2e = w1e + pd.Timedelta(days=1), w1e + pd.Timedelta(days=7)
         t1, t2, t3 = f"Week {wk + 1} (next week)", f"Week {wk + 2}", f"Week {wk + 3}"
         prev_days, delta_label, kind1 = (1 if wd == 4 else wd - 4), "Δ -24h" if wd == 4 else f"Δ -{24 * (wd - 4)}h", "week"
-    return {"w1": (w1s, w1e), "w2": (w2s, w2e), "t1": t1, "t2": t2, "t3": t3,
+    # Week 3 is the report's qualitative block: the week after w2, usually past
+    # the EC-ENS 15-day horizon. It is not tabulated, but it is handed to the
+    # agent families whenever the chosen run actually reaches into it.
+    w3s, w3e = w2e + pd.Timedelta(days=1), w2e + pd.Timedelta(days=7)
+    return {"w1": (w1s, w1e), "w2": (w2s, w2e), "w3": (w3s, w3e), "t1": t1, "t2": t2, "t3": t3,
             "delta_label": delta_label, "prev_days": prev_days, "kind1": kind1}
 
 
@@ -89,21 +101,6 @@ def _drop_partial_days(df: pd.DataFrame) -> pd.DataFrame:
         return df
     full = df.groupby("family")["n_points"].transform("max")
     return df[df["n_points"] >= MORNING_MIN_DAY_COVERAGE * full]
-
-
-def _pick_run(df: pd.DataFrame, pattern: str, target_date: pd.Timestamp) -> tuple[pd.DataFrame, pd.Timestamp | None]:
-    """Rows of the run initialised on target_date (00z-snapped); else the latest run before it."""
-    p = df[df["pattern"] == pattern]
-    if p.empty:
-        return p, None
-    exact = p[p["init_date"] == target_date]
-    if not exact.empty:
-        return exact, target_date
-    earlier = p[p["init_date"] < target_date]
-    if earlier.empty:
-        return earlier, None
-    latest = earlier["init_date"].max()
-    return p[p["init_date"] == latest], latest
 
 
 def _series(run_df: pd.DataFrame, family: str, region) -> tuple[pd.Series, pd.Series]:
@@ -186,16 +183,15 @@ def _block_html(title: str, unit: str, rows: list[dict], delta_label: str, fmt: 
 
 def _render_block(title: str, window: tuple | None, cur: pd.DataFrame, prev: pd.DataFrame, delta_label: str,
                   include_precip: bool, key: str, sub: str):
+    """One weekly window: the report's four tables. The free-text Pattern and
+    Comment boxes the Excel sheet had are gone — the agent families below the
+    tables write that commentary from these same numbers."""
     st.markdown(f'<div class="mc-week">{title}</div><div class="mc-sub">{sub}</div>', unsafe_allow_html=True)
-    st.text_area("Pattern", key=f"mc_pattern_{key}", placeholder="Pattern — e.g. High pressure in southern Europe, "
-                 "low over the Nordics.", height=68, label_visibility="collapsed")
     for name, block in MORNING_BLOCKS.items():
         if block["agg"] == "sum" and not include_precip:
             continue
         rows = block_values(cur, prev, block, None if block["agg"] == "sum" else window)
         st.markdown(_block_html(name, block["unit"], rows, delta_label, block["fmt"]), unsafe_allow_html=True)
-    st.text_area("Comment / view on alternative scenarios", key=f"mc_comment_{key}",
-                 placeholder="Comment / view on alternative scenarios", height=68, label_visibility="collapsed")
 
 
 def _download_table(cur: pd.DataFrame, prev: pd.DataFrame, win: dict, delta_label: str) -> bytes:
@@ -208,6 +204,176 @@ def _download_table(cur: pd.DataFrame, prev: pd.DataFrame, win: dict, delta_labe
                 recs.append({"block": win["t1"] if bt == "block1" else win["t2"], "table": name, "unit": block["unit"],
                              **r, "delta_label": delta_label})
     return pd.DataFrame(recs).to_csv(index=False).encode()
+
+
+# ─── AI commentary — two agent families ────────────────────────────────────────
+
+def build_brief_context(cur: pd.DataFrame, prev: pd.DataFrame, win: dict, model: str,
+                        cur_init, prev_init, delta_label: str, today: pd.Timestamp) -> dict:
+    """The on-screen numbers, as a structure the agents' context documents are
+    rendered from — so what the commentary reads is exactly what the tables show.
+
+    Week 3 is included only when the run genuinely reaches into it, using the
+    same minimum the scenario engine applies to a forecast week
+    (SCENARIO_MIN_WEEK_DAYS) — normal for EC-Extended, rare for EC-ENS. Any
+    window the run covers only partly is labelled with its day count, so an
+    average over four days is never read as a full week.
+    """
+    windows = []
+    specs = [("w1", "t1", True), ("w2", "t2", False), ("w3", "t3", False)]
+    for wkey, tkey, include_precip in specs:
+        window = win[wkey]
+        span = (window[1] - window[0]).days + 1
+        blocks, has_data, covered = {}, False, 0
+        for name, block in MORNING_BLOCKS.items():
+            if block["agg"] == "sum" and not include_precip:
+                continue
+            rows = block_values(cur, prev, block, None if block["agg"] == "sum" else window)
+            if any(not np.isnan(r["value"]) for r in rows):
+                has_data = True
+            if block["agg"] == "mean":
+                covered = max(covered, max((r["n_days"] for r in rows), default=0))
+            blocks[name] = {"unit": block["unit"], "rows": rows}
+        if not blocks or not has_data:
+            continue
+        if wkey == "w3" and covered < SCENARIO_MIN_WEEK_DAYS:
+            continue
+        rng = f"{window[0]:%a %d %b} – {window[1]:%a %d %b}"
+        if 0 < covered < span:
+            rng += f"; the run covers only {covered} of these {span} days"
+        windows.append({"title": win[tkey], "range": rng, "blocks": blocks})
+    return {"run": model, "today": today, "delta_label": delta_label,
+            "run_init": f"{cur_init:%a %d %b}" if cur_init is not None else "n/a",
+            "prev_init": f"{prev_init:%a %d %b}" if prev_init is not None else "n/a",
+            "windows": windows}
+
+
+_SIG_COLOR = {"BULLISH": STATUS_CRITICAL, "BEARISH": CAT_BLUE, "NEUTRAL": INK_MUTED}
+_SIG_ARROW = {"BULLISH": "▲", "BEARISH": "▼", "NEUTRAL": "●"}
+
+
+def _signal_card(label: str, subtitle: str, signal: str) -> str:
+    color = _SIG_COLOR.get(signal, INK_MUTED)
+    arrow = _SIG_ARROW.get(signal, "●")
+    return (f'<div class="agent-card" style="border-top-color:{color};">'
+            f'<div class="agent-card-label">{label}</div>'
+            f'<div class="agent-card-signal" style="color:{color};">{arrow} {signal}</div>'
+            f'<div class="agent-card-sub">{subtitle}</div></div>')
+
+
+def _render_family(result: dict, agents_meta: list[tuple[str, str, str]]) -> None:
+    from _ai_brief import FAMILIES, prose_to_html
+
+    signals, briefs = result["signals"], result["briefs"]
+    cards = [_signal_card(label, sub, signals.get(key, "NEUTRAL")) for key, label, sub in agents_meta]
+    cols = st.columns(len(cards))
+    for col, html in zip(cols, cards):
+        with col:
+            st.markdown(html, unsafe_allow_html=True)
+
+    overall = signals.get("synthesis", "NEUTRAL")
+    color = _SIG_COLOR.get(overall, INK_MUTED)
+    st.markdown(f'<div class="agent-overall" style="background:{color};">'
+                f'<span class="agent-overall-label">{result["commodity"]} — net weather signal</span>'
+                f'<span class="agent-overall-value">{_SIG_ARROW.get(overall, "●")} {overall}</span></div>',
+                unsafe_allow_html=True)
+    st.markdown(f'<div class="brief-box">{prose_to_html(briefs.get("synthesis", ""))}</div>',
+                unsafe_allow_html=True)
+
+    agent_labels = {k: v[0] for k, v in FAMILIES[result["family"]]["agents"].items()}
+    with st.expander(f"{result['label']} — the three specialist reads"):
+        for key, label in agent_labels.items():
+            st.markdown(f"**{label}** · {signals.get(key, 'NEUTRAL')}")
+            st.markdown(briefs.get(key, "_no output_"))
+    with st.expander(f"{result['label']} — exactly what each agent was shown"):
+        for key, doc in result["docs"].items():
+            st.markdown(f"**{agent_labels.get(key, 'synthesis')}**")
+            st.code(doc)
+    st.caption(f"Generated {result['generated_at']} · {result['label']} family")
+
+
+def _render_ai_brief(ctx: dict, today: pd.Timestamp) -> None:
+    """Two families of agents commenting on the table above — power and gas."""
+    from _ai_brief import FAMILIES, get_az_credentials, generate_family_brief
+
+    st.markdown("##### Market read — agent families")
+    st.caption("Two families comment on the table above and nothing else: one on the power market "
+               "(temperature → load, wind & solar → residual load, precipitation → hydro), one on gas "
+               "(temperature → LDZ heating demand, wind & solar → gas-for-power). Each specialist reads "
+               "only its own rows; a synthesis agent per family nets them into a few sentences. The gas "
+               "family is additionally given the Gas Demand section's LDZ and displaced-gas figures for "
+               "these same runs, so the words and the GWh cannot drift apart.")
+    st.markdown(BRIEF_CSS, unsafe_allow_html=True)
+
+    if not ctx.get("windows"):
+        status_banner("No window in this run has data to comment on.", "warning")
+        return
+
+    tenant_id, client_id, client_secret = get_az_credentials()
+    if not all([tenant_id, client_id, client_secret]):
+        status_banner("Azure OpenAI credentials not found — the agent families are unavailable. Set "
+                      "azure_tenant_id / azure_client_id / azure_client_secret in the Databricks secret "
+                      "scope `axpo`, in st.secrets, or as AZURE_* environment variables (app.yaml wires "
+                      "the secret scope for a deployed app).", "warning")
+        return
+
+    c1, c2, c3 = st.columns([1.3, 1.3, 4])
+    with c1:
+        run_power = st.button("Run power brief", type="primary", key="mc_brief_power")
+    with c2:
+        run_gas = st.button("Run gas brief", type="primary", key="mc_brief_gas")
+
+    snapshot = {}
+    if run_gas:
+        try:
+            from _gas import gas_demand_snapshot
+            snapshot = gas_demand_snapshot(today.date())
+        except Exception:
+            snapshot = {}
+
+    progress = st.empty()
+
+    def _prog(msg: str):
+        progress.caption(f"⟳  {msg}")
+
+    for family, run_it in (("power", run_power), ("gas", run_gas)):
+        state_key = f"mc_brief_{family}_result"
+        if run_it:
+            try:
+                st.session_state[state_key] = generate_family_brief(
+                    family, ctx, tenant_id, client_id, client_secret,
+                    gas_snapshot=snapshot if family == "gas" else None,
+                    model=AI_BRIEF_MODEL, max_tokens=AI_BRIEF_MAX_TOKENS,
+                    synthesis_max_tokens=AI_BRIEF_SYNTHESIS_MAX_TOKENS, progress_cb=_prog)
+                if family == "gas" and not snapshot:
+                    st.session_state[f"{state_key}_no_model"] = True
+                else:
+                    st.session_state.pop(f"{state_key}_no_model", None)
+            except Exception as exc:
+                progress.empty()
+                st.error(f"{FAMILIES[family]['label']} brief failed: {exc}")
+                with st.expander("Error details"):
+                    import traceback
+                    st.code(traceback.format_exc())
+    progress.empty()
+
+    n_calls = {f: len(FAMILIES[f]["agents"]) + 1 for f in FAMILIES}
+    if not any(st.session_state.get(f"mc_brief_{f}_result") for f in FAMILIES):
+        st.info(f"Run a family to get the commentary. The power family makes {n_calls['power']} Azure "
+                f"OpenAI calls, the gas family {n_calls['gas']} — about 10-20 seconds each.")
+        return
+
+    for family in FAMILIES:
+        result = st.session_state.get(f"mc_brief_{family}_result")
+        if not result:
+            continue
+        st.markdown(f"**{result['label']}**")
+        if st.session_state.get(f"mc_brief_{family}_result_no_model"):
+            status_banner("The Gas Demand section's figures were unavailable, so the gas family worked "
+                          "from the Morning Call table alone.", "warning")
+        meta = AI_POWER_AGENTS if family == "power" else AI_GAS_AGENTS
+        _render_family(result, meta)
+        st.markdown("")
 
 
 def _render_model_comparison(df: pd.DataFrame, win: dict, today: pd.Timestamp):
@@ -317,18 +483,12 @@ def render_morning_call():
         _render_block(win["t2"], win["w2"], cur, prev, delta_label, include_precip=False, key="b2",
                       sub=f"{win['w2'][0]:%a %d %b} – {win['w2'][1]:%a %d %b} · weekly average")
 
-    st.markdown(f'<div class="mc-week">{win["t3"]} — EC weekly</div>'
-                f'<div class="mc-sub">run initialised {cur_init:%d.%m.%Y} · qualitative outlook, as in the report</div>',
-                unsafe_allow_html=True)
-    k1, k2, k3 = st.columns(3)
-    with k1:
-        st.text_area("Pattern", key="mc_w3_pattern", placeholder="Pattern", height=90)
-    with k2:
-        st.text_area("Temperatures", key="mc_w3_temp", placeholder="Temperatures", height=90)
-    with k3:
-        st.text_area("Wind / Precip / Solar", key="mc_w3_wps", placeholder="Wind / Precip / Solar", height=90)
     st.download_button("Download table (CSV)", _download_table(cur, prev, win, delta_label),
                        f"morning_call_{today:%Y%m%d}.csv", "text/csv", key="mc_dl")
+
+    st.divider()
+    ctx = build_brief_context(cur, prev, win, model, cur_init, prev_init, delta_label, today)
+    _render_ai_brief(ctx, today)
 
     st.divider()
     _render_model_comparison(df, win, today)
