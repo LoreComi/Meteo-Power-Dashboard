@@ -28,14 +28,21 @@ Tables written (all read by weather-power-desk-app/_data.py):
   gas_demand_daily      daily ens-mean ('Avg') temperature / wind / solar with
                         the normal, per pattern and run, last 8 days of runs —
                         feeds the Gas Demand section (LDZ + wind/solar RDL)
+  wr_patterns           the 7 fixed weather-regime patterns on the 121 x 241
+  wr_norm / wr_amplitude  domain, their normalisation constants and the
+                        day-of-year amplitude — built once from wr_patterns.npz
+  wr_gph_clim           ERA5 day-of-year mean Z500 per grid point (once)
+  wr_forecast_members   per run / member / lead day: 7 IWR values + regime
+  wr_reanalysis_daily   ERA5 classified into regimes, for the climatology
   weather_indexes       CREATE IF NOT EXISTS — loaded separately
   meteologica_members   CREATE IF NOT EXISTS — populated only if METEOLOGICA_TABLE set
 
 Lookup tables below mirror weather-power-desk-app/_config.py — update both.
 """
+import os
 from datetime import datetime
 
-VOLUE = "dna_prod_silver.volue"                 # set to the delta-share catalog if mounted elsewhere
+VOLUE = "dna_prod_silver.volue"               # set to the delta-share catalog if mounted elsewhere
 MM = "dna_prod_silver.meteomatics"
 SBX = "dna_snbx_weather.power_desk"
 APP_SP = "82058742-a661-4413-9d6c-9fffe0f6e45d"  # weather-power-desk-app service principal
@@ -686,6 +693,239 @@ SELECT 'Volue' AS provider, f.family, f.pattern, f.area, f.reference_date, f.day
 FROM f LEFT JOIN n ON n.family = f.family AND n.area = f.area AND n.day = f.day
 """)
 count("gas_demand_daily")
+
+# COMMAND ----------
+
+# DBTITLE 1,7c. European Weather Regimes — project Z500 members onto the 7 regimes
+# Port of Franziska_Intern/corso_model_wr/working_wr_tool/max_proj_members.py
+# (Michel & Rivière 2011), reading Databricks instead of the DSL NetCDF drops.
+#
+# The projection is an area-weighted inner product between the standardised
+# geopotential anomaly and each fixed regime pattern, so it is a JOIN on
+# (latitude, longitude) plus a GROUP BY (member, day) — the 22 M grid rows of a
+# run never leave Spark, and only ~850 rows per run are written.
+#
+# Tables written:
+#   wr_patterns          the 7 fixed patterns on the 121 x 241 domain, one row
+#                        per grid point, pre-multiplied by cos(latitude).
+#                        Built ONCE from wr_patterns.npz (shipped with the app);
+#                        set WR_PATTERNS_PATH to wherever you put that file.
+#   wr_gph_clim          ERA5 day-of-year mean Z500 per grid point — turns the
+#                        absolute heights the silver table stores into the
+#                        anomalies the projection needs.
+#   wr_reanalysis_daily  ERA5 classified through the same projection: the
+#                        climatological frequency, persistence and transitions.
+#                        Backfilled once, then appended daily.
+#   wr_forecast_members  per run / member / lead day: the 7 IWR values and the
+#                        assigned regime. This is what the app reads.
+#
+# The patterns are the fixed output of the original 1979-2019 k-means study and
+# cannot be derived from Databricks; everything else comes from the silver layer.
+GPH_FCST = f"{MM}.geopotential_height_forecast"
+GPH_ACT = f"{MM}.geopotential_height"
+# Where wr_patterns.npz (shipped in weather-power-desk-app/) was uploaded.
+# Read once, on the first run only; override with the WR_PATTERNS_PATH env var
+# or just edit this line. A Workspace path or a UC volume path both work.
+WR_PATTERNS_PATH = os.environ.get("WR_PATTERNS_PATH", "/Workspace/Shared/power_desk/wr_patterns.npz")
+
+WR_REGIMES = ["ScTr", "GL", "EuBl", "AR", "AT", "ScBl", "ZO"]
+WR_LAT_MIN, WR_LAT_MAX, WR_LON_MIN, WR_LON_MAX = 30.0, 90.0, -80.0, 40.0
+WR_THRESHOLD, WR_LEAD_FACTOR = 1.0, -0.018774217528098960
+WR_MODELS = {
+    "ecmwf-aifs-ens": "geopotential_height_500hpa_m_ecmwf_aifs_ens_p1d",
+    "ncep-gfs-ens": "geopotential_height_500hpa_m_ncep_gfs_ens_p1d",
+}
+WR_ERA5_CURVE = "geopotential_height_500hpa_m_ecmwf_era5_p1d"
+WR_RUN_HISTORY_DAYS = 8
+WR_CLIM_START_YEAR = 1979
+WR_MAX_HORIZON_DAYS = 17
+
+def wr_domain(alias: str = "") -> str:
+    """The domain predicate, qualified by table alias. It MUST be qualified in the
+    projection queries: the pattern and climatology tables also carry
+    latitude/longitude, so an unqualified reference is ambiguous."""
+    p = f"{alias}." if alias else ""
+    return (f"{p}latitude BETWEEN {WR_LAT_MIN} AND {WR_LAT_MAX} "
+            f"AND {p}longitude BETWEEN {WR_LON_MIN} AND {WR_LON_MAX}")
+
+
+def wr_tables_exist(*names) -> bool:
+    return all(spark.catalog.tableExists(f"{SBX}.{n}") for n in names)
+
+
+# --- 7c.1 patterns (once) -----------------------------------------------------
+if spark.catalog.tableExists(f"{SBX}.wr_patterns"):
+    print("wr_patterns already built — skipping")
+else:
+    import numpy as _np
+    import pandas as _pd
+
+    _z = _np.load(WR_PATTERNS_PATH)
+    _pat, _lats, _lons = _z["patterns"], _z["lats"], _z["lons"]   # (7, lat, lon)
+    assert _pat.shape == (7, len(_lats), len(_lons)), f"unexpected pattern shape {_pat.shape}"
+    _coslat = _np.cos(_np.deg2rad(_lats))
+    _rows = {
+        "latitude": _np.repeat(_lats, len(_lons)),
+        "longitude": _np.tile(_lons, len(_lats)),
+    }
+    # store the pattern already multiplied by cos(lat): the SQL then only sums
+    _for_k = _pat * _coslat[None, :, None]
+    for _k, _name in enumerate(WR_REGIMES):
+        _rows[f"w_{_name}"] = _for_k[_k].ravel()
+    spark.createDataFrame(_pd.DataFrame(_rows)).write.mode("overwrite").saveAsTable(f"{SBX}.wr_patterns")
+
+    # normalisation constants + the day-of-year amplitude, as a second small table
+    _norm = _pd.DataFrame({"regime": WR_REGIMES,
+                           "proj_avg": _z["proj_avg"], "denom": _z["denom"]})
+    spark.createDataFrame(_norm).write.mode("overwrite").saveAsTable(f"{SBX}.wr_norm")
+    _amp = _pd.DataFrame({"month": _z["amp_month"].astype(int), "day_of_month": _z["amp_day"].astype(int),
+                          "amplitude": _z["amp_value"]})
+    spark.createDataFrame(_amp).write.mode("overwrite").saveAsTable(f"{SBX}.wr_amplitude")
+    # the projection divides by sum(cos(lat)) * n_lon — a pure domain constant
+    print(f"wr_patterns: {len(_lats)} x {len(_lons)} grid, "
+          f"normalizer = {float(_coslat.sum()) * len(_lons):.6f}")
+count("wr_patterns")
+
+WR_NORMALIZER = spark.sql(f"""
+    SELECT SUM(c) * (SELECT COUNT(DISTINCT longitude) FROM {SBX}.wr_patterns)
+    FROM (SELECT DISTINCT latitude, COS(RADIANS(latitude)) AS c FROM {SBX}.wr_patterns)
+""").first()[0]
+print(f"normalizer = {WR_NORMALIZER}")
+
+# --- 7c.2 ERA5 day-of-year climatology (once) ---------------------------------
+# The silver tables store absolute heights; the projection needs anomalies.
+# A day-of-year mean per grid point over the ERA5 record is what the original
+# MATLAB climatology provided — verified to give identical regime assignments.
+if spark.catalog.tableExists(f"{SBX}.wr_gph_clim"):
+    print("wr_gph_clim already built — skipping")
+else:
+    spark.sql(f"""
+    CREATE OR REPLACE TABLE {SBX}.wr_gph_clim AS
+    SELECT latitude, longitude,
+           DAYOFYEAR(delivery_start)
+             - CASE WHEN MONTH(delivery_start) > 2
+                     AND (YEAR(delivery_start) % 4 = 0
+                          AND (YEAR(delivery_start) % 100 != 0 OR YEAR(delivery_start) % 400 = 0))
+                    THEN 1 ELSE 0 END          AS doy,
+           AVG(value)   AS gph_normal,
+           COUNT(*)     AS n_years
+    FROM {GPH_ACT}
+    WHERE curve_name = '{WR_ERA5_CURVE}' AND {wr_domain()}
+      AND YEAR(delivery_start) >= {WR_CLIM_START_YEAR}
+    GROUP BY latitude, longitude, 2
+    """)
+    _cov = spark.sql(f"SELECT MIN(n_years), MAX(n_years), COUNT(DISTINCT doy) FROM {SBX}.wr_gph_clim").first()
+    print(f"wr_gph_clim: {_cov[2]} days of year, {_cov[0]}-{_cov[1]} years per grid point")
+count("wr_gph_clim")
+
+# --- 7c.3 the projection, as a reusable SQL block -----------------------------
+# anomaly = value - day-of-year normal; standardised by the day's domain
+# amplitude; projected onto each cos-lat-weighted pattern; then normalised.
+_proj_cols = ",\n           ".join(
+    f"SUM((f.value - c.gph_normal) / a.amplitude * p.w_{r}) / {WR_NORMALIZER} AS raw_{r}"
+    for r in WR_REGIMES)
+_iwr_cols = ",\n       ".join(
+    f"(raw_{r} - (SELECT proj_avg FROM {SBX}.wr_norm WHERE regime = '{r}')) "
+    f"/ (SELECT denom FROM {SBX}.wr_norm WHERE regime = '{r}') AS iwr_{r}"
+    for r in WR_REGIMES)
+_greatest = "GREATEST(" + ", ".join(f"iwr_{r}" for r in WR_REGIMES) + ")"
+_which = "CASE " + " ".join(
+    f"WHEN max_iwr = iwr_{r} THEN '{r}'" for r in WR_REGIMES) + " END"
+
+# --- 7c.4 forecast members ----------------------------------------------------
+_fc_models = ",".join(f"'{m}'" for m in WR_MODELS)
+spark.sql(f"""
+CREATE OR REPLACE TABLE {SBX}.wr_forecast_members AS
+WITH raw AS (
+  SELECT f.model, f.created_at AS reference_date,
+         DATE(f.delivery_start) AS day,
+         CAST(f.curve_member AS STRING) AS member,
+         {_proj_cols}
+  FROM {GPH_FCST} f
+  JOIN {SBX}.wr_patterns p ON p.latitude = f.latitude AND p.longitude = f.longitude
+  JOIN {SBX}.wr_gph_clim c ON c.latitude = f.latitude AND c.longitude = f.longitude
+       AND c.doy = DAYOFYEAR(f.delivery_start)
+         - CASE WHEN MONTH(f.delivery_start) > 2
+                 AND (YEAR(f.delivery_start) % 4 = 0
+                      AND (YEAR(f.delivery_start) % 100 != 0 OR YEAR(f.delivery_start) % 400 = 0))
+                THEN 1 ELSE 0 END
+  JOIN {SBX}.wr_amplitude a ON a.month = MONTH(f.delivery_start)
+       AND a.day_of_month = DAY(f.delivery_start)
+  WHERE f.model IN ({_fc_models}) AND {wr_domain('f')}
+    AND f.curve_member IS NOT NULL AND CAST(f.curve_member AS STRING) != ''
+    AND f.created_at >= current_timestamp() - INTERVAL {WR_RUN_HISTORY_DAYS} DAYS
+    AND f.delivery_start >= current_date() - INTERVAL {WR_RUN_HISTORY_DAYS + 1} DAYS
+  GROUP BY f.model, f.created_at, DATE(f.delivery_start), CAST(f.curve_member AS STRING)
+),
+iwr AS (
+  SELECT model, reference_date, day, member,
+       {_iwr_cols}
+  FROM raw
+),
+scored AS (
+  SELECT *, DATEDIFF(day, DATE(reference_date)) AS lead_day, {_greatest} AS max_iwr FROM iwr
+)
+SELECT model, reference_date, day, lead_day, member,
+       {", ".join(f"iwr_{r}" for r in WR_REGIMES)},
+       max_iwr,
+       {WR_THRESHOLD} + lead_day * {WR_LEAD_FACTOR} AS threshold,
+       CASE WHEN max_iwr >= {WR_THRESHOLD} + lead_day * {WR_LEAD_FACTOR}
+            THEN {_which} ELSE 'no' END AS regime,
+       current_timestamp() AS snapshot_ts
+FROM scored
+WHERE lead_day BETWEEN 0 AND {WR_MAX_HORIZON_DAYS}
+""")
+count("wr_forecast_members")
+
+# --- 7c.5 classified ERA5 reanalysis (backfill once, then append) -------------
+# Same projection over the actuals table. The first run is the expensive one
+# (the whole ERA5 record); afterwards only the days not yet classified are
+# added, which is one or two per refresh.
+_era5_exists = spark.catalog.tableExists(f"{SBX}.wr_reanalysis_daily")
+_since = f"YEAR(delivery_start) >= {WR_CLIM_START_YEAR}"
+if _era5_exists:
+    _last = spark.sql(f"SELECT MAX(day) FROM {SBX}.wr_reanalysis_daily").first()[0]
+    if _last is not None:
+        _since = f"delivery_start > DATE '{_last}'"
+    print(f"wr_reanalysis_daily exists — appending days after {_last}")
+else:
+    print(f"wr_reanalysis_daily: first build, classifying ERA5 from {WR_CLIM_START_YEAR} "
+          "(this run is slow; later runs only append new days)")
+
+_era5_proj = ",\n           ".join(
+    f"SUM((f.value - c.gph_normal) / a.amplitude * p.w_{r}) / {WR_NORMALIZER} AS raw_{r}"
+    for r in WR_REGIMES)
+_era5_sql = f"""
+WITH raw AS (
+  SELECT DATE(f.delivery_start) AS day, {_era5_proj}
+  FROM {GPH_ACT} f
+  JOIN {SBX}.wr_patterns p ON p.latitude = f.latitude AND p.longitude = f.longitude
+  JOIN {SBX}.wr_gph_clim c ON c.latitude = f.latitude AND c.longitude = f.longitude
+       AND c.doy = DAYOFYEAR(f.delivery_start)
+         - CASE WHEN MONTH(f.delivery_start) > 2
+                 AND (YEAR(f.delivery_start) % 4 = 0
+                      AND (YEAR(f.delivery_start) % 100 != 0 OR YEAR(f.delivery_start) % 400 = 0))
+                THEN 1 ELSE 0 END
+  JOIN {SBX}.wr_amplitude a ON a.month = MONTH(f.delivery_start)
+       AND a.day_of_month = DAY(f.delivery_start)
+  WHERE f.curve_name = '{WR_ERA5_CURVE}' AND {wr_domain('f')} AND {_since}
+  GROUP BY DATE(f.delivery_start)
+),
+iwr AS (SELECT day, {_iwr_cols} FROM raw),
+scored AS (SELECT *, {_greatest} AS max_iwr FROM iwr)
+SELECT day, {", ".join(f"iwr_{r}" for r in WR_REGIMES)}, max_iwr,
+       CASE WHEN max_iwr >= {WR_THRESHOLD} THEN {_which} ELSE 'no' END AS regime,
+       current_timestamp() AS snapshot_ts
+FROM scored
+"""
+if _era5_exists:
+    spark.sql(f"INSERT INTO {SBX}.wr_reanalysis_daily {_era5_sql}")
+else:
+    spark.sql(f"CREATE OR REPLACE TABLE {SBX}.wr_reanalysis_daily AS {_era5_sql}")
+count("wr_reanalysis_daily")
+
+_span = spark.sql(f"SELECT MIN(day), MAX(day), COUNT(*) FROM {SBX}.wr_reanalysis_daily").first()
+print(f"wr_reanalysis_daily spans {_span[0]} -> {_span[1]} ({_span[2]:,} days)")
 
 # COMMAND ----------
 

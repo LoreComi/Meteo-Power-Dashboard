@@ -40,6 +40,7 @@ from _scenarios import (
     scenario_daily_summary, scenario_weekly_values, scenario_table, scenario_name, describe_scenario,
     silhouette_for_k,
 )
+from _regimes import render_regimes
 from _ui import anomaly_kpi, kpi_card, kpi_row, status_banner
 
 
@@ -509,17 +510,23 @@ def _render_scenarios(runs: pd.DataFrame):
 
 def render_forecast():
     st.markdown("#### FORECAST")
-    st.caption("Volue ensemble forecasts by country · distribution spread vs normal · weekly-mean member scenarios. "
+    st.caption("Volue ensemble forecasts by country · distribution spread vs normal · weekly-mean member "
+               "scenarios · European weather regimes. "
                "Source: Volue delta share, Meteomatics silver layer, via power_desk_refresh.py.")
+    # Weather Regimes reads its own table, so a failure of the Volue run list
+    # must not take it down with the other three tabs.
+    runs, runs_error = None, None
     try:
         runs = load_runs()
     except Exception as e:
-        st.error(f"Cannot read the run list ({e}). Has power_desk_refresh.py run?")
-        return
-    tabs = st.tabs(["Values", "Uncertainty", "Scenarios"])
-    with tabs[0]:
-        _render_values(runs)
-    with tabs[1]:
-        _render_uncertainty(runs)
-    with tabs[2]:
-        _render_scenarios(runs)
+        runs_error = f"Cannot read the run list ({e}). Has power_desk_refresh.py run?"
+
+    tabs = st.tabs(["Values", "Uncertainty", "Scenarios", "Weather Regimes"])
+    for tab, render in zip(tabs[:3], (_render_values, _render_uncertainty, _render_scenarios)):
+        with tab:
+            if runs_error:
+                st.error(runs_error)
+            else:
+                render(runs)
+    with tabs[3]:
+        render_regimes()

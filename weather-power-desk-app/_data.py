@@ -16,7 +16,7 @@ import requests
 import streamlit as st
 
 from _config import (
-    SBX_SCHEMA, METRICS, VOLUE_MODELS, HYDRO_COMPONENTS, HYDRO_AREA_CODES,
+    SBX_SCHEMA, METRICS, VOLUE_MODELS, HYDRO_COMPONENTS, HYDRO_AREA_CODES, WR_REGIMES,
 )
 
 # ─── Connection config ───────────────────────────────────────────────────────────
@@ -344,6 +344,55 @@ def load_morning_daily() -> pd.DataFrame:
                        for r, p in zip(df["reference_date"], df["pattern"])]
     df["init_date"] = df["init_time"].dt.normalize()
     return df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WEATHER REGIMES
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_wr_forecast_members() -> pd.DataFrame:
+    """Per run / member / lead day: the 7 IWR values and the assigned regime.
+
+    Small by construction — the refresh notebook does the projection over the
+    22 M gridded values in Spark and writes only ~900 rows per run, so the whole
+    8-day run history for both models is a few tens of thousands of rows.
+    """
+    cols = ", ".join(f"iwr_{r}" for r in WR_REGIMES)
+    df = run_query(f"""
+        SELECT model, reference_date, day, lead_day, member, {cols},
+               max_iwr, threshold, regime
+        FROM {SBX_SCHEMA}.wr_forecast_members
+        ORDER BY model, reference_date, member, lead_day
+    """)
+    if df.empty:
+        return df
+    df = _dt(df, ["reference_date"], utc=True)
+    df = _dt(df, ["day"])
+    df = _num(df, ["lead_day", "max_iwr", "threshold"] + [f"iwr_{r}" for r in WR_REGIMES])
+    df["init_date"] = df["reference_date"].dt.normalize()
+    return df
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_wr_reanalysis() -> pd.DataFrame:
+    """ERA5 classified into regimes, one row per day — the climatology.
+
+    Cached for a day: the notebook only appends one or two rows per refresh, and
+    every climatological statistic downstream is an average over decades.
+    """
+    cols = ", ".join(f"iwr_{r}" for r in WR_REGIMES)
+    try:
+        df = run_query(f"""
+            SELECT day, {cols}, max_iwr, regime
+            FROM {SBX_SCHEMA}.wr_reanalysis_daily ORDER BY day
+        """)
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    df = _dt(df, ["day"])
+    return _num(df, ["max_iwr"] + [f"iwr_{r}" for r in WR_REGIMES])
 
 
 # ══════════════════════════════════════════════════════════════════════════════

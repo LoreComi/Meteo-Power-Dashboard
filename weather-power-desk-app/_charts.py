@@ -14,10 +14,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 
-from _config import AREAS, MONTH_NAMES, SPREAD_RATIO_HIGH, SPREAD_RATIO_LOW
+from _config import AREAS, MONTH_NAMES, SPREAD_RATIO_HIGH, SPREAD_RATIO_LOW, WR_COLORS
 from _style import (
     PLOTLY_LAYOUT, INK_PRIMARY, INK_SECONDARY, INK_MUTED, BASELINE, GRIDLINE,
-    CATEGORICAL, PROVIDER_COLORS, SCENARIO_COLORS, ENS_FAN_ALPHA,
+    CATEGORICAL, PROVIDER_COLORS, SCENARIO_COLORS, ENS_FAN_ALPHA, SEQ_BLUE,
     DIV_NEG, DIV_POS, DIV_MID, STATUS_WARNING, STATUS_GOOD,
     HYDRO_HIST_GREY, HYDRO_CURRENT_RED, hydro_recent_colours, hex_to_rgba,
     CAT_BLUE, CAT_ORANGE,
@@ -600,6 +600,143 @@ def make_hydro_anomaly_bars(rows: list[dict], title: str = "Anomaly vs normal to
     fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
     fig.update_layout(hovermode="closest", bargap=0.3)
     fig.update_yaxes(title_text="GWh")
+    return fig
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WEATHER REGIMES
+# ══════════════════════════════════════════════════════════════════════════════
+# Colour is regime identity throughout — one fixed hue per regime (WR_COLORS,
+# matching the original tool's plots), never reused for magnitude or status.
+
+def make_wr_iwr_chart(iwr: pd.DataFrame, threshold: pd.Series, no_regime_days: list,
+                      title: str, spread: dict | None = None) -> go.Figure:
+    """Ensemble-mean IWR per regime over the forecast, the lead-decaying
+    threshold, and grey shading on days where no regime clears it.
+
+    `iwr` is indexed by day with one column per regime; `spread` optionally maps
+    a regime to (low, high) series drawn as a band, so the member disagreement
+    behind the mean line is visible rather than implied.
+    """
+    fig = _base_fig(title, height=420)
+    if iwr.empty:
+        return fig
+    for day in no_regime_days:
+        fig.add_vrect(x0=day - pd.Timedelta(hours=12), x1=day + pd.Timedelta(hours=12),
+                      fillcolor=INK_MUTED, opacity=0.13, line_width=0, layer="below")
+    if spread:
+        for regime, (lo, hi) in spread.items():
+            c = WR_COLORS.get(regime, INK_MUTED)
+            fig.add_trace(go.Scatter(x=list(hi.index) + list(lo.index[::-1]),
+                                     y=list(hi.values) + list(lo.values[::-1]),
+                                     fill="toself", fillcolor=hex_to_rgba(c, 0.13),
+                                     line=dict(width=0), hoverinfo="skip",
+                                     showlegend=False, legendgroup=regime))
+    for regime in iwr.columns:
+        c = WR_COLORS.get(regime, INK_MUTED)
+        fig.add_trace(go.Scatter(x=iwr.index, y=iwr[regime], name=regime, legendgroup=regime,
+                                 line=dict(color=c, width=2.6),
+                                 hovertemplate=f"{regime} %{{x|%a %d %b}}<br>IWR %{{y:.2f}}<extra></extra>"))
+    if threshold is not None and len(threshold):
+        fig.add_trace(go.Scatter(x=threshold.index, y=threshold.values, name="Threshold",
+                                 line=dict(color=INK_PRIMARY, width=1.4, dash="dash"),
+                                 hovertemplate="threshold %{y:.2f}<extra></extra>"))
+    fig.add_hline(y=0, line_color=BASELINE, line_width=1)
+    fig.update_yaxes(title_text="IWR (standardised projection)")
+    return fig
+
+
+def make_wr_percent_chart(perc: pd.DataFrame, title: str, n_members: int) -> go.Figure:
+    """Stacked share of ensemble members assigned to each regime, per day."""
+    fig = _base_fig(title, height=360)
+    if perc.empty:
+        return fig
+    for regime in perc.columns:
+        fig.add_trace(go.Bar(x=perc.index, y=perc[regime], name=regime,
+                             marker_color=WR_COLORS.get(regime, INK_MUTED), marker_line_width=0,
+                             hovertemplate=(f"{regime} %{{x|%a %d %b}}<br>%{{y:.0f}}%% of "
+                                            f"{n_members} members<extra></extra>")))
+    fig.update_layout(barmode="stack", bargap=0.15)
+    fig.update_yaxes(title_text="% of members", range=[0, 100])
+    return fig
+
+
+def make_wr_clim_compare(fcst: pd.DataFrame, clim: pd.DataFrame, title: str) -> go.Figure:
+    """Forecast regime share against the day-of-year climatological share.
+
+    Grouped bars per regime: what this run says, and what the reanalysis says is
+    normal for these calendar days. The gap is the signal.
+    """
+    fig = _base_fig(title, height=340)
+    if fcst.empty:
+        return fig
+    regimes = list(fcst.index)
+    fig.add_trace(go.Bar(x=regimes, y=fcst.values, name="This run",
+                         marker_color=[WR_COLORS.get(r, INK_MUTED) for r in regimes],
+                         marker_line_width=0,
+                         hovertemplate="%{x}<br>forecast %{y:.0f}%<extra></extra>"))
+    fig.add_trace(go.Bar(x=regimes, y=clim.reindex(regimes).values, name="Climatology",
+                         marker_color="rgba(0,0,0,0)", marker_line=dict(color=INK_SECONDARY, width=1.6),
+                         hovertemplate="%{x}<br>climatology %{y:.0f}%<extra></extra>"))
+    fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.05, hovermode="closest")
+    fig.update_yaxes(title_text="% of days / members")
+    return fig
+
+
+def make_wr_seasonal_clim(clim_doy: pd.DataFrame, window_days: tuple | None,
+                          title: str) -> go.Figure:
+    """Climatological frequency of each regime through the year, with the
+    forecast window marked — the seasonal backdrop the run sits against."""
+    fig = _base_fig(title, height=340)
+    if clim_doy.empty:
+        return fig
+    for regime in clim_doy.columns:
+        fig.add_trace(go.Scatter(x=clim_doy.index, y=clim_doy[regime], name=regime,
+                                 line=dict(color=WR_COLORS.get(regime, INK_MUTED), width=2),
+                                 hovertemplate=f"{regime} day %{{x}}<br>%{{y:.1f}}%<extra></extra>"))
+    if window_days:
+        fig.add_vrect(x0=window_days[0], x1=window_days[1], fillcolor=CAT_BLUE, opacity=0.10,
+                      line_width=0, layer="below", annotation_text="forecast window",
+                      annotation_position="top left",
+                      annotation_font=dict(size=10, color=INK_SECONDARY))
+    fig.update_xaxes(title_text="day of year")
+    fig.update_yaxes(title_text="% of days", rangemode="tozero")
+    return fig
+
+
+def make_wr_persistence(durations: list, p25: float, mean: float, p75: float,
+                        regime: str, title: str) -> go.Figure:
+    """Forecast episode durations for one regime against the climatological
+    quartiles — the tool's persistence histogram."""
+    fig = _base_fig(title, height=280)
+    if not durations:
+        return fig
+    fig.add_trace(go.Histogram(x=durations, xbins=dict(start=0.5, end=20.5, size=1),
+                               marker_color=WR_COLORS.get(regime, INK_MUTED), marker_line_width=0,
+                               name="forecast members",
+                               hovertemplate="%{x} days<br>%{y} members<extra></extra>"))
+    for value, dash, label in ((p25, "dot", "clim p25"), (mean, "solid", "clim mean"),
+                               (p75, "dash", "clim p75")):
+        if value is not None and not np.isnan(value):
+            fig.add_vline(x=value, line_color=INK_PRIMARY, line_width=1.3, line_dash=dash,
+                          annotation_text=label, annotation_position="top",
+                          annotation_font=dict(size=9, color=INK_SECONDARY))
+    fig.update_layout(bargap=0.1, hovermode="closest", showlegend=False)
+    fig.update_xaxes(title_text="episode length (days)")
+    fig.update_yaxes(title_text="members")
+    return fig
+
+
+def make_wr_transition_heatmap(matrix: pd.DataFrame, title: str, unit: str = "%") -> go.Figure:
+    """Regime-to-regime transitions across the members (or the climatology)."""
+    fig = _base_fig(title, height=420)
+    if matrix.empty:
+        return fig
+    fig.add_trace(go.Heatmap(z=matrix.values, x=list(matrix.columns), y=list(matrix.index),
+                             colorscale=SEQ_BLUE, colorbar=dict(title=unit, thickness=12),
+                             hovertemplate="from %{y} → to %{x}<br>%{z:.0f}" + unit + "<extra></extra>"))
+    fig.update_xaxes(title_text="to regime", side="bottom")
+    fig.update_yaxes(title_text="from regime", autorange="reversed")
     return fig
 
 

@@ -266,6 +266,100 @@ MORNING_METEOMATICS_REGIONS: dict[str, list[str]] = {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# EUROPEAN WEATHER REGIMES (Forecast → Weather Regimes tab)
+# ══════════════════════════════════════════════════════════════════════════════
+# Port of Franziska_Intern/corso_model_wr/working_wr_tool (uber_main.py →
+# run_WR_tool.py → max_proj_members.py), following Michel & Rivière (2011).
+#
+# Method, per member and per forecast day:
+#   1. take the 500 hPa geopotential height ANOMALY on the fixed North-Atlantic /
+#      European domain (lat 30–90 N, lon 80 W–40 E, 0.5° = 121 × 241 points),
+#   2. divide it by that day-of-year's domain-average amplitude (`area_avg` in
+#      the original LCD file) so winter and summer are on the same scale,
+#   3. project it onto the 7 fixed regime patterns with cos(latitude) area
+#      weighting — an inner product, which is why the refresh notebook can do
+#      it as a Spark join rather than pulling the grid to the driver,
+#   4. standardise each projection into an index (IWR) with that regime's own
+#      long-term mean and spread,
+#   5. assign the regime with the highest IWR, if it clears the threshold;
+#      otherwise the day is "no regime".
+#
+# The 7 patterns and their normalisation constants are the fixed output of the
+# original k-means study (1979–2019). They cannot be derived from Databricks,
+# so they ship with the app in wr_patterns.npz — verified to reproduce the
+# tool's own classified reanalysis exactly (see README).
+WR_PATTERNS_FILE = "wr_patterns.npz"
+
+WR_REGIMES: list[str] = ["ScTr", "GL", "EuBl", "AR", "AT", "ScBl", "ZO"]
+WR_NO_REGIME = "no"
+WR_ALL_LABELS = WR_REGIMES + [WR_NO_REGIME]
+WR_REGIME_LONG: dict[str, str] = {
+    "ScTr": "Scandinavian Trough",
+    "GL":   "Greenland Blocking",
+    "EuBl": "European Blocking",
+    "AR":   "Atlantic Ridge",
+    "AT":   "Atlantic Trough",
+    "ScBl": "Scandinavian Blocking",
+    "ZO":   "Zonal Regime",
+    "no":   "No regime",
+}
+
+# Domain — fixed by the regime patterns; the forecast grid must match it exactly.
+WR_LAT_MIN, WR_LAT_MAX = 30.0, 90.0
+WR_LON_MIN, WR_LON_MAX = -80.0, 40.0
+WR_GRID_STEP = 0.5
+
+# Assignment threshold. The original uses a static 1.0 that relaxes with lead
+# time, because a regime is harder to pin down further out: the fit of the
+# climatological maximum IWR against lead day has slope WR_LEAD_FACTOR
+# (reproduced from corso_model_wr/wr_lead/WR_15_day_running_mean_leadtime_*,
+# a_opt = -0.018774217528098960). So the day-`lead` threshold is
+# WR_THRESHOLD + lead * WR_LEAD_FACTOR, i.e. 1.00 at day 0 down to 0.74 at day 14.
+WR_THRESHOLD = 1.0
+WR_LEAD_FACTOR = -0.018774217528098960
+
+# The threshold slope was fitted over leads 0–14, so 15 days is the honest
+# horizon even though the Meteomatics table carries 17.
+WR_DEFAULT_HORIZON_DAYS = 15
+WR_MAX_HORIZON_DAYS = 17
+
+# Forecast sources in dna_prod_silver.meteomatics.geopotential_height_forecast.
+# The original tool runs on ECMWF-ENS (51 IFS members); the silver layer carries
+# per-member geopotential only for AIFS-ENS and GFS-ENS, so AIFS — ECMWF's own
+# ensemble, 50 members — is the default and GFS is offered alongside it.
+WR_MODELS: dict[str, dict] = {
+    "ECMWF AIFS-ENS": {"model": "ecmwf-aifs-ens",
+                       "curve": "geopotential_height_500hpa_m_ecmwf_aifs_ens_p1d",
+                       "n_members": 50},
+    "NCEP GFS-ENS":   {"model": "ncep-gfs-ens",
+                       "curve": "geopotential_height_500hpa_m_ncep_gfs_ens_p1d",
+                       "n_members": 30},
+}
+WR_DEFAULT_MODEL = "ECMWF AIFS-ENS"
+WR_RUN_HISTORY_DAYS = 8          # runs kept, so run-to-run evolution is available
+
+# Reanalysis climatology. ERA5 actuals
+# (dna_prod_silver.meteomatics.geopotential_height, model 'ecmwf-era5') are
+# classified through the same projection, giving the climatological frequency
+# of each regime, its persistence and the transition matrix.
+WR_CLIM_START_YEAR = 1979        # backfill start; the notebook then appends daily
+WR_CLIM_DOY_WINDOW = 7           # ± days pooled when computing a day-of-year frequency
+WR_CLIM_MIN_YEARS = 20           # refuse to present a climatology thinner than this
+
+# Regime colours — fixed per regime, matching the tool's plots so the two read
+# the same. This is a categorical job: identity, not magnitude.
+WR_COLORS: dict[str, str] = {
+    "ScTr": "#ff4500",   # orangered
+    "GL":   "#2a78d6",   # blue
+    "EuBl": "#008b45",   # green4
+    "AR":   "#ffd700",   # gold
+    "AT":   "#551a8b",   # purple4
+    "ScBl": "#006400",   # darkgreen
+    "ZO":   "#e34948",   # red
+    "no":   "#7f7f7f",   # gray50
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # GAS DEMAND (port of EU-gas-demand/ldz_forecast.py + rdl_forecast.py)
 # ══════════════════════════════════════════════════════════════════════════════
 # Two legs, both answering "how did this run move gas demand versus the run we
