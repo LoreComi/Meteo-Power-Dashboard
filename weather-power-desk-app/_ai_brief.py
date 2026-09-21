@@ -401,34 +401,38 @@ def extract_signal(text: str) -> tuple[str, str]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_az_credentials() -> tuple[str | None, str | None, str | None]:
-    """Databricks secrets (scope 'axpo') -> Databricks SDK -> st.secrets -> env vars.
+    """Env vars -> Databricks SDK secrets -> give up.
 
-    Same order as the coal dashboard, so a workspace configured for one app
-    needs no extra setup for this one.
+    In a Databricks App the credentials normally come from app.yaml env vars
+    (``valueFrom`` injects decoded secret values).  If that path fails we fall
+    back to reading the secret scope directly via the SDK, base64-decoding the
+    values ourselves.
     """
-    try:
-        import streamlit as st
-        t = st.secrets["azure_tenant_id"]
-        c = st.secrets["azure_client_id"]
-        s = st.secrets["azure_client_secret"]
-        if t and c and s:
-            return t, c, s
-    except Exception:
-        pass
-    try:
-        from databricks.sdk.runtime import dbutils
-        t = dbutils.secrets.get("axpo", "azure_tenant_id")
-        c = dbutils.secrets.get("axpo", "azure_client_id")
-        s = dbutils.secrets.get("axpo", "azure_client_secret")
-        if t and c and s:
-            return t, c, s
-    except Exception:
-        pass
+    import base64
+
+    # 1. Environment variables (app.yaml valueFrom / Databricks Apps standard)
     t = os.environ.get("AZURE_TENANT_ID")
     c = os.environ.get("AZURE_CLIENT_ID")
     s = os.environ.get("AZURE_CLIENT_SECRET")
     if t and c and s:
         return t, c, s
+
+    # 2. Databricks SDK — read from the secret scope directly.
+    #    The REST API returns base64-encoded values; decode them.
+    _SCOPE = "commodity-news-secrets"
+    _KEYS = ("azure-tenant-id", "azure-client-id", "azure-client-secret")
+    try:
+        from databricks.sdk import WorkspaceClient
+        w = WorkspaceClient()
+        vals = []
+        for k in _KEYS:
+            raw = w.secrets.get_secret(scope=_SCOPE, key=k).value
+            vals.append(base64.b64decode(raw).decode() if raw else "")
+        if all(vals):
+            return tuple(vals)          # type: ignore[return-value]
+    except Exception:
+        pass
+
     return None, None, None
 
 
