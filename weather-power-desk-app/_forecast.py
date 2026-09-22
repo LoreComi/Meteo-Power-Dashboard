@@ -84,7 +84,8 @@ def _render_values(runs: pd.DataFrame):
     with o2:
         show_mm = st.checkbox("Meteomatics EC / AIFS means", value=(metric == "Temperature"), key="fv_mm",
                               disabled=(metric != "Temperature"),
-                              help="Country-mean ensemble MEAN from the Meteomatics silver tables (no members stored there)")
+                              help="Population-weighted country mean of the Meteomatics ensemble MEAN (silver tables; "
+                                   "weights from GHS-POP, see pop_weights_0p5.csv)")
     if not areas:
         st.info("Select at least one country.")
         return

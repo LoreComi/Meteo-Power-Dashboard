@@ -31,7 +31,7 @@ days in it, which is normal for EC-Extended and rare for EC-ENS.
 
 Data: {SBX_SCHEMA}.morning_daily, written by power_desk_refresh.py from the
 exact wapi curve names, daily CET means ('Avg' tag) per run, with the normal;
-plus Meteomatics country means (temperature only) mapped onto the report regions.
+plus Meteomatics population-weighted country means (temperature only) on the report regions.
 """
 from __future__ import annotations
 

@@ -134,8 +134,16 @@ AREA_NAME_TO_CODE = {v: k for k, v in AREAS.items()}
 # Core countries used as the default clustering feature space
 SCENARIO_DEFAULT_AREAS = ["DE", "FR", "IT", "ES", "UK", "NL", "BE", "PL"]
 
-# Approximate country boxes on the 0.5° Meteomatics grid — used only to build a
-# country-mean from gridded Meteomatics fields (member table / model means).
+# Meteomatics country means are POPULATION-WEIGHTED in the refresh notebook:
+# pop_weights_0p5.csv (built by build_pop_weights.py from GHS-POP 2025 and the
+# country shapefile) gives, per country and 0.5° grid point, the persons of that
+# country in that cell, and a country mean is sum(value × population) /
+# sum(population). Upload the file next to wr_patterns.npz and set
+# POP_WEIGHTS_PATH in the notebook. The app reads only the results.
+POP_WEIGHTS_FILE = "pop_weights_0p5.csv"
+
+# Approximate country boxes on the 0.5° Meteomatics grid — the notebook's
+# FALLBACK for a country mean when the population weights are not loaded.
 COUNTRY_BBOX: dict[str, dict] = {
     "DE": {"lat_min": 47.5, "lat_max": 55.0, "lon_min": 6.0, "lon_max": 15.0},
     "FR": {"lat_min": 42.5, "lat_max": 51.0, "lon_min": -4.5, "lon_max": 8.0},

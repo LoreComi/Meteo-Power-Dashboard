@@ -13,15 +13,18 @@ the Meteomatics silver layer. Schedule: every 6 hours via Lakeflow Jobs
 in-between refreshes for the hydro / historical legs).
 
 Tables written (all read by weather-power-desk-app/_data.py):
+  pop_weights           persons per country per 0.5° grid point (GHS-POP 2025),
+                        loaded once from pop_weights_0p5.csv — every Meteomatics
+                        country mean below is population-weighted with it
   fcst_runs             one row per (model_family, pattern, reference_date) kept
   fcst_daily            daily ensemble stats per provider/model/run/metric/area:
                         ens_mean, p10..p90, spread_std, min, max, n_members,
                         normal, anomaly, lead_day
   fcst_spread_clim      "normal" ensemble spread per metric/area/lead_day
                         (and per run month) from the last 365 days of EC-ENS runs
-  fcst_members          latest EC-ENS run, per member daily values (Volue) and,
-                        if METEOMATICS_MEMBER_TABLE is set, Meteomatics
-                        EC-ENS / AIFS-ENS members as country means
+  fcst_members          latest EC-ENS run, per member daily values (Volue) and
+                        Meteomatics EC-ENS / AIFS-ENS members as population-
+                        weighted country means
   hist_daily            Volue actuals + normal per metric/area/day since 2013
   hydro_daily           Volue hydro reservoir components (WTR/SGW/BAL),
                         actual (SA) and normal (N), per area/day since 2013
@@ -111,11 +114,93 @@ def country_case_sql(lat="latitude", lon="longitude") -> str:
 COUNTRY_CASE = country_case_sql()
 CET_DAY = "DATE(from_utc_timestamp(delivery_start, 'CET'))"
 
+# Meteomatics country means are POPULATION-WEIGHTED (cell 1a, build_pop_weights.py):
+# {SBX}.pop_weights holds, per country and 0.5° grid point, the persons of that
+# country in that cell, and a country mean is SUM(value * population) /
+# SUM(population) over the cells that join. COUNTRY_BBOX / COUNTRY_CASE above are
+# only the fallback for when the weights have not been loaded yet.
+POP_WEIGHTS_PATH = os.environ.get(
+    "POP_WEIGHTS_PATH",
+    "/Workspace/Users/lorenzo.comi@axpo.com/Meteo-Power-Dashboard/weather-power-desk-app/pop_weights_0p5.csv")
+POP_GRID_RES = 0.5                      # the weights' grid step — the Meteomatics silver grid
+# Pruning box for every gridded Meteomatics read (alias `t`): the weights' extent.
+MM_BBOX = "t.latitude BETWEEN 34 AND 72 AND t.longitude BETWEEN -12 AND 36"
+
 
 def count(table: str) -> None:
     n = spark.sql(f"SELECT COUNT(*) FROM {SBX}.{table}").first()[0]
     print(f"{table}: {n:,} rows")
 
+
+# COMMAND ----------
+
+# DBTITLE 1,1a. Population weights for Meteomatics country means (loaded once)
+# Built offline by build_pop_weights.py from GHS-POP 2025 (JRC GHSL, ~1 km) and
+# Europe_merged.shp: per country and 0.5° grid point, the persons of that country
+# living in that cell. Population is assigned to countries at ~1 km and only then
+# summed into the 0.5° cells, so a border cell carries both countries' shares and
+# coastal population is not lost with a cell whose centre happens to be at sea.
+#
+# A country mean of a gridded Meteomatics field is then the population-weighted
+# mean over the cells that join — the consumption-weighted temperature the desk
+# reads (Morning_Report/meteomatics_morning_report.py), not the arithmetic mean
+# over a bounding box. Persons rather than fractions are stored so that a group
+# of countries (Nordics, Iberia, SEE) is weighted right by summing over the group.
+if spark.catalog.tableExists(f"{SBX}.pop_weights"):
+    print("pop_weights already loaded — skipping (drop the table to reload a new file)")
+elif os.path.exists(POP_WEIGHTS_PATH):
+    import pandas as _pd
+    _w = _pd.read_csv(POP_WEIGHTS_PATH)
+    assert {"area", "latitude", "longitude", "population"} <= set(_w.columns), list(_w.columns)
+    spark.createDataFrame(_w).write.mode("overwrite").saveAsTable(f"{SBX}.pop_weights")
+    print(f"pop_weights: {len(_w):,} cells, {_w['area'].nunique()} countries, "
+          f"{_w['population'].sum() / 1e6:,.1f} M persons")
+else:
+    print(f"!! {POP_WEIGHTS_PATH} not found — Meteomatics country means fall back to bounding-box "
+          "averages until the file is uploaded and this cell re-run")
+POP_WEIGHTED = spark.catalog.tableExists(f"{SBX}.pop_weights")
+
+
+def snap(col: str) -> str:
+    """Snap a silver-table coordinate onto the weights' grid, so the join does not
+    depend on the two tables' floats agreeing to the last bit."""
+    k = round(1 / POP_GRID_RES)
+    return f"ROUND(CAST({col} AS DOUBLE) * {k}) / {k}"
+
+
+# The fragments every Meteomatics country mean is written with. The gridded source
+# is aliased `t`; `area` and `mean` go into the SELECT, `join` right after the FROM.
+if POP_WEIGHTED:
+    CM = {"join": f"JOIN {SBX}.pop_weights w ON w.latitude = {snap('t.latitude')} "
+                  f"AND w.longitude = {snap('t.longitude')}",
+          "area": "w.area", "weight": "w.population", "method": "population-weighted"}
+else:
+    CM = {"join": "", "area": country_case_sql("t.latitude", "t.longitude"), "weight": "1.0",
+          "method": "bounding-box average"}
+CM["mean"] = f"SUM(t.value * {CM['weight']}) / SUM({CM['weight']})"
+print(f"Meteomatics country means: {CM['method']}")
+
+# Do the weights meet the silver grid? Every populated cell should find a forecast
+# point; a misaligned grid would silently drop people, so say so loudly.
+if POP_WEIGHTED:
+    _model = next(iter(METEOMATICS_MODELS.values()))[0]
+    _cov = spark.sql(f"""
+        WITH g AS (
+          SELECT DISTINCT {snap('t.latitude')} AS latitude, {snap('t.longitude')} AS longitude
+          FROM {MM}.temperature_forecast t
+          WHERE t.model = '{_model}' AND {MM_BBOX}
+            AND t.created_at = (SELECT MAX(created_at) FROM {MM}.temperature_forecast WHERE model = '{_model}')
+        )
+        SELECT SUM(w.population) AS pop,
+               SUM(CASE WHEN g.latitude IS NOT NULL THEN w.population ELSE 0 END) AS pop_matched
+        FROM {SBX}.pop_weights w
+        LEFT JOIN g ON g.latitude = w.latitude AND g.longitude = w.longitude
+    """).first()
+    _share = (_cov["pop_matched"] or 0) / _cov["pop"] if _cov["pop"] else 0.0
+    print(f"pop_weights coverage by the {_model} grid: {_share:.1%} of the population sits on a forecast point")
+    if _share < 0.95:
+        print("!! the silver grid does not line up with the 0.5° weights — check POP_GRID_RES and the "
+              "latitude/longitude values of temperature_forecast before trusting the country means")
 
 # COMMAND ----------
 
@@ -219,21 +304,22 @@ count("fcst_daily")
 
 # COMMAND ----------
 
-# DBTITLE 1,2b. Meteomatics EC-ENS / AIFS-ENS ensemble means as country averages
-# The silver Meteomatics tables only hold the ensemble mean (no members), so
-# they contribute a second and third "mean" line to the forecast values view.
+# DBTITLE 1,2b. Meteomatics EC-ENS / AIFS-ENS ensemble means as population-weighted country means
+# The silver Meteomatics tables' ensemble mean, reduced to one value per country
+# with the population weights of cell 1a (CM fragments), so they contribute a
+# second and third "mean" line to the forecast values view.
 mm_blocks = []
 for label, (model, curve) in METEOMATICS_MODELS.items():
     mm_blocks.append(f"""
     SELECT 'Meteomatics' AS provider, '{label}' AS model_family, '{model}' AS pattern,
-           created_at AS reference_date, 1 AS run_rank, 'Latest' AS run_label,
-           'Temperature' AS metric, {COUNTRY_CASE} AS area, DATE(delivery_start) AS day,
-           AVG(value) AS ens_mean
-    FROM {MM}.temperature_forecast
-    WHERE model = '{model}' AND curve_name = '{curve}'
-      AND created_at = (SELECT MAX(created_at) FROM {MM}.temperature_forecast WHERE model = '{model}')
-      AND latitude BETWEEN 36 AND 66 AND longitude BETWEEN -10 AND 30
-    GROUP BY created_at, {COUNTRY_CASE}, DATE(delivery_start)
+           t.created_at AS reference_date, 1 AS run_rank, 'Latest' AS run_label,
+           'Temperature' AS metric, {CM['area']} AS area, CAST(t.delivery_start AS DATE) AS day,
+           {CM['mean']} AS ens_mean
+    FROM {MM}.temperature_forecast t {CM['join']}
+    WHERE t.model = '{model}' AND t.curve_name = '{curve}'
+      AND t.created_at = (SELECT MAX(created_at) FROM {MM}.temperature_forecast WHERE model = '{model}')
+      AND {MM_BBOX}
+    GROUP BY t.created_at, {CM['area']}, CAST(t.delivery_start AS DATE)
     """)
 
 spark.sql(f"""
@@ -416,9 +502,10 @@ count("fcst_member_spatial")
 
 # DBTITLE 1,4c. Meteomatics per-member country means (curve_member in the silver table)
 # The silver temperature_forecast table carries individual members in
-# `curve_member` (the spatial cell above relies on it). Country means of those
-# members feed the "Meteomatics EC-ENS / AIFS-ENS members" scenario sources.
-# METEOMATICS_MEMBER_TABLE can still point at another member table.
+# `curve_member` (the spatial cell above relies on it). Population-weighted
+# country means of those members (CM fragments, cell 1a) feed the "Meteomatics
+# EC-ENS / AIFS-ENS members" scenario sources. METEOMATICS_MEMBER_TABLE can still
+# point at another member table, as long as it has latitude / longitude.
 MEMBER_SRC = METEOMATICS_MEMBER_TABLE or f"{MM}.temperature_forecast"
 cols = {f.name.lower() for f in spark.table(MEMBER_SRC).schema.fields}
 member_col = next((c for c in ("curve_member", "member", "ens_member", "perturbation", "number") if c in cols), None)
@@ -428,20 +515,20 @@ if member_col is None:
           "scenarios will cluster Volue EC-ENS members")
 else:
     for label, (model, curve) in METEOMATICS_MODELS.items():
-        curve_filter = f"AND curve_name = '{curve}'" if "curve_name" in cols else ""
+        curve_filter = f"AND t.curve_name = '{curve}'" if "curve_name" in cols else ""
         spark.sql(f"""
             INSERT INTO {SBX}.fcst_members
-            WITH latest AS (SELECT MAX({run_col}) AS rd FROM {MEMBER_SRC}
-                            WHERE model = '{model}' {curve_filter}
-                              AND {member_col} IS NOT NULL AND CAST({member_col} AS STRING) != ''),
+            WITH latest AS (SELECT MAX(t.{run_col}) AS rd FROM {MEMBER_SRC} t
+                            WHERE t.model = '{model}' {curve_filter}
+                              AND t.{member_col} IS NOT NULL AND CAST(t.{member_col} AS STRING) != ''),
             country AS (
-              SELECT {run_col} AS reference_date, {COUNTRY_CASE} AS area, DATE(delivery_start) AS day,
-                     CAST({member_col} AS STRING) AS member, AVG(value) AS value
-              FROM {MEMBER_SRC}, latest
-              WHERE model = '{model}' {curve_filter} AND {run_col} = latest.rd
-                AND {member_col} IS NOT NULL AND CAST({member_col} AS STRING) != ''
-                AND latitude BETWEEN 36 AND 66 AND longitude BETWEEN -10 AND 30
-              GROUP BY {run_col}, {COUNTRY_CASE}, DATE(delivery_start), {member_col}
+              SELECT t.{run_col} AS reference_date, {CM['area']} AS area, CAST(t.delivery_start AS DATE) AS day,
+                     CAST(t.{member_col} AS STRING) AS member, {CM['mean']} AS value
+              FROM {MEMBER_SRC} t CROSS JOIN latest {CM['join']}
+              WHERE t.model = '{model}' {curve_filter} AND t.{run_col} = latest.rd
+                AND t.{member_col} IS NOT NULL AND CAST(t.{member_col} AS STRING) != ''
+                AND {MM_BBOX}
+              GROUP BY t.{run_col}, {CM['area']}, CAST(t.delivery_start AS DATE), t.{member_col}
             ),
             normals AS (
               SELECT area, {CET_DAY} AS day, AVG(value) AS normal
@@ -594,27 +681,33 @@ WHERE f2.region IS NOT NULL AND f2.pattern IS NOT NULL
 """)
 count("morning_daily")
 
-# Meteomatics EC-ENS / AIFS-ENS temperature means on the report's regions, for the model comparison
+# Meteomatics EC-ENS / AIFS-ENS temperature on the report's regions, for the model
+# comparison. A region is a group of countries and its value is the population-
+# weighted mean over ALL the group's cells (CM fragments, cell 1a) — the Nordics
+# are NO+SE+FI+DK weighted by where people live, not an average of four country
+# means. Hungary belongs to both 'hu' and 'see', which is why the mapping is a
+# join and not a CASE (a CASE stops at the first match and left SEE without HU).
 MM_REGION_GROUPS = {"fr": ["FR"], "de": ["DE"], "uk": ["UK"], "it": ["IT"], "hu": ["HU"],
                     "np": ["NO", "SE", "FI", "DK"], "ib": ["ES", "PT"], "see": ["SI", "HR", "SK", "HU"]}
-mm_region_case = "CASE " + " ".join(
-    f"WHEN country IN ({','.join(repr(c) for c in cs)}) THEN '{r}'" for r, cs in MM_REGION_GROUPS.items()) + " END"
+mm_region_values = ", ".join(f"('{r}', '{c}')" for r, cs in MM_REGION_GROUPS.items() for c in cs)
 mm_blocks = []
 for label, (model, curve) in METEOMATICS_MODELS.items():
     mm_blocks.append(f"""
-    SELECT 'tt' AS family, {mm_region_case} AS region, '{model}' AS pattern, created_at AS reference_date,
-           DATE(delivery_start) AS day, AVG(value) AS value
-    FROM (SELECT created_at, delivery_start, value, {COUNTRY_CASE} AS country
-          FROM {MM}.temperature_forecast
-          WHERE model = '{model}' AND curve_name = '{curve}'
-            AND created_at >= current_timestamp() - INTERVAL {MORNING_RUN_HISTORY_DAYS} DAYS
-            AND latitude BETWEEN 36 AND 66 AND longitude BETWEEN -10 AND 30)
-    WHERE country IS NOT NULL
-    GROUP BY {mm_region_case}, created_at, DATE(delivery_start)
+    SELECT 'tt' AS family, r.region, '{model}' AS pattern, c.reference_date, c.day,
+           SUM(c.value * c.weight) / SUM(c.weight) AS value
+    FROM (SELECT t.created_at AS reference_date, CAST(t.delivery_start AS DATE) AS day, t.value,
+                 {CM['area']} AS area, {CM['weight']} AS weight
+          FROM {MM}.temperature_forecast t {CM['join']}
+          WHERE t.model = '{model}' AND t.curve_name = '{curve}'
+            AND t.created_at >= current_timestamp() - INTERVAL {MORNING_RUN_HISTORY_DAYS} DAYS
+            AND {MM_BBOX}) c
+    JOIN regions r ON r.area = c.area
+    GROUP BY r.region, c.reference_date, c.day
     """)
 spark.sql(f"""
 INSERT INTO {SBX}.morning_daily
-WITH mm AS ({" UNION ALL ".join(mm_blocks)}),
+WITH regions AS (SELECT * FROM VALUES {mm_region_values} AS r(region, area)),
+mm AS ({" UNION ALL ".join(mm_blocks)}),
 n AS (
   SELECT {CET_DAY} AS day, LOWER(curve_name) AS curve_name, AVG(value) AS normal
   FROM {VOLUE}.temperature_consumption
