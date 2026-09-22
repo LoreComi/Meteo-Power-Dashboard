@@ -205,10 +205,14 @@ if POP_WEIGHTED:
 # COMMAND ----------
 
 # DBTITLE 1,1. Forecast runs kept per model family
-# Runs are identified by reference_date (data-arrival time) + init_hour
-# (derived from the pattern name: ec00ens → 0, ec12ens → 12, etc.).
-# Volue publishes both 00z and 12z with the SAME reference_date (~22:00 UTC),
-# so init_hour is essential to keep them as distinct runs.
+# Volue's reference_date is the run's ISSUE DAY at midnight CET, stored in UTC —
+# 22:00 (summer) or 23:00 (winter) the evening before — and it is the SAME for
+# the 00z and the 12z run of that day. So a run is (CET day of reference_date,
+# init_hour), init_hour coming from the pattern name (ec00ens → 0, ec12ens → 12),
+# and runs are ranked on exactly that: ordering on reference_date alone put a
+# 12z run ahead of the next morning's 00z and made "Latest -1 / -2 / -3" jump
+# between dates. The app derives the same init time (_data.volue_init_time).
+INIT_DAY = "DATE(from_utc_timestamp(reference_date, 'CET'))"
 run_unions = []
 for family, patterns in VOLUE_MODELS.items():
     for pat in patterns:
@@ -227,12 +231,12 @@ spark.sql(f"""
 CREATE OR REPLACE TABLE {SBX}.fcst_runs AS
 WITH all_runs AS ({" UNION ALL ".join(run_unions)}),
 ranked AS (
-  SELECT model_family, pattern, init_hour, reference_date,
+  SELECT model_family, pattern, init_hour, reference_date, {INIT_DAY} AS init_day,
          DENSE_RANK() OVER (PARTITION BY model_family
-                            ORDER BY reference_date DESC, init_hour DESC) AS run_rank
+                            ORDER BY {INIT_DAY} DESC, init_hour DESC) AS run_rank
   FROM all_runs
 )
-SELECT model_family, pattern, init_hour, reference_date, run_rank,
+SELECT model_family, pattern, init_hour, reference_date, init_day, run_rank,
        CASE WHEN run_rank = 1 THEN 'Latest' ELSE CONCAT('Latest -', run_rank - 1) END AS run_label,
        current_timestamp() AS snapshot_ts
 FROM ranked WHERE run_rank <= {N_RUNS_KEPT}

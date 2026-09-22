@@ -123,23 +123,38 @@ def _sql_list(values) -> str:
 
 
 def snap_to_init_time(ref_dt: pd.Timestamp, init_hours: list[int]) -> pd.Timestamp:
-    """Volue reference_date is data-arrival (~2 h after init); snap to nearest 00z/12z."""
+    """Nearest 00z / 12z cycle to a genuine creation timestamp — Meteomatics'
+    created_at, which lands an hour or two after the init. Not for Volue: see
+    volue_init_time."""
     cands = [ref_dt.normalize() + pd.Timedelta(days=d, hours=h) for d in (-1, 0, 1) for h in init_hours]
     return min(cands, key=lambda c: abs((ref_dt - c).total_seconds()))
 
 
-def init_time_from_hour(ref_dt: pd.Timestamp, init_hour: int) -> pd.Timestamp:
-    """Build init time from reference_date and the explicit init_hour stored in
-    fcst_runs.  Volue publishes 00z and 12z with the same reference_date
-    (~22:00 UTC), so init_hour (derived from the pattern name) is the only
-    reliable way to tell them apart."""
-    base = ref_dt.normalize()  # midnight of the reference_date day
-    cand = base + pd.Timedelta(hours=init_hour)
-    # If reference_date is late evening and init_hour is 0, the init belongs
-    # to the next calendar day (e.g. ref 22:00 Sep 12 → 00z Sep 13).
-    if init_hour == 0 and ref_dt.hour >= 18:
-        cand += pd.Timedelta(days=1)
-    return cand
+def volue_init_time(ref_dt: pd.Timestamp, init_hour: int) -> pd.Timestamp:
+    """Init time of a Volue run from its reference_date and the pattern's cycle.
+
+    Volue's reference_date is the run's ISSUE DAY at midnight CET, stored in
+    UTC — 22:00 in summer, 23:00 in winter, the evening before — and it is the
+    same for the 00z and the 12z run of that day. The init is therefore that
+    CET calendar day at init_hour UTC: ref 22:00 UTC 20 Sep → 21 Sep 00z for
+    ec00ens and 21 Sep 12z for ec12ens. (Snapping to the nearest cycle, or
+    adding a day only for 00z, dated every 12z run one day early and made the
+    run order disagree with the dates shown.) The refresh notebook ranks runs
+    on the same CET day + hour (INIT_DAY in cell 1), so labels and ranks agree.
+    """
+    day = pd.Timestamp(ref_dt).tz_localize("UTC").tz_convert("CET").normalize().tz_localize(None)
+    return day + pd.Timedelta(hours=int(init_hour))
+
+
+_VOLUE_INIT_HOUR = {"ec00ens": 0, "ec12ens": 12, "gfs00ens": 0, "gfs12ens": 12, "ecmonthly": 0}
+
+
+def init_time_for(pattern: str, ref_dt: pd.Timestamp) -> pd.Timestamp:
+    """Init time for any run pattern in the sandbox tables: Volue patterns from the
+    issue day + cycle, Meteomatics models from their creation timestamp."""
+    if pattern in _VOLUE_INIT_HOUR:
+        return volue_init_time(ref_dt, _VOLUE_INIT_HOUR[pattern])
+    return snap_to_init_time(ref_dt, [0, 12])
 
 
 def format_run(init_dt: pd.Timestamp) -> str:
@@ -174,27 +189,25 @@ def pick_run(df: pd.DataFrame, pattern: str, target_date: pd.Timestamp
 
 @st.cache_data(ttl=900, show_spinner=False)
 def load_runs() -> pd.DataFrame:
-    df = run_query(f"""
-        SELECT model_family, pattern, init_hour, reference_date, run_rank, run_label, snapshot_ts
-        FROM {SBX_SCHEMA}.fcst_runs ORDER BY model_family, run_rank
-    """)
+    df = run_query(f"SELECT * FROM {SBX_SCHEMA}.fcst_runs ORDER BY model_family, run_rank")
     if df.empty:
         return df
     df = _dt(df, ["reference_date", "snapshot_ts"], utc=True)
     df = _num(df, ["run_rank", "init_hour"])
-    # Use the explicit init_hour when available (new schema); fall back to
-    # snap_to_init_time for backward compatibility with old sandbox data.
-    if "init_hour" in df.columns and df["init_hour"].notna().any():
-        df["init_time"] = [
-            init_time_from_hour(r, int(h)) if pd.notna(h)
-            else snap_to_init_time(r, VOLUE_MODELS.get(m, {"init_hours": [0]})["init_hours"])
-            for r, m, h in zip(df["reference_date"], df["model_family"], df["init_hour"])
-        ]
+    if "init_hour" not in df.columns or df["init_hour"].isna().any():
+        # old sandbox schema without init_hour: the pattern name still carries it
+        df["init_hour"] = [12 if "12" in str(p) else 0 for p in df["pattern"]]
+    if "init_day" in df.columns:
+        # the notebook stores the CET issue day it ranked on — use exactly that
+        df = _dt(df, ["init_day"])
+        df["init_time"] = df["init_day"] + pd.to_timedelta(df["init_hour"].astype(int), unit="h")
     else:
-        df["init_time"] = [
-            snap_to_init_time(r, VOLUE_MODELS.get(m, {"init_hours": [0]})["init_hours"])
-            for r, m in zip(df["reference_date"], df["model_family"])
-        ]
+        df["init_time"] = [volue_init_time(r, int(h)) for r, h in zip(df["reference_date"], df["init_hour"])]
+    # the runs must read in the order they are ranked; if an older sandbox ranked
+    # them differently, the dates decide and the labels are rebuilt
+    df = df.sort_values(["model_family", "init_time"], ascending=[True, False]).reset_index(drop=True)
+    df["run_rank"] = df.groupby("model_family").cumcount() + 1
+    df["run_label"] = ["Latest" if r == 1 else f"Latest -{r - 1}" for r in df["run_rank"]]
     df["run_display"] = [f"{lbl} — {format_run(t)}" for lbl, t in zip(df["run_label"], df["init_time"])]
     return df
 
@@ -362,10 +375,8 @@ def load_morning_daily() -> pd.DataFrame:
     df = _dt(df, ["reference_date"], utc=True)
     df = _dt(df, ["day"])
     df = _num(df, ["value", "n_points", "normal"])
-    init_hours = {"ec00ens": [0], "ec12ens": [12], "gfs00ens": [0], "ecmonthly": [0],
-                  "ecmwf-ens": [0, 12], "ecmwf-aifs-ens": [0, 12]}
-    df["init_time"] = [snap_to_init_time(r, init_hours.get(p, [0, 12]))
-                       for r, p in zip(df["reference_date"], df["pattern"])]
+    # Volue patterns: CET issue day + cycle; Meteomatics: nearest cycle to created_at
+    df["init_time"] = [init_time_for(p, r) for r, p in zip(df["reference_date"], df["pattern"])]
     df["init_date"] = df["init_time"].dt.normalize()
     return df
 
@@ -442,9 +453,7 @@ def load_gas_demand_daily() -> pd.DataFrame:
     df = _dt(df, ["reference_date"], utc=True)
     df = _dt(df, ["day"])
     df = _num(df, ["value", "n_points", "normal"])
-    init_hours = {"ec00ens": [0], "ec12ens": [12], "gfs00ens": [0], "gfs12ens": [12]}
-    df["init_time"] = [snap_to_init_time(r, init_hours.get(p, [0, 12]))
-                       for r, p in zip(df["reference_date"], df["pattern"])]
+    df["init_time"] = [init_time_for(p, r) for r, p in zip(df["reference_date"], df["pattern"])]
     df["init_date"] = df["init_time"].dt.normalize()
     return df
 

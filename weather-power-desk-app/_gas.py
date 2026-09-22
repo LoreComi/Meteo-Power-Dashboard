@@ -66,12 +66,16 @@ def _models() -> dict:
 # RUN PAIRING AND DELTA WINDOW (verbatim from the scripts)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def gas_run_pair(pattern: str, report_date: pd.Timestamp) -> dict:
-    """Which two runs get compared, and over which days.
+def gas_run_pair(pattern: str, run_day: pd.Timestamp) -> dict:
+    """Which two runs get compared, and over which days. `run_day` is the init
+    day of the run being scored — what the run selector shows.
 
-    From rdl_fcst_change() in both scripts:
-      - a 00z run is the run of `report_date`; a 12z run is treated as the run
-        of the day before (the script's `date_min = date - 1`),
+    From rdl_fcst_change() in both scripts, where `date` is the morning the
+    report is made: a 00z run is that day's run (`date_min = date`), a 12z run
+    is the previous evening's (`date_min = date - 1`). In both cases date_min
+    is the run's own init day, so it is taken as given here and the weekday
+    rule uses the report morning: run_day for a 00z run, the day after for a
+    12z run. Then
       - a 00z run is compared with the same pattern's previous 00z: one day
         back, three on a Monday (Friday's run),
       - a 12z run is compared with the 00z of the same date_min, two days back
@@ -81,9 +85,10 @@ def gas_run_pair(pattern: str, report_date: pd.Timestamp) -> dict:
         Either way it ends exactly on the last day of the older run's
         15-day horizon, which is why the Monday window is shorter.
     """
-    wd = int(report_date.weekday())
     is_00z = not pattern.endswith("12ens")
-    date_min = report_date if is_00z else report_date - pd.Timedelta(days=1)
+    date_min = pd.Timestamp(run_day).normalize()
+    report_date = date_min if is_00z else date_min + pd.Timedelta(days=1)
+    wd = int(report_date.weekday())
 
     if is_00z:
         prev_pattern = pattern
@@ -203,14 +208,15 @@ def _signal(delta: float, bullish_positive: bool, threshold: float = 0.0) -> tup
 
 
 def compute_ldz(gas_df: pd.DataFrame, actual_df: pd.DataFrame, areas: list[str],
-                pattern: str, report_date: pd.Timestamp,
+                pattern: str, run_day: pd.Timestamp,
                 prev_override: pd.Timestamp | None = None) -> dict:
     """One run's LDZ leg: per-country deltas, curves and the cumulative signal.
+    `run_day` is the init day of the run being scored (see gas_run_pair).
 
     If `prev_override` is given it replaces the script's automatic pairing
     — the comparison run is the same pattern initialised on that date.
     """
-    pair = gas_run_pair(pattern, report_date)
+    pair = gas_run_pair(pattern, run_day)
     if prev_override is not None:
         pair["prev_date"] = prev_override
         pair["prev_pattern"] = pattern
@@ -284,10 +290,11 @@ def _rdl_series(run_df: pd.DataFrame, areas: list[str]) -> tuple[pd.Series, pd.S
 
 
 def compute_rdl(gas_df: pd.DataFrame, regions: list[str], pattern: str,
-                report_date: pd.Timestamp,
+                run_day: pd.Timestamp,
                 prev_override: pd.Timestamp | None = None) -> dict:
-    """One run's wind + solar leg: per-region deltas, curves and the cumulative signal."""
-    pair = gas_run_pair(pattern, report_date)
+    """One run's wind + solar leg: per-region deltas, curves and the cumulative signal.
+    `run_day` is the init day of the run being scored (see gas_run_pair)."""
+    pair = gas_run_pair(pattern, run_day)
     if prev_override is not None:
         pair["prev_date"] = prev_override
         pair["prev_pattern"] = pattern
@@ -347,9 +354,12 @@ def gas_demand_snapshot(report_date: dt.date, run_labels: tuple[str, ...] = tupl
         pattern = GAS_RUNS.get(label)
         if not pattern:
             continue
+        # the script's `date` is the report morning: its 00z run is that day's,
+        # its 12z run is the previous evening's
+        run_day = ref if not pattern.endswith("12ens") else ref - pd.Timedelta(days=1)
         try:
-            ldz = compute_ldz(gas_df, actual_df, GAS_LDZ_DEFAULT_AREAS, pattern, ref)
-            rdl = compute_rdl(gas_df, GAS_RDL_DEFAULT_REGIONS, pattern, ref)
+            ldz = compute_ldz(gas_df, actual_df, GAS_LDZ_DEFAULT_AREAS, pattern, run_day)
+            rdl = compute_rdl(gas_df, GAS_RDL_DEFAULT_REGIONS, pattern, run_day)
         except Exception:
             continue
         out[label] = {"ldz": _strip(ldz), "rdl": _strip(rdl)}

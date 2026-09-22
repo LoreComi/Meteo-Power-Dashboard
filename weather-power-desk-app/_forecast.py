@@ -28,7 +28,7 @@ from _config import (
 )
 from _data import (
     load_runs, load_fcst_daily, load_spread_clim, load_member_sources, load_members,
-    load_meteologica_members, load_member_spatial_days, format_run, snap_to_init_time,
+    load_meteologica_members, load_member_spatial_days, format_run, volue_init_time,
 )
 from _charts import (
     AREA_COLORS, make_fan_chart, make_anomaly_heatmap,
@@ -105,7 +105,9 @@ def _render_values(runs: pd.DataFrame):
     cur = df[df["run_rank"] == run_rank]
     prev = df[df["run_rank"] > run_rank] if show_prev else pd.DataFrame()
     ref = cur["reference_date"].max()
-    st.caption(f"Volue · {family} · run {format_run(snap_to_init_time(ref, VOLUE_MODELS[family]['init_hours']))} · "
+    init_hour = int(cur["init_hour"].dropna().iloc[0]) if cur["init_hour"].notna().any() else \
+        (12 if "12" in str(cur["pattern"].iloc[0]) else 0)
+    st.caption(f"Volue · {family} · run {format_run(volue_init_time(ref, init_hour))} · "
                f"{int(cur['n_members'].max() or 0)} members · normal = Volue 30-yr normal")
 
     anom_col = "anomaly" if m["anomaly_kind"] == "diff" else "anomaly_pct"
