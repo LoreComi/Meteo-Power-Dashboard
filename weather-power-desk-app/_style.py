@@ -372,6 +372,57 @@ hr {{ border-color: var(--border) !important; }}
 }}
 .mc-sub {{ font-size: 0.78rem; color: var(--text-muted); margin-bottom: 8px; }}
 
+/* Morning Call grid — columns are window → run; every cell carries the
+   report's triple (Detail) or one quantity, shaded on the diverging pair.
+   Fixed layout + shared <colgroup> so the four block tables line up. */
+.mcg-table {{ table-layout: fixed; }}
+.mcg-table col.mcg-c0 {{ width: 104px; }}
+.mcg-table th.mcg-corner {{
+    text-align: left; vertical-align: bottom; color: var(--text-secondary); font-size: 0.70rem;
+    text-transform: none; letter-spacing: 0; border-bottom: 1px solid var(--border-bright); padding-bottom: 5px;
+}}
+.mcg-corner-name {{ text-transform: uppercase; letter-spacing: 0.08em; }}
+.mcg-corner-unit {{ font-weight: 500; color: var(--text-muted); }}
+.mcg-corner-sub {{
+    font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text-muted);
+    font-size: 0.64rem; margin-top: 3px;
+}}
+.mcg-table th.mcg-win {{
+    text-align: center; color: var(--text-primary); font-size: 0.74rem; letter-spacing: 0.01em;
+    text-transform: none; padding: 3px 8px 3px; border-bottom: 1px solid var(--border);
+    border-left: 2px solid var(--border-bright);
+}}
+.mcg-range {{ color: var(--text-muted); font-weight: 500; margin-left: 6px; }}
+.mcg-table th.mcg-col {{
+    text-align: center; text-transform: none; letter-spacing: 0; padding: 3px 4px 5px;
+    border-bottom: 1px solid var(--border-bright); vertical-align: bottom;
+}}
+.mcg-model {{ display: block; font-weight: 700; font-size: 0.68rem; color: var(--text-secondary); }}
+.mcg-date {{ display: block; font-weight: 500; font-size: 0.63rem; color: var(--text-muted); margin-top: 1px; }}
+.mcg-table th.mcg-ref {{ box-shadow: inset 0 -2px 0 var(--accent); }}
+.mcg-table th.mcg-ref .mcg-model {{ color: var(--accent); }}
+.mcg-table .mcg-first {{ border-left: 2px solid var(--border-bright); }}
+.mcg-table td.mcg-cell {{ text-align: center; padding: 4px 5px; }}
+.mcg-table td.mcg-refcell {{ background: rgba(42,120,214,0.035); }}
+.mcg-v {{ font-size: 0.9rem; font-weight: 600; line-height: 1.15; }}
+.mcg-d {{ font-size: 0.69rem; line-height: 1.2; margin-top: 1px; white-space: nowrap; }}
+.mcg-sep {{ color: var(--text-muted); margin: 0 3px; }}
+.mcg-table td.mcg-heat {{ font-weight: 600; font-size: 0.88rem; }}
+.mcg-table td.mcg-spread, .mcg-table th.mcg-spread {{
+    color: var(--text-muted); font-weight: 500; font-size: 0.8rem; border-left: 1px dashed var(--border);
+}}
+sup.mcg-n {{
+    font-size: 0.56rem; color: var(--text-muted); font-weight: 500; margin-left: 2px;
+    font-family: 'Inter', sans-serif;
+}}
+.mcg-legend {{
+    display: flex; flex-wrap: wrap; gap: 18px; align-items: center; font-size: 0.76rem;
+    color: var(--text-muted); margin: -4px 0 8px 2px;
+}}
+.mcg-swatch {{ display: inline-block; width: 34px; height: 10px; border-radius: 3px; vertical-align: middle; margin: 0 6px; }}
+.mcg-runs {{ font-size: 0.76rem; color: var(--text-muted); line-height: 1.6; margin: 0 0 8px 2px; }}
+.mcg-runs b {{ color: var(--text-secondary); font-weight: 600; }}
+
 /* Scenario side-by-side table */
 .sc-table {{ width: 100%; border-collapse: collapse; font-size: 0.84rem; }}
 .sc-table th {{

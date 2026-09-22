@@ -79,9 +79,10 @@ MAP_EUROPE_BBOX = {"lat_min": 35, "lat_max": 72, "lon_min": -12, "lon_max": 35}
 SECTIONS: dict[str, dict] = {
     "Morning Call": {
         "num": "00",
-        "desc": "The Morning Report table, live: EC-ENS 00z weekly means per region for temperature, "
-                "wind, solar and 2-week precipitation — absolute value, change vs the previous 00z, "
-                "deviation from normal — plus a side-by-side of the other models.",
+        "desc": "The Morning Report table, live: weekly means per region for temperature, wind, solar "
+                "and 2-week precipitation — absolute value, change vs the previous run, deviation from "
+                "normal — with the other models' runs as columns of the same grid, each with its own "
+                "run-over-run change and its difference to the reference.",
         "color": CATEGORICAL[3], "locked": False, "wide": True,
     },
     "Forecast": {
@@ -216,27 +217,41 @@ SPREAD_RATIO_LOW = 0.7               # below this = unusually confident
 # Blocks of the Excel table, in order. Each row: (display label, Volue area code
 # used inside the curve name). Curve names are exactly the wapi ones, so the
 # job matches on LOWER(curve_name) and never depends on the `area` column.
+#
+# heat_scale / warm_is_positive drive the grid's coloured views: a Δ of
+# ±heat_scale saturates the shade, so the same colour means the same magnitude
+# every morning. Polarity follows the app's diverging convention (_style.py):
+# red = warmer, or less wind / solar / precipitation; blue = colder, or more.
 MORNING_BLOCKS: dict[str, dict] = {
     "Temperatures": {
         "family": "tt", "unit": "°C", "scale": 1.0, "agg": "mean", "fmt": "{:.1f}",
+        "heat_scale": 2.0, "warm_is_positive": True,
         "rows": [("FRA", "fr"), ("DE", "de"), ("UK", "uk"), ("ITA", "it"), ("HUN", "hu"),
                  ("Nordic", "np"), ("Iberia", "ib")],
     },
     "Wind": {
         "family": "wnd", "unit": "GW", "scale": 0.001, "agg": "mean", "fmt": "{:.1f}",
+        "heat_scale": 2.0, "warm_is_positive": False,
         "rows": [("DE", "de"), ("UK", "uk"), ("FRA", "fr"), ("ITA", "it"), ("SEE", "see"),
                  ("Nordic", "np"), ("Iberia", "ib")],
     },
     "Solar PV": {
         "family": "spv", "unit": "GW", "scale": 0.001, "agg": "mean", "fmt": "{:.1f}",
+        "heat_scale": 1.0, "warm_is_positive": False,
         "rows": [("DE", "de"), ("FRA", "fr"), ("ITA", "it"), ("SEE", "see"), ("Nordic", "np"), ("Iberia", "ib")],
     },
     "Precip (sum of coming 2 weeks)": {
         "family": "rre", "unit": "TWh", "scale": 0.001, "agg": "sum", "fmt": "{:.1f}",
+        "heat_scale": 1.0, "warm_is_positive": False,
         # Alps = cwe + it-nord, exactly as the report does
         "rows": [("Alps", ["cwe", "it-nord"]), ("Nordic", "np"), ("SEE", "see"), ("Iberia", "ib")],
     },
 }
+
+# The report sums precipitation over EC-ENS's whole 15-day range. Longer runs
+# (GFS 16 days, EC-Extended 46) are capped at the same length so the column
+# is comparable across models.
+MORNING_PRECIP_SUM_DAYS = 15
 
 MORNING_CURVES: dict[str, dict] = {
     # family: forecast curve template, normal curve template  ({r} = region, {run} = run pattern)
@@ -257,14 +272,28 @@ MORNING_MODELS: dict[str, str] = {
 }
 MORNING_DEFAULT_MODEL = "EC-ENS 00z"
 
-# Model families for the main run selector — 00z/12z of the same NWP model are
-# grouped as one family; the user picks specific runs from the combined list.
-MORNING_FAMILIES: dict[str, list[str]] = {
-    "EC-ENS": ["ec00ens", "ec12ens"],
-    "GFS-ENS": ["gfs00ens"],
-    "EC-Extended": ["ecmonthly"],
+# The grid. Columns are runs — pattern + init time — in two groups (the two
+# windows). Short model names per pattern for the column headers; the init
+# hour is appended, so "ec00ens" and "ec12ens" both read "EC-ENS" + "00z"/"12z".
+MORNING_MODEL_LABELS: dict[str, str] = {
+    "ec00ens": "EC-ENS", "ec12ens": "EC-ENS", "gfs00ens": "GFS-ENS", "ecmonthly": "EC-Extended",
+    "ecmwf-ens": "MM EC-ENS", "ecmwf-aifs-ens": "MM AIFS-ENS",
 }
-MORNING_DEFAULT_FAMILY = "EC-ENS"
+# The reference run is the report's: its init day sets the windows and the Δ
+# pairing, and it is what the agent families comment on.
+MORNING_DEFAULT_REFERENCE_PATTERN = "ec00ens"
+# The latest run of each of these is a compare column by default. EC-Extended
+# is opt-in: a 46-day, coarser product is a different animal on a weekly window.
+MORNING_DEFAULT_COMPARE_PATTERNS: list[str] = ["gfs00ens", "ec12ens", "ecmwf-ens", "ecmwf-aifs-ens"]
+# Which earlier run each column's Δ run is taken against — applied to every
+# column, so "did GFS move too?" is answered over the same interval. "report"
+# is the Morning Report's pairing: the same model's run one day earlier, three
+# days earlier on a Monday (the last report was Friday's).
+MORNING_PREV_RULES: dict[str, str | int] = {
+    "Report rule (Δ -24h, Δ -72h on Monday)": "report",
+    "Previous run of the same model": "previous",
+    "1 day earlier": 1, "2 days earlier": 2, "3 days earlier": 3, "7 days earlier": 7,
+}
 
 MORNING_RUN_HISTORY_DAYS = 8         # runs kept so Δ vs yesterday / Friday is always available
 MORNING_MIN_DAY_COVERAGE = 0.9       # drop partial forecast days (report drops the half-day tail)
