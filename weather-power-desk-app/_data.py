@@ -16,7 +16,10 @@ import requests
 import streamlit as st
 
 from _config import (
-    SBX_SCHEMA, METRICS, VOLUE_MODELS, HYDRO_COMPONENTS, HYDRO_AREA_CODES, WR_REGIMES,
+    SBX_SCHEMA, VOLUE_SCHEMA, METRICS, VOLUE_MODELS, HYDRO_COMPONENTS, HYDRO_AREA_CODES, WR_REGIMES,
+    MORNING_CURVES, MORNING_REGION_CODES, MORNING_MODELS, MORNING_VOLUE_TABLES,
+    GAS_VOLUE_FAMILIES, GAS_VOLUE_PATTERNS, GAS_VOLUE_AREAS, LIVE_HISTORY_DAYS, EXPECTED_HORIZON,
+    DELTASHARE_PATTERN_MAP,
 )
 
 # ─── Connection config ───────────────────────────────────────────────────────────
@@ -49,12 +52,17 @@ def _headers() -> dict:
     raise RuntimeError("No Databricks credentials available (SP auth failed, no forwarded user token).")
 
 
-def run_query(sql: str) -> pd.DataFrame:
-    """Execute SQL via the Statement API and return a DataFrame (strings; cast downstream)."""
+def run_query(sql: str, wait_timeout: str = "50s", poll_timeout: int = 180) -> pd.DataFrame:
+    """Execute SQL via the Statement API and return a DataFrame (strings; cast downstream).
+
+    If the query does not finish within *wait_timeout* (max 50 s per API rules),
+    it is polled every 5 s for up to *poll_timeout* seconds before giving up.
+    """
+    import time as _time
     resp = requests.post(
         f"{DATABRICKS_HOST}/api/2.0/sql/statements/",
         headers=_headers(),
-        json={"warehouse_id": WAREHOUSE_ID, "statement": sql, "wait_timeout": "50s",
+        json={"warehouse_id": WAREHOUSE_ID, "statement": sql, "wait_timeout": wait_timeout,
               "disposition": "INLINE", "format": "JSON_ARRAY"},
         timeout=90,
     )
@@ -62,10 +70,24 @@ def run_query(sql: str) -> pd.DataFrame:
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:400]}")
     data = resp.json()
     state = data.get("status", {}).get("state")
+    # --- poll until the statement finishes or we time out ---
+    stmt_id = data.get("statement_id")
+    elapsed = 0
+    while state in ("PENDING", "RUNNING") and elapsed < poll_timeout and stmt_id:
+        _time.sleep(5)
+        elapsed += 5
+        poll = requests.get(
+            f"{DATABRICKS_HOST}/api/2.0/sql/statements/{stmt_id}",
+            headers=_headers(), timeout=30,
+        )
+        if poll.status_code != 200:
+            raise RuntimeError(f"Poll HTTP {poll.status_code}: {poll.text[:400]}")
+        data = poll.json()
+        state = data.get("status", {}).get("state")
     if state == "FAILED":
         raise RuntimeError(data["status"]["error"]["message"])
     if state in ("PENDING", "RUNNING"):
-        raise RuntimeError("Query still running after 50 s — narrow the selection or check the warehouse.")
+        raise RuntimeError(f"Query still running after {elapsed}s — narrow the selection or check the warehouse.")
     cols = [c["name"] for c in data.get("manifest", {}).get("schema", {}).get("columns", [])]
     rows = data.get("result", {}).get("data_array", [])
     df = pd.DataFrame(rows, columns=cols)
@@ -321,17 +343,19 @@ def load_meteologica_members(metric: str, areas: tuple[str, ...]) -> pd.DataFram
 # MORNING CALL
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def load_morning_daily() -> pd.DataFrame:
-    """Daily 'Avg' values per run for the Morning Report's Volue curves (+ Meteomatics means).
+    """Daily 'Avg' values per run from the sandbox morning_daily table.
 
-    Columns: provider, family (tt/wnd/spv/rre), region (fr/de/uk/it/hu/np/ib/see/cwe/it-nord),
-    pattern (ec00ens/ec12ens/gfs00ens/ecmonthly/ecmwf-ens/ecmwf-aifs-ens), reference_date,
-    init_date (00z-snapped run date), day, value, n_points, normal.
+    Written by power_desk_refresh.py from Volue ensemble curves (ec00ens, etc.).
+    Columns: provider, family (tt/wnd/spv/rre), region, pattern, reference_date,
+    day, value, n_points, normal.
     """
     df = run_query(f"""
-        SELECT provider, family, region, pattern, reference_date, day, value, n_points, normal
-        FROM {SBX_SCHEMA}.morning_daily ORDER BY family, region, pattern, reference_date, day
+        SELECT provider, family, region, pattern, reference_date, day,
+               value, n_points, normal
+        FROM {SBX_SCHEMA}.morning_daily
+        ORDER BY family, region, pattern, day
     """)
     if df.empty:
         return df
@@ -399,21 +423,19 @@ def load_wr_reanalysis() -> pd.DataFrame:
 # GAS DEMAND
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def load_gas_demand_daily() -> pd.DataFrame:
-    """Daily ensemble-mean ('Avg') temperature / wind / solar per run, with the normal.
+    """Daily ens-mean temperature / wind / solar per run from the sandbox.
 
-    Columns: provider, family (tt/wnd/spv), pattern (ec00ens/ec12ens/gfs00ens),
-    area (DE/UK/FR/BE/NL/IT/ES/PT), reference_date, init_date (00z/12z-snapped
-    run date), day, value, n_points, normal.
-
-    Units, matching what ldz_forecast.py / rdl_forecast.py work in after their
-    own conversions: tt in °C, wnd and spv in GW (MWh/h × 0.001).
+    Written by power_desk_refresh.py from Volue ensemble curves.
+    Columns: provider, family (tt/wnd/spv), pattern, area, reference_date,
+    day, value, n_points, normal.
     """
     df = run_query(f"""
-        SELECT provider, family, pattern, area, reference_date, day, value, n_points, normal
+        SELECT provider, family, pattern, area, reference_date, day,
+               value, n_points, normal
         FROM {SBX_SCHEMA}.gas_demand_daily
-        ORDER BY family, area, pattern, reference_date, day
+        ORDER BY family, pattern, area, day
     """)
     if df.empty:
         return df
@@ -451,6 +473,87 @@ def load_recent_actual_temp(areas: tuple[str, ...], days: int = 30) -> pd.DataFr
         return df
     df = _dt(df, ["day"])
     return _num(df, ["actual", "normal"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RUN LISTING & COMPLETENESS HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def list_available_runs(df: pd.DataFrame, pattern: str) -> list[pd.Timestamp]:
+    """All unique init_date values for a pattern, newest first."""
+    if df.empty or "pattern" not in df.columns:
+        return []
+    sub = df[df["pattern"] == pattern]
+    if sub.empty:
+        return []
+    dates = sorted(sub["init_date"].dropna().unique(), reverse=True)
+    return [pd.Timestamp(d) for d in dates]
+
+
+def run_completeness(df: pd.DataFrame, pattern: str, init_date: pd.Timestamp) -> dict:
+    """Check whether a run’s forecast looks complete or is still loading.
+
+    Compares the number of distinct forecast days against the expected horizon
+    for that pattern. Returns {complete: bool, n_days, expected, pct}.
+    """
+    expected = EXPECTED_HORIZON.get(pattern, 15)
+    sub = df[(df["pattern"] == pattern) & (df["init_date"] == init_date.normalize())]
+    if sub.empty:
+        return {"complete": False, "n_days": 0, "expected": expected, "pct": 0.0}
+
+    # Pick any one family/region combo to count distinct days
+    for fam in sub["family"].unique():
+        fam_sub = sub[sub["family"] == fam]
+        # Use the area/region column that exists
+        area_col = "region" if "region" in fam_sub.columns else "area"
+        for area in fam_sub[area_col].unique():
+            section = fam_sub[fam_sub[area_col] == area]
+            n_days = int(section["day"].nunique())
+            if n_days > 0:
+                return {
+                    "complete": n_days >= expected * 0.9,
+                    "n_days": n_days,
+                    "expected": expected,
+                    "pct": round(n_days / expected * 100, 0),
+                }
+    return {"complete": False, "n_days": 0, "expected": expected, "pct": 0.0}
+
+
+def list_family_runs(df: pd.DataFrame, patterns: list[str]) -> list[tuple[pd.Timestamp, str]]:
+    """All (init_date, pattern) pairs for a list of patterns, newest first."""
+    if df.empty or "pattern" not in df.columns:
+        return []
+    mask = df["pattern"].isin(patterns) & df["init_date"].notna()
+    sub = df.loc[mask, ["init_date", "pattern"]].drop_duplicates()
+    pairs = [(pd.Timestamp(dt), pat) for dt, pat in zip(sub["init_date"], sub["pattern"])]
+    pairs.sort(key=lambda x: x[0], reverse=True)
+    return pairs
+
+
+def format_family_run(init_dt: pd.Timestamp, pattern: str) -> str:
+    """Format a run for display: 'Mon 22 Sep 00z (EC)'."""
+    hour = 12 if "12" in pattern else 0
+    tag = ("EC" if pattern.startswith("ec") and "monthly" not in pattern
+           else "GFS" if "gfs" in pattern else "EC-Ext")
+    return f"{init_dt.strftime('%a %d %b')} {hour:02d}z ({tag})"
+
+
+def average_multi_runs(df: pd.DataFrame, runs: list[tuple]) -> pd.DataFrame:
+    """Average daily values across multiple selected (init_date, pattern) runs."""
+    if not runs:
+        return pd.DataFrame()
+    pieces = []
+    for init_dt, pat in runs:
+        piece = df[(df["pattern"] == pat) & (df["init_date"] == init_dt.normalize())]
+        pieces.append(piece)
+    combined = pd.concat(pieces, ignore_index=True)
+    if combined.empty:
+        return combined
+    group_cols = [c for c in ["family", "region", "area", "day"] if c in combined.columns]
+    agg = {c: "mean" for c in ["value", "normal", "n_points"] if c in combined.columns}
+    if not group_cols or not agg:
+        return combined
+    return combined.groupby(group_cols, as_index=False).agg(agg)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

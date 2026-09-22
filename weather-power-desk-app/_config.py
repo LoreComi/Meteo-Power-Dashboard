@@ -28,7 +28,7 @@ SBX_SCHEMA = os.environ.get("POWER_DESK_SCHEMA", "dna_snbx_weather.power_desk")
 # The user-facing name for this source is "volue_deltashare". In the workspace
 # the shared Volue tables are mounted under dna_prod_silver.volue; if the
 # delta-share catalog is mounted elsewhere, set VOLUE_SCHEMA in app.yaml.
-VOLUE_SCHEMA = os.environ.get("VOLUE_SCHEMA", "dna_prod_silver.volue")
+VOLUE_SCHEMA = os.environ.get("VOLUE_SCHEMA", "dna_prod_silver.volue_deltashare")
 METEOMATICS_SCHEMA = os.environ.get("METEOMATICS_SCHEMA", "dna_prod_silver.meteomatics")
 
 # Optional per-member Meteomatics table. Expected columns:
@@ -256,6 +256,16 @@ MORNING_MODELS: dict[str, str] = {
     "EC-Extended": "ecmonthly",
 }
 MORNING_DEFAULT_MODEL = "EC-ENS 00z"
+
+# Model families for the main run selector — 00z/12z of the same NWP model are
+# grouped as one family; the user picks specific runs from the combined list.
+MORNING_FAMILIES: dict[str, list[str]] = {
+    "EC-ENS": ["ec00ens", "ec12ens"],
+    "GFS-ENS": ["gfs00ens"],
+    "EC-Extended": ["ecmonthly"],
+}
+MORNING_DEFAULT_FAMILY = "EC-ENS"
+
 MORNING_RUN_HISTORY_DAYS = 8         # runs kept so Δ vs yesterday / Friday is always available
 MORNING_MIN_DAY_COVERAGE = 0.9       # drop partial forecast days (report drops the half-day tail)
 
@@ -402,6 +412,13 @@ GAS_LOWER_LOAD = 0.8        # share of the renewable swing that actually displac
 GAS_RUNS: dict[str, str] = {"EC-ENS 00z": "ec00ens", "EC-ENS 12z": "ec12ens", "GFS-ENS 00z": "gfs00ens"}
 GAS_DEFAULT_RUNS = ["EC-ENS 00z", "GFS-ENS 00z"]
 
+# Family grouping for gas demand (same concept as MORNING_FAMILIES)
+GAS_FAMILIES: dict[str, list[str]] = {
+    "EC-ENS": ["ec00ens", "ec12ens"],
+    "GFS-ENS": ["gfs00ens"],
+}
+GAS_DEFAULT_FAMILY = "EC-ENS"
+
 GAS_FORECAST_DAYS = 14               # horizon pulled per run, as in dwld_fct
 GAS_HIST_LOOKBACK_DAYS = 10          # trailing actual days: MAX_LAG_DAYS (6) + 4
 GAS_TOTAL_SIGNAL_GWH = 1000          # |cumulative delta| above this = a trade signal
@@ -502,6 +519,46 @@ HYDRO_AREA_CODES: dict[str, str] = {
 }
 HYDRO_COMPONENTS = {"Reservoir levels": "WTR", "Snow & groundwater": "SGW", "Hydro balance": "BAL"}
 HYDRO_START_YEAR = 2013
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LIVE VOLUE ACCESS (bypass sandbox, query the delta-share tables directly)
+# ══════════════════════════════════════════════════════════════════════════════
+# Volue forecast / normal table pairs per Morning Call family, plus aggregation.
+MORNING_VOLUE_TABLES: dict[str, tuple[str, str, str]] = {
+    # family: (forecast_table, normal_table, daily_aggregation)
+    # In volue_deltashare forecasts and normals live in the same view,
+    # distinguished by data_type_name = 'Forecast' / 'Normal'.
+    "tt":  ("temperature_consumption", "temperature_consumption", "AVG"),
+    "wnd": ("production_wind",         "production_wind",         "AVG"),
+    "spv": ("production_solar",        "production_solar",        "AVG"),
+    "rre": ("precipitation_energy",    "precipitation_energy",    "SUM"),
+}
+
+# Gas Demand source tables (category, forecast_table, normal_table, scale)
+GAS_VOLUE_FAMILIES: dict[str, tuple[str, str, str, float]] = {
+    "tt":  ("TT",  "temperature_consumption", "temperature_consumption", 1.0),
+    "wnd": ("WND", "production_wind",         "production_wind",         0.001),
+    "spv": ("SPV", "production_solar",        "production_solar",        0.001),
+}
+GAS_VOLUE_PATTERNS: list[str] = ["ec00ens", "ec12ens", "gfs00ens"]
+GAS_VOLUE_AREAS: list[str] = ["DE", "UK", "FR", "BE", "NL", "IT", "ES", "PT"]
+
+# Deltashare curve names use shortened pattern names (ec00 not ec00ens) and
+# carry deterministic forecasts, not ensemble means (no tag='Avg').
+# This map translates the app's internal pattern names to curve-name patterns.
+DELTASHARE_PATTERN_MAP: dict[str, str] = {
+    "ec00ens": "ec00", "ec12ens": "ec12",
+    "gfs00ens": "gfs00", "ecmonthly": "ecmonthly",
+}
+
+# Wider lookback for manual run selection (sandbox only kept 8 days)
+LIVE_HISTORY_DAYS = 14
+
+# Expected forecast-day count per pattern (for completeness banner)
+EXPECTED_HORIZON: dict[str, int] = {
+    "ec00ens": 15, "ec12ens": 15, "gfs00ens": 16, "ecmonthly": 46,
+}
 
 
 def area_label(code: str) -> str:

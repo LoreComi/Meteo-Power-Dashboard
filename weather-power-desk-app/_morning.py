@@ -38,9 +38,10 @@ import streamlit as st
 from _config import (
     MORNING_BLOCKS, MORNING_MODELS, MORNING_DEFAULT_MODEL, MORNING_MIN_DAY_COVERAGE, SBX_SCHEMA,
     AI_BRIEF_MODEL, AI_BRIEF_MAX_TOKENS, AI_BRIEF_SYNTHESIS_MAX_TOKENS, AI_POWER_AGENTS, AI_GAS_AGENTS,
-    SCENARIO_MIN_WEEK_DAYS,
+    SCENARIO_MIN_WEEK_DAYS, MORNING_FAMILIES, MORNING_DEFAULT_FAMILY,
 )
-from _data import load_morning_daily, pick_run as _pick_run
+from _data import (load_morning_daily, pick_run as _pick_run, list_available_runs, run_completeness,
+                   format_run, list_family_runs, format_family_run, average_multi_runs)
 from _charts import make_model_compare_chart
 from _style import CATEGORICAL, PROVIDER_COLORS, BRIEF_CSS, INK_MUTED, CAT_BLUE, STATUS_CRITICAL
 from _ui import status_banner
@@ -430,61 +431,143 @@ def _render_model_comparison(df: pd.DataFrame, win: dict, today: pd.Timestamp):
 
 def render_morning_call():
     st.markdown("#### MORNING CALL")
-    st.caption("The Morning Report table, computed live from the Volue tables (EC-ENS 00z 'Avg' curves, daily CET "
-               "means, Volue 30-year normal). Same rows, same windows, same deltas as "
-               "import_00z_add_solar_np_tot.py — no Excel, refreshed with the sandbox job.")
+    st.caption("The Morning Report table from the **sandbox** (morning_daily) — EC-ENS 00z 'Avg' "
+               "curves, daily CET means, Volue 30-year normal. Same rows, windows and deltas as "
+               "import_00z_add_solar_np_tot.py. Pick a model family and runs below.")
     try:
         df = load_morning_daily()
     except Exception as e:
-        st.error(f"Cannot read morning_daily ({e}). Has power_desk_refresh.py run?")
+        st.error(f"Cannot read from the sandbox tables (morning_daily): {e}")
         return
     if df.empty:
-        status_banner(f"{SBX_SCHEMA}.morning_daily is empty — run the refresh job after the 00z run has landed.", "warning")
+        status_banner("No data found in morning_daily.", "warning")
         return
     df = _drop_partial_days(df)
 
-    c1, c2, c3 = st.columns([1.6, 1.4, 4])
+    # --- Model family and run selection -----------------------------------------
+    c1, c2, c3, c4 = st.columns([1.4, 2.0, 2.2, 2.4])
     with c1:
-        model = st.selectbox("Report run", list(MORNING_MODELS.keys()),
-                             index=list(MORNING_MODELS).index(MORNING_DEFAULT_MODEL), key="mc_model")
-    with c2:
-        ref_day = st.date_input("Report date", value=dt.date.today(), key="mc_date",
-                                help="The report's 'today'. Windows and the previous-run offset follow the weekday logic.")
-    today = pd.Timestamp(ref_day)
-    win = morning_windows(today)
-    pattern = MORNING_MODELS[model]
-
-    cur, cur_init = _pick_run(df, pattern, today)
-    prev, prev_init = _pick_run(df, pattern, today - pd.Timedelta(days=win["prev_days"]))
-    if cur.empty:
-        status_banner(f"No {model} run found on or before {today:%d %b}.", "critical")
+        families = st.multiselect("Model family", list(MORNING_FAMILIES.keys()),
+                                  default=[MORNING_DEFAULT_FAMILY], key="mc_families")
+    if not families:
+        status_banner("Select at least one model family.", "warning")
         return
-    if cur_init != today:
-        status_banner(f"Today's {model} run has not landed yet — showing the run initialised {cur_init:%a %d %b}.", "warning")
-    if prev.empty:
-        status_banner("No previous run available — Δ vs previous run shows n/a.", "warning")
-    delta_label = win["delta_label"] if prev_init is not None and cur_init is not None and \
-        (cur_init - prev_init).days == win["prev_days"] else \
-        (f"Δ vs {prev_init:%d %b}" if prev_init is not None else win["delta_label"])
+    family_patterns = [p for f in families for p in MORNING_FAMILIES[f]]
+    avail = list_family_runs(df, family_patterns)
+    if not avail:
+        status_banner("No runs available for the selected families.", "critical")
+        return
+    run_map = {format_family_run(dt, pat): (dt, pat) for dt, pat in avail}
+    run_keys = list(run_map.keys())
+
+    with c2:
+        cur_sel = st.multiselect("Current run(s)", run_keys, default=[run_keys[0]], key="mc_cur_runs",
+                                 help="Select one or more runs.")
+    if not cur_sel:
+        status_banner("Select at least one current run.", "warning")
+        return
+    cur_runs = [run_map[l] for l in cur_sel]
+    cur_init = cur_runs[0][0]
+    # Default compare: first run NOT in the current selection
+    cur_set = {(dt.normalize(), pat) for dt, pat in cur_runs}
+    cmp_defaults = [k for k in run_keys if (run_map[k][0].normalize(), run_map[k][1]) not in cur_set]
     with c3:
-        if prev_init is not None:
-            sub = (f"{model} mean weekly average (absolute value, change {cur_init:%d.%m.%Y} vs "
-                   f"{prev_init:%d.%m.%Y}, dev norm) · run initialised {cur_init:%d.%m.%Y}")
-        else:
-            sub = f"run initialised {cur_init:%d.%m.%Y}"
-        st.markdown(f'<div class="mc-sub" style="margin-top:28px;">{sub}</div>', unsafe_allow_html=True)
+        mode = st.radio("Multi-run mode", ["Average", "Compare"], key="mc_mode", horizontal=True,
+                        help="Average: merge selected runs into one table. Compare: one tab per run.")
+        cmp_sel = st.multiselect("Compare with", run_keys, default=cmp_defaults[:1], key="mc_cmp_runs",
+                                 help="Δ columns show (current − comparison). Multiple are averaged.")
+    cmp_runs = [run_map[l] for l in cmp_sel]
+    cmp_init = cmp_runs[0][0] if cmp_runs else None
 
-    left, right = st.columns(2)
-    with left:
-        _render_block(win["t1"], win["w1"], cur, prev, delta_label, include_precip=True, key="b1",
-                      sub=f"{win['w1'][0]:%a %d %b} – {win['w1'][1]:%a %d %b} · "
-                          f"{'weekend' if win['kind1'] == 'weekend' else 'weekly'} average · precip = sum of coming 2 weeks")
-    with right:
-        _render_block(win["t2"], win["w2"], cur, prev, delta_label, include_precip=False, key="b2",
-                      sub=f"{win['w2'][0]:%a %d %b} – {win['w2'][1]:%a %d %b} · weekly average")
+    # Completeness banners
+    for _dt, _pat in cur_runs:
+        comp = run_completeness(df, _pat, _dt)
+        if not comp["complete"]:
+            status_banner(f"⚡ {format_family_run(_dt, _pat)} has {comp['n_days']}/{comp['expected']} "
+                          f"forecast days ({comp['pct']:.0f}%).", "warning")
+    for _dt, _pat in cmp_runs:
+        comp = run_completeness(df, _pat, _dt)
+        if not comp["complete"]:
+            status_banner(f"⚡ Compare: {format_family_run(_dt, _pat)} — {comp['n_days']}/{comp['expected']} days.",
+                          "warning")
 
-    st.download_button("Download table (CSV)", _download_table(cur, prev, win, delta_label),
-                       f"morning_call_{today:%Y%m%d}.csv", "text/csv", key="mc_dl")
+    cmp_label = " + ".join(format_family_run(dt, pat) for dt, pat in cmp_runs) if cmp_runs else "none"
+    prev = average_multi_runs(df, cmp_runs) if cmp_runs else pd.DataFrame()
+    prev_init = cmp_init
+
+    if mode == "Compare" and len(cur_runs) > 1:
+        # --- COMPARE MODE: all runs stacked, visible at once ---
+        with c4:
+            cur_label = " vs ".join(format_family_run(dt, pat) for dt, pat in cur_runs)
+            sub = f"Comparing {cur_label}"
+            if cmp_runs:
+                sub += f" · Δ vs {cmp_label}"
+            st.markdown(f'<div class="mc-sub" style="margin-top:28px;">{sub}</div>', unsafe_allow_html=True)
+
+        if prev.empty:
+            status_banner("No comparison run selected — Δ vs previous run shows n/a.", "warning")
+
+        for i, (init_dt, pattern) in enumerate(cur_runs):
+            run_label = format_family_run(init_dt, pattern)
+            st.markdown(f"##### {run_label}")
+            single = average_multi_runs(df, [(init_dt, pattern)])
+            today_i = init_dt.normalize()
+            win_i = morning_windows(today_i)
+            delta_label_i = f"Δ vs {cmp_label}" if cmp_runs else win_i["delta_label"]
+            left, right = st.columns(2)
+            with left:
+                _render_block(win_i["t1"], win_i["w1"], single, prev, delta_label_i,
+                              include_precip=True, key=f"b1_{i}",
+                              sub=f"{win_i['w1'][0]:%a %d %b} – {win_i['w1'][1]:%a %d %b} · "
+                                  f"{'weekend' if win_i['kind1'] == 'weekend' else 'weekly'} average · "
+                                  f"precip = sum of coming 2 weeks")
+            with right:
+                _render_block(win_i["t2"], win_i["w2"], single, prev, delta_label_i,
+                              include_precip=False, key=f"b2_{i}",
+                              sub=f"{win_i['w2'][0]:%a %d %b} – {win_i['w2'][1]:%a %d %b} · weekly average")
+            if i < len(cur_runs) - 1:
+                st.divider()
+
+        # AI brief and download use the first run
+        today = cur_init.normalize()
+        win = morning_windows(today)
+        cur = average_multi_runs(df, [cur_runs[0]])
+        model = families[0]
+        pattern = family_patterns[0]
+        delta_label = f"Δ vs {cmp_label}" if cmp_runs else win["delta_label"]
+        st.download_button("Download table (CSV)", _download_table(cur, prev, win, delta_label),
+                           f"morning_call_{today:%Y%m%d}.csv", "text/csv", key="mc_dl")
+
+    else:
+        # --- AVERAGE MODE (or single run): merge all selected runs ---
+        today = cur_init.normalize()
+        win = morning_windows(today)
+        cur = average_multi_runs(df, cur_runs)
+        model = families[0]
+        pattern = family_patterns[0]
+        delta_label = f"Δ vs {cmp_label}" if cmp_runs else win["delta_label"]
+
+        with c4:
+            cur_label = " + ".join(format_family_run(dt, pat) for dt, pat in cur_runs)
+            sub = f"{'Ensemble mean' if len(cur_runs) > 1 else families[0]} · {cur_label}"
+            if cmp_runs:
+                sub += f" vs {cmp_label}"
+            st.markdown(f'<div class="mc-sub" style="margin-top:28px;">{sub}</div>', unsafe_allow_html=True)
+
+        if prev.empty:
+            status_banner("No comparison run selected — Δ vs previous run shows n/a.", "warning")
+
+        left, right = st.columns(2)
+        with left:
+            _render_block(win["t1"], win["w1"], cur, prev, delta_label, include_precip=True, key="b1",
+                          sub=f"{win['w1'][0]:%a %d %b} – {win['w1'][1]:%a %d %b} · "
+                              f"{'weekend' if win['kind1'] == 'weekend' else 'weekly'} average · precip = sum of coming 2 weeks")
+        with right:
+            _render_block(win["t2"], win["w2"], cur, prev, delta_label, include_precip=False, key="b2",
+                          sub=f"{win['w2'][0]:%a %d %b} – {win['w2'][1]:%a %d %b} · weekly average")
+
+        st.download_button("Download table (CSV)", _download_table(cur, prev, win, delta_label),
+                           f"morning_call_{today:%Y%m%d}.csv", "text/csv", key="mc_dl")
 
     st.divider()
     ctx = build_brief_context(cur, prev, win, model, cur_init, prev_init, delta_label, today)

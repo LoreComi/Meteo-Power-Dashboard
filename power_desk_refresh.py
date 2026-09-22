@@ -726,7 +726,7 @@ GPH_ACT = f"{MM}.geopotential_height"
 # Where wr_patterns.npz (shipped in weather-power-desk-app/) was uploaded.
 # Read once, on the first run only; override with the WR_PATTERNS_PATH env var
 # or just edit this line. A Workspace path or a UC volume path both work.
-WR_PATTERNS_PATH = os.environ.get("WR_PATTERNS_PATH", "/Workspace/Shared/power_desk/wr_patterns.npz")
+WR_PATTERNS_PATH = os.environ.get("WR_PATTERNS_PATH", "/Workspace/Users/lorenzo.comi@axpo.com/Meteo-Power-Dashboard/weather-power-desk-app/wr_patterns.npz")
 
 WR_REGIMES = ["ScTr", "GL", "EuBl", "AR", "AT", "ScBl", "ZO"]
 WR_LAT_MIN, WR_LAT_MAX, WR_LON_MIN, WR_LON_MAX = 30.0, 90.0, -80.0, 40.0
@@ -812,7 +812,7 @@ else:
     FROM {GPH_ACT}
     WHERE curve_name = '{WR_ERA5_CURVE}' AND {wr_domain()}
       AND YEAR(delivery_start) >= {WR_CLIM_START_YEAR}
-    GROUP BY latitude, longitude, 2
+    GROUP BY latitude, longitude, 3
     """)
     _cov = spark.sql(f"SELECT MIN(n_years), MAX(n_years), COUNT(DISTINCT doy) FROM {SBX}.wr_gph_clim").first()
     print(f"wr_gph_clim: {_cov[2]} days of year, {_cov[0]}-{_cov[1]} years per grid point")
@@ -835,7 +835,8 @@ _which = "CASE " + " ".join(
 # --- 7c.4 forecast members ----------------------------------------------------
 _fc_models = ",".join(f"'{m}'" for m in WR_MODELS)
 spark.sql(f"""
-CREATE OR REPLACE TABLE {SBX}.wr_forecast_members AS
+CREATE OR REPLACE TABLE {SBX}.wr_forecast_members
+TBLPROPERTIES('delta.feature.allowColumnDefaults' = 'supported') AS
 WITH raw AS (
   SELECT f.model, f.created_at AS reference_date,
          DATE(f.delivery_start) AS day,

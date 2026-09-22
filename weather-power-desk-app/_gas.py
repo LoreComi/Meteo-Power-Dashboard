@@ -45,10 +45,15 @@ import _gas_demand_model as gdm
 from _config import (
     GAS_CURVE_MODELS_FILE, GAS_LDZ_AREAS, GAS_LDZ_DEFAULT_AREAS, GAS_RDL_REGIONS,
     GAS_RDL_DEFAULT_REGIONS, GAS_EFFICIENCY, GAS_LOWER_LOAD, GAS_RUNS, GAS_DEFAULT_RUNS,
+    GAS_FAMILIES, GAS_DEFAULT_FAMILY,
     GAS_FORECAST_DAYS, GAS_HIST_LOOKBACK_DAYS, GAS_TOTAL_SIGNAL_GWH, SBX_SCHEMA,
 )
 from _charts import make_ldz_panel, make_rdl_chart, make_gas_delta_bars
-from _data import load_gas_demand_daily, load_recent_actual_temp, pick_run
+from _data import (
+    load_gas_demand_daily, load_recent_actual_temp, pick_run,
+    list_available_runs, list_family_runs, format_family_run,
+    run_completeness, format_run,
+)
 from _ui import kpi_card, kpi_row, status_banner
 
 
@@ -198,9 +203,17 @@ def _signal(delta: float, bullish_positive: bool, threshold: float = 0.0) -> tup
 
 
 def compute_ldz(gas_df: pd.DataFrame, actual_df: pd.DataFrame, areas: list[str],
-                pattern: str, report_date: pd.Timestamp) -> dict:
-    """One run's LDZ leg: per-country deltas, curves and the cumulative signal."""
+                pattern: str, report_date: pd.Timestamp,
+                prev_override: pd.Timestamp | None = None) -> dict:
+    """One run's LDZ leg: per-country deltas, curves and the cumulative signal.
+
+    If `prev_override` is given it replaces the script's automatic pairing
+    — the comparison run is the same pattern initialised on that date.
+    """
     pair = gas_run_pair(pattern, report_date)
+    if prev_override is not None:
+        pair["prev_date"] = prev_override
+        pair["prev_pattern"] = pattern
     cur_df, cur_init = pick_run(gas_df, pair["pattern"], pair["date_min"])
     prev_df, prev_init = pick_run(gas_df, pair["prev_pattern"], pair["prev_date"])
 
@@ -271,9 +284,13 @@ def _rdl_series(run_df: pd.DataFrame, areas: list[str]) -> tuple[pd.Series, pd.S
 
 
 def compute_rdl(gas_df: pd.DataFrame, regions: list[str], pattern: str,
-                report_date: pd.Timestamp) -> dict:
+                report_date: pd.Timestamp,
+                prev_override: pd.Timestamp | None = None) -> dict:
     """One run's wind + solar leg: per-region deltas, curves and the cumulative signal."""
     pair = gas_run_pair(pattern, report_date)
+    if prev_override is not None:
+        pair["prev_date"] = prev_override
+        pair["prev_pattern"] = pattern
     cur_df, cur_init = pick_run(gas_df, pair["pattern"], pair["date_min"])
     prev_df, prev_init = pick_run(gas_df, pair["prev_pattern"], pair["prev_date"])
 
@@ -577,37 +594,73 @@ def _render_combined(ldz: dict[str, dict], rdl: dict[str, dict]) -> None:
 
 def render_gas_demand():
     st.markdown("#### GAS DEMAND")
-    st.caption("EU gas demand from the weather, as EU-gas-demand/ldz_forecast.py and rdl_forecast.py "
-               "compute it — the same run pairing, the same delta window, the same fitted curves — off "
-               "the sandbox tables instead of wapi.")
+    st.caption("EU gas demand from the weather, from the **sandbox** tables — "
+               "the same fitted curves as ldz_forecast.py and rdl_forecast.py. Pick a "
+               "model family and runs below.")
 
     try:
         gas_df = load_gas_demand_daily()
     except Exception as e:
-        st.error(f"Cannot read gas_demand_daily ({e}). Has power_desk_refresh.py run since the Gas "
-                 "Demand cell was added?")
+        st.error(f"Cannot read from the sandbox tables (gas_demand_daily): {e}")
         return
     if gas_df.empty:
-        status_banner(f"{SBX_SCHEMA}.gas_demand_daily is empty — run the refresh job after the 00z run "
-                      "has landed.", "warning")
+        status_banner("No data found in gas_demand_daily.", "warning")
         return
 
-    c1, c2, c3 = st.columns([1.5, 2.6, 2.6])
+    # --- Family-based run selection (same pattern as morning call) ---
+    c1, c2, c3, c4 = st.columns([1.4, 2.2, 2.0, 2.4])
     with c1:
-        ref_day = st.date_input("Report date", value=dt.date.today(), key="gas_date",
-                                help="The scripts' 'today'. The comparison run and the delta window "
-                                     "follow from it — Monday pairs against Friday over a shorter window.")
+        families = st.multiselect("Model family", list(GAS_FAMILIES),
+                                  default=[GAS_DEFAULT_FAMILY], key="gas_families")
+        if not families:
+            status_banner("Select at least one model family.", "warning")
+            return
+        all_patterns = [p for f in families for p in GAS_FAMILIES[f]]
+
+    avail = list_family_runs(gas_df, all_patterns)
+    run_map = {format_family_run(init_dt, pat): (init_dt, pat)
+               for init_dt, pat in avail}
+    run_keys = list(run_map.keys())
+
     with c2:
-        run_labels = st.multiselect("Runs", list(GAS_RUNS), GAS_DEFAULT_RUNS, key="gas_runs")
+        if run_keys:
+            sel = st.multiselect("Run(s)", run_keys, default=run_keys[:1],
+                                 key="gas_sel_runs",
+                                 help="Select one or more runs to compare.")
+            sel_runs = [run_map[k] for k in sel]
+        else:
+            sel_runs = []
+            status_banner("No runs found for this family.", "warning")
+
     with c3:
+        cmp_mode = st.radio("Comparison", ["Auto (script logic)", "Manual"],
+                            key="gas_cmp_mode", horizontal=True,
+                            help="Auto follows the original script pairing (e.g. 00z vs previous 00z); "
+                                 "Manual lets you pick any run as the comparison.")
+        manual_cmp_init = None
+        if cmp_mode == "Manual" and run_keys:
+            default_cmp = min(1, len(run_keys) - 1)
+            cmp_sel = st.selectbox("Compare with", run_keys, index=default_cmp,
+                                   key="gas_cmp_sel")
+            cmp_dt, _cmp_pat = run_map[cmp_sel]
+            manual_cmp_init = cmp_dt
+
+    with c4:
         areas = st.multiselect("LDZ countries", list(GAS_LDZ_AREAS), GAS_LDZ_DEFAULT_AREAS, key="gas_areas")
         regions = st.multiselect("Wind & solar regions", list(GAS_RDL_REGIONS), GAS_RDL_DEFAULT_REGIONS,
                                  key="gas_regions")
 
-    if not run_labels:
+    if not sel_runs:
         status_banner("Pick at least one run.", "warning")
         return
-    report_date = pd.Timestamp(ref_day)
+
+    # Completeness banners
+    for init_dt, pattern in sel_runs:
+        label = format_family_run(init_dt, pattern)
+        comp = run_completeness(gas_df, pattern, init_dt)
+        if not comp["complete"]:
+            status_banner(f"Run loading — {label} has {comp['n_days']}/{comp['expected']} forecast days "
+                          f"({comp['pct']:.0f}%). Shown data is partial.", "warning")
 
     try:
         actual_df = load_recent_actual_temp(tuple(areas) or tuple(GAS_LDZ_DEFAULT_AREAS), days=40)
@@ -620,12 +673,16 @@ def render_gas_demand():
 
     ldz_res, rdl_res = {}, {}
     with st.spinner("Building the demand curves…"):
-        for label in run_labels:
-            pattern = GAS_RUNS[label]
+        for init_dt, pattern in sel_runs:
+            label = format_family_run(init_dt, pattern)
+            report_date = init_dt.normalize()
+            prev_ov = manual_cmp_init if (cmp_mode == "Manual" and manual_cmp_init is not None) else None
             if areas:
-                ldz_res[label] = compute_ldz(gas_df, actual_df, areas, pattern, report_date)
+                ldz_res[label] = compute_ldz(gas_df, actual_df, areas, pattern, report_date,
+                                             prev_override=prev_ov)
             if regions:
-                rdl_res[label] = compute_rdl(gas_df, regions, pattern, report_date)
+                rdl_res[label] = compute_rdl(gas_df, regions, pattern, report_date,
+                                             prev_override=prev_ov)
 
     _run_notices(ldz_res or rdl_res)
 

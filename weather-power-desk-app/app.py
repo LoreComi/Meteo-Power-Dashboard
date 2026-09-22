@@ -82,8 +82,8 @@ with st.sidebar:
     if picked != st.session_state["section"]:
         st.session_state["section"] = picked
     st.divider()
-    st.caption("Data: Volue delta share · Meteomatics · Hydro Report methodology. "
-               "Sandbox tables refreshed every 6 h by power_desk_refresh.py.")
+    st.caption("Data: Volue (sandbox) · Meteomatics · Hydro Report methodology. "
+               "Morning Call and Gas Demand read the sandbox tables (5-min cache).")
 
 
 # ─── Landing page ────────────────────────────────────────────────────────────────

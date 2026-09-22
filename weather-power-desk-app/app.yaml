@@ -15,8 +15,8 @@ env:
     description: "Sandbox schema written by power_desk_refresh.py"
     value: "dna_snbx_weather.power_desk"
   - name: VOLUE_SCHEMA
-    description: "Volue delta-share schema (only used for documentation in the app; the job reads it)"
-    value: "dna_prod_silver.volue"
+    description: "Volue delta-share schema — the app reads it live for Morning Call and Gas Demand"
+    value: "dna_prod_silver.volue_deltashare"
   - name: METEOMATICS_MEMBER_TABLE
     description: "Optional per-member Meteomatics table; empty = cluster on Volue members"
     value: ""
