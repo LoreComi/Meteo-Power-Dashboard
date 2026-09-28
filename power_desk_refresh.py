@@ -28,9 +28,11 @@ Tables written (all read by weather-power-desk-app/_data.py):
   hist_daily            Volue actuals + normal per metric/area/day since 2013
   hydro_daily           Volue hydro reservoir components (WTR/SGW/BAL),
                         actual (SA) and normal (N), per area/day since 2013
-  gas_demand_daily      daily ens-mean ('Avg') temperature / wind / solar with
-                        the normal, per pattern and run, last 8 days of runs —
-                        feeds the Gas Demand section (LDZ + wind/solar RDL)
+  gas_demand_daily      daily temperature / wind / solar with the normal, per
+                        pattern and run, last 8 days of runs — ENS means
+                        (ec00ens/ec12ens/gfs00ens, tag='Avg') plus Op
+                        deterministic runs (ec00/gfs00, tag='__no_tag__').
+                        Feeds the Gas Demand section (LDZ + wind/solar RDL)
   wr_patterns           the 7 fixed weather-regime patterns on the 121 x 241
   wr_norm / wr_amplitude  domain, their normalisation constants and the
                         day-of-year amplitude — built once from wr_patterns.npz
@@ -729,12 +731,16 @@ count("morning_daily")
 
 # COMMAND ----------
 
-# DBTITLE 1,7b. Gas Demand — daily ens-mean temperature / wind / solar per run
+# DBTITLE 1,7b. Gas Demand — daily temperature / wind / solar per run (ENS + Op)
 # Feeds the Gas Demand section, which ports EU-gas-demand/ldz_forecast.py and
 # rdl_forecast.py. Both scripts pull, through wapi, the ensemble-MEAN daily
 # value of one curve per country for TODAY's run and for the run they compare
 # against (yesterday's, or Friday's on a Monday) — so what the app needs is
 # the same daily 'Avg' series, per run, for several days back.
+#
+# Since v2, the section also shows EC and GFS operational (deterministic) runs
+# (ec00, gfs00) alongside the ensemble means. Op curves carry tag='__no_tag__'
+# and are matched with '% ec00 %' to avoid hitting ec00ens.
 #
 # fcst_daily cannot serve this: it keeps only N_RUNS_KEPT=6 runs *per model
 # family*, and the EC-ENS family interleaves 00z and 12z, so a Monday's
@@ -751,6 +757,7 @@ count("morning_daily")
 GAS_AREAS = ["DE", "UK", "FR", "BE", "NL", "IT", "ES", "PT"]
 GAS_AREA_SQL = ",".join(f"'{a}'" for a in GAS_AREAS)
 GAS_PATTERNS = ["ec00ens", "ec12ens", "gfs00ens"]
+GAS_OP_PATTERNS = ["ec00", "gfs00"]  # deterministic; tag='__no_tag__', match with '% pat %' to avoid ens
 GAS_FAMILIES = {
     # family: (category, forecast table, history table, scale)
     "tt":  ("TT",  "temperature_consumption_forecast", "temperature_consumption", 1.0),
@@ -761,12 +768,26 @@ GAS_RUN_HISTORY_DAYS = 8
 
 gas_fcst_blocks, gas_norm_blocks = [], []
 for fam, (cat, ftbl, ntbl, scale) in GAS_FAMILIES.items():
+    # Ensemble runs: tag = 'Avg', pattern embedded in the curve name
     for pat in GAS_PATTERNS:
         gas_fcst_blocks.append(f"""
         SELECT '{fam}' AS family, '{pat}' AS pattern, area, reference_date,
                {CET_DAY} AS day, AVG(value) * {scale} AS value, COUNT(*) AS n_points
         FROM {VOLUE}.{ftbl}
         WHERE curve_name LIKE '%{pat}%' AND data_type = 'F' AND tag = 'Avg'
+          AND array_contains(categories, '{cat}') AND area IN ({GAS_AREA_SQL})
+          AND reference_date >= current_timestamp() - INTERVAL {GAS_RUN_HISTORY_DAYS} DAYS
+          AND delivery_start >= current_date() - INTERVAL {GAS_RUN_HISTORY_DAYS + 1} DAYS
+        GROUP BY area, reference_date, {CET_DAY}
+        """)
+    # Operational (deterministic) runs: tag = '__no_tag__'; use '% pat %' to
+    # match only the Op curve name (e.g. '... ec00 ...') without hitting ec00ens.
+    for pat in GAS_OP_PATTERNS:
+        gas_fcst_blocks.append(f"""
+        SELECT '{fam}' AS family, '{pat}' AS pattern, area, reference_date,
+               {CET_DAY} AS day, AVG(value) * {scale} AS value, COUNT(*) AS n_points
+        FROM {VOLUE}.{ftbl}
+        WHERE curve_name LIKE '% {pat} %' AND data_type = 'F' AND tag = '__no_tag__'
           AND array_contains(categories, '{cat}') AND area IN ({GAS_AREA_SQL})
           AND reference_date >= current_timestamp() - INTERVAL {GAS_RUN_HISTORY_DAYS} DAYS
           AND delivery_start >= current_date() - INTERVAL {GAS_RUN_HISTORY_DAYS + 1} DAYS

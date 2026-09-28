@@ -45,7 +45,7 @@ import _gas_demand_model as gdm
 from _config import (
     GAS_CURVE_MODELS_FILE, GAS_LDZ_AREAS, GAS_LDZ_DEFAULT_AREAS, GAS_RDL_REGIONS,
     GAS_RDL_DEFAULT_REGIONS, GAS_EFFICIENCY, GAS_LOWER_LOAD, GAS_RUNS, GAS_DEFAULT_RUNS,
-    GAS_FAMILIES, GAS_DEFAULT_FAMILY,
+    GAS_ALL_PATTERNS,
     GAS_FORECAST_DAYS, GAS_HIST_LOOKBACK_DAYS, GAS_TOTAL_SIGNAL_GWH, SBX_SCHEMA,
 )
 from _charts import make_ldz_panel, make_rdl_chart, make_gas_delta_bars
@@ -605,8 +605,8 @@ def _render_combined(ldz: dict[str, dict], rdl: dict[str, dict]) -> None:
 def render_gas_demand():
     st.markdown("#### GAS DEMAND")
     st.caption("EU gas demand from the weather, from the **sandbox** tables — "
-               "the same fitted curves as ldz_forecast.py and rdl_forecast.py. Pick a "
-               "model family and runs below.")
+               "the same fitted curves as ldz_forecast.py and rdl_forecast.py. "
+               "EC and GFS runs are shown side by side; pick runs below.")
 
     try:
         gas_df = load_gas_demand_daily()
@@ -617,32 +617,25 @@ def render_gas_demand():
         status_banner("No data found in gas_demand_daily.", "warning")
         return
 
-    # --- Family-based run selection (same pattern as morning call) ---
-    c1, c2, c3, c4 = st.columns([1.4, 2.2, 2.0, 2.4])
-    with c1:
-        families = st.multiselect("Model family", list(GAS_FAMILIES),
-                                  default=[GAS_DEFAULT_FAMILY], key="gas_families")
-        if not families:
-            status_banner("Select at least one model family.", "warning")
-            return
-        all_patterns = [p for f in families for p in GAS_FAMILIES[f]]
-
-    avail = list_family_runs(gas_df, all_patterns)
+    # --- EC + GFS side by side (no family selector) ---
+    avail = list_family_runs(gas_df, GAS_ALL_PATTERNS)
     run_map = {format_family_run(init_dt, pat): (init_dt, pat)
                for init_dt, pat in avail}
     run_keys = list(run_map.keys())
 
-    with c2:
+    c1, c2, c3 = st.columns([2.6, 2.0, 3.4])
+    with c1:
         if run_keys:
-            sel = st.multiselect("Run(s)", run_keys, default=run_keys[:1],
+            sel = st.multiselect("Run(s)", run_keys, default=run_keys[:2],
                                  key="gas_sel_runs",
-                                 help="Select one or more runs to compare.")
+                                 help="Select one or more runs to compare "
+                                      "(EC, GFS and Op runs are all available).")
             sel_runs = [run_map[k] for k in sel]
         else:
             sel_runs = []
-            status_banner("No runs found for this family.", "warning")
+            status_banner("No runs found.", "warning")
 
-    with c3:
+    with c2:
         cmp_mode = st.radio("Comparison", ["Auto (script logic)", "Manual"],
                             key="gas_cmp_mode", horizontal=True,
                             help="Auto follows the original script pairing (e.g. 00z vs previous 00z); "
@@ -655,7 +648,7 @@ def render_gas_demand():
             cmp_dt, _cmp_pat = run_map[cmp_sel]
             manual_cmp_init = cmp_dt
 
-    with c4:
+    with c3:
         areas = st.multiselect("LDZ countries", list(GAS_LDZ_AREAS), GAS_LDZ_DEFAULT_AREAS, key="gas_areas")
         regions = st.multiselect("Wind & solar regions", list(GAS_RDL_REGIONS), GAS_RDL_DEFAULT_REGIONS,
                                  key="gas_regions")

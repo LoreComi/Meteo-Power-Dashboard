@@ -146,7 +146,8 @@ def volue_init_time(ref_dt: pd.Timestamp, init_hour: int) -> pd.Timestamp:
     return day + pd.Timedelta(hours=int(init_hour))
 
 
-_VOLUE_INIT_HOUR = {"ec00ens": 0, "ec12ens": 12, "gfs00ens": 0, "gfs12ens": 12, "ecmonthly": 0}
+_VOLUE_INIT_HOUR = {"ec00ens": 0, "ec12ens": 12, "gfs00ens": 0, "gfs12ens": 12, "ecmonthly": 0,
+                    "ec00": 0, "gfs00": 0}
 
 
 def init_time_for(pattern: str, ref_dt: pd.Timestamp) -> pd.Timestamp:
@@ -540,10 +541,16 @@ def list_family_runs(df: pd.DataFrame, patterns: list[str]) -> list[tuple[pd.Tim
 
 
 def format_family_run(init_dt: pd.Timestamp, pattern: str) -> str:
-    """Format a run for display: 'Mon 22 Sep 00z (EC)'."""
+    """Format a run for display: 'Mon 22 Sep 00z (EC)' or 'Mon 22 Sep 00z (EC Op)'."""
     hour = 12 if "12" in pattern else 0
-    tag = ("EC" if pattern.startswith("ec") and "monthly" not in pattern
-           else "GFS" if "gfs" in pattern else "EC-Ext")
+    if "monthly" in pattern:
+        tag = "EC-Ext"
+    elif pattern.startswith("ec"):
+        tag = "EC Op" if "ens" not in pattern else "EC"
+    elif "gfs" in pattern:
+        tag = "GFS Op" if "ens" not in pattern else "GFS"
+    else:
+        tag = pattern
     return f"{init_dt.strftime('%a %d %b')} {hour:02d}z ({tag})"
 
 

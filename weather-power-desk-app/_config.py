@@ -446,15 +446,24 @@ GAS_LOWER_LOAD = 0.8        # share of the renewable swing that actually displac
 # Runs compared. Each is scored against the run the script pairs it with:
 # a 00z run vs the same pattern's previous 00z (Friday's on a Monday);
 # a 12z run vs the same day's 00z (or the 00z two days earlier on a Monday).
-GAS_RUNS: dict[str, str] = {"EC-ENS 00z": "ec00ens", "EC-ENS 12z": "ec12ens", "GFS-ENS 00z": "gfs00ens"}
+GAS_RUNS: dict[str, str] = {
+    "EC-ENS 00z": "ec00ens", "EC-ENS 12z": "ec12ens", "GFS-ENS 00z": "gfs00ens",
+    "EC Op 00z": "ec00", "GFS Op 00z": "gfs00",
+}
 GAS_DEFAULT_RUNS = ["EC-ENS 00z", "GFS-ENS 00z"]
 
 # Family grouping for gas demand (same concept as MORNING_FAMILIES)
 GAS_FAMILIES: dict[str, list[str]] = {
     "EC-ENS": ["ec00ens", "ec12ens"],
     "GFS-ENS": ["gfs00ens"],
+    "EC-Op": ["ec00"],
+    "GFS-Op": ["gfs00"],
 }
 GAS_DEFAULT_FAMILY = "EC-ENS"
+
+# Flat list of every gas-demand pattern — used by the UI which always shows
+# EC and GFS side by side without a family selector.
+GAS_ALL_PATTERNS: list[str] = ["ec00ens", "ec12ens", "gfs00ens", "ec00", "gfs00"]
 
 GAS_FORECAST_DAYS = 14               # horizon pulled per run, as in dwld_fct
 GAS_HIST_LOOKBACK_DAYS = 10          # trailing actual days: MAX_LAG_DAYS (6) + 4
@@ -578,7 +587,7 @@ GAS_VOLUE_FAMILIES: dict[str, tuple[str, str, str, float]] = {
     "wnd": ("WND", "production_wind",         "production_wind",         0.001),
     "spv": ("SPV", "production_solar",        "production_solar",        0.001),
 }
-GAS_VOLUE_PATTERNS: list[str] = ["ec00ens", "ec12ens", "gfs00ens"]
+GAS_VOLUE_PATTERNS: list[str] = ["ec00ens", "ec12ens", "gfs00ens", "ec00", "gfs00"]
 GAS_VOLUE_AREAS: list[str] = ["DE", "UK", "FR", "BE", "NL", "IT", "ES", "PT"]
 
 # Deltashare curve names use shortened pattern names (ec00 not ec00ens) and
@@ -587,6 +596,7 @@ GAS_VOLUE_AREAS: list[str] = ["DE", "UK", "FR", "BE", "NL", "IT", "ES", "PT"]
 DELTASHARE_PATTERN_MAP: dict[str, str] = {
     "ec00ens": "ec00", "ec12ens": "ec12",
     "gfs00ens": "gfs00", "ecmonthly": "ecmonthly",
+    "ec00": "ec00", "gfs00": "gfs00",
 }
 
 # Wider lookback for manual run selection (sandbox only kept 8 days)
@@ -595,6 +605,7 @@ LIVE_HISTORY_DAYS = 14
 # Expected forecast-day count per pattern (for completeness banner)
 EXPECTED_HORIZON: dict[str, int] = {
     "ec00ens": 15, "ec12ens": 15, "gfs00ens": 16, "ecmonthly": 46,
+    "ec00": 10, "gfs00": 16,
 }
 
 
