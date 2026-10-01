@@ -23,7 +23,7 @@ from _style import (
     CAT_BLUE, CAT_ORANGE,
 )
 
-from _config import MAP_EUROPE_BBOX
+from _config import MAP_EUROPE_BBOX, HYDRO_MAP_EXTENT
 
 AREA_COLORS: dict[str, str] = {code: CATEGORICAL[i % len(CATEGORICAL)] for i, code in enumerate(AREAS)}
 RUN_OPACITY = {1: 1.0, 2: 0.55, 3: 0.4, 4: 0.3, 5: 0.22, 6: 0.16}
@@ -583,6 +583,61 @@ def make_hydro_climatology_chart(clim: dict, hist_years: list[int], recent_years
     fig.update_xaxes(tickformat="%b", dtick="M1", range=[x[0], x[-1]])
     fig.update_yaxes(title_text=unit, tickformat=",.0f")
     fig.update_layout(hovermode="x")
+    return fig
+
+
+def make_hydro_europe_map(painted: list[dict], zmin: float, zmax: float, zmid: float | None,
+                          colorbar_title: str, title: str = "", height: int = 640) -> go.Figure:
+    """The hydro overview: a Europe choropleth, one colour per painted country, with
+    the country's numbers written on it and the full read-out on hover.
+
+    `painted` rows: iso3, z (the colour value, or None for "no series"), label (text
+    drawn on the country, <br> allowed), hover (html), lat, lon (label position).
+    Colour is polarity on the app's diverging pair — red = deficit / low, blue =
+    surplus / high — so the map reads like the anomaly bars and the KPI cards.
+    Countries without a series are drawn in the land colour with a muted label.
+
+    Plotly's built-in country outlines are used (locationmode ISO-3); the browser
+    fetches them from cdn.plot.ly, as it already does the fonts.
+    """
+    ext = HYDRO_MAP_EXTENT
+    fig = _base_fig(title, height=height)
+    with_z = [r for r in painted if r.get("z") is not None]
+    without = [r for r in painted if r.get("z") is None]
+    if without:
+        fig.add_trace(go.Choropleth(
+            locations=[r["iso3"] for r in without], locationmode="ISO-3",
+            z=[0] * len(without), zmin=0, zmax=1, colorscale=[[0, _LAND_COLOR], [1, _LAND_COLOR]],
+            showscale=False, marker_line_color=_BORDER_CLR, marker_line_width=0.6,
+            customdata=[r["hover"] for r in without], hovertemplate="%{customdata}<extra></extra>",
+            name="no series"))
+    if with_z:
+        fig.add_trace(go.Choropleth(
+            locations=[r["iso3"] for r in with_z], locationmode="ISO-3",
+            z=[r["z"] for r in with_z], zmin=zmin, zmax=zmax, zmid=zmid,
+            colorscale=[[0.0, DIV_POS], [0.5, DIV_MID], [1.0, DIV_NEG]],
+            marker_line_color=_COAST_COLOR, marker_line_width=0.8,
+            colorbar=dict(title=dict(text=colorbar_title, font=dict(size=11, color=INK_SECONDARY), side="right"),
+                          orientation="h", thickness=10, len=0.6, y=-0.01, yanchor="top", x=0.5, xanchor="center",
+                          outlinewidth=0, tickfont=dict(size=10, color=INK_MUTED)),
+            customdata=[r["hover"] for r in with_z], hovertemplate="%{customdata}<extra></extra>",
+            name=colorbar_title))
+    labelled = [r for r in painted if r.get("label") and r.get("lat") is not None]
+    if labelled:
+        fig.add_trace(go.Scattergeo(
+            lat=[r["lat"] for r in labelled], lon=[r["lon"] for r in labelled], mode="text",
+            text=[r["label"] for r in labelled],
+            textfont=dict(family="JetBrains Mono, monospace", size=10,
+                          color=[INK_PRIMARY if r.get("z") is not None else INK_MUTED for r in labelled]),
+            hoverinfo="skip", showlegend=False))
+    fig.update_geos(
+        scope="europe", resolution=50, domain=dict(x=[0, 1], y=[0, 1]),
+        lonaxis_range=[ext["lon_min"], ext["lon_max"]], lataxis_range=[ext["lat_min"], ext["lat_max"]],
+        showland=True, landcolor=_LAND_COLOR, showocean=True, oceancolor=_OCEAN_COLOR,
+        showlakes=False, showrivers=False, showcountries=True, countrycolor=_BORDER_CLR,
+        showcoastlines=True, coastlinecolor=_COAST_COLOR, showframe=False, bgcolor="rgba(0,0,0,0)",
+    )
+    fig.update_layout(margin=dict(l=0, r=0, t=40 if title else 6, b=46), hovermode="closest", showlegend=False)
     return fig
 
 

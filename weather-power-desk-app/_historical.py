@@ -2,7 +2,11 @@
 
 Tab 1  History by country: monthly or weekly values, any combination of years
        and months, shown as anomaly vs normal (default) or actual vs normal,
-       plus a full year × month anomaly heatmap per country.
+       plus a full year × month anomaly heatmap per country. Temperature is the
+       Meteomatics / ERA5 gold climatology reduced to population-weighted
+       country means (hist_daily, source 'Meteomatics' — the same rows as the
+       Anomaly Maps tab); wind, solar and precipitation energy are Volue
+       actuals vs the Volue normal (source 'Volue').
 Tab 2  Analogues with weather indexes: pick an index and a target period, find
        the historical years whose index was closest to the current value, and
        composite the countries' anomalies in those years. Data-driven from
@@ -17,9 +21,12 @@ import streamlit as st
 
 from _config import (
     AREAS, DEFAULT_AREAS, METRICS, DEFAULT_METRIC, MONTH_NAMES, WEATHER_INDEXES, ANALOG_N_YEARS,
-    SBX_SCHEMA, area_label, MAP_METRICS,
+    SBX_SCHEMA, area_label, MAP_METRICS, HIST_SOURCE_NOTES, HIST_DEFAULT_SOURCE,
 )
-from _data import load_hist_years, load_hist_daily, load_hist_monthly_all, load_weather_indexes, load_anomaly_map
+from _data import (
+    load_hist_years, load_hist_daily, load_hist_monthly_all, load_weather_indexes, load_anomaly_map,
+    resolve_hist_source,
+)
 from _charts import (
     make_year_month_heatmap, make_period_bars, make_period_lines, make_index_chart, make_anomaly_heatmap,
     make_geo_anomaly_map,
@@ -54,8 +61,15 @@ def _render_history():
         metric = st.selectbox("Metric", list(METRICS.keys()), index=list(METRICS).index(DEFAULT_METRIC), key="h_metric")
     with c2:
         areas = st.multiselect("Countries", list(AREAS.keys()), DEFAULT_AREAS, format_func=area_label, key="h_areas")
+    # Temperature reads the Meteomatics / ERA5 rows of hist_daily, the other
+    # metrics Volue's; an older sandbox (no `source` column) or a notebook run
+    # without gold access falls back and says so.
+    source, note = resolve_hist_source(metric)
+    if note:
+        status_banner(note, "warning")
+    st.caption(f"Source — {HIST_SOURCE_NOTES.get(source or HIST_DEFAULT_SOURCE, source)}.")
     try:
-        years_avail = load_hist_years(metric)
+        years_avail = load_hist_years(metric, source)
     except Exception as e:
         st.error(f"Failed to read history: {e}")
         return
@@ -79,8 +93,8 @@ def _render_history():
 
     m = METRICS[metric]
     try:
-        df = load_hist_daily(metric, tuple(areas), tuple(years), tuple(months))
-        monthly_all = load_hist_monthly_all(metric, tuple(areas))
+        df = load_hist_daily(metric, tuple(areas), tuple(years), tuple(months), source)
+        monthly_all = load_hist_monthly_all(metric, tuple(areas), source)
     except Exception as e:
         st.error(f"Failed to load history: {e}")
         return
@@ -180,8 +194,9 @@ def _render_analogues():
     st.caption("Analog years: " + ", ".join(f"{y} ({cand[y]:+.2f})" for y in analogs.index))
     st.plotly_chart(make_index_chart(s, index_name, list(analogs.index)), use_container_width=True)
 
+    source, _ = resolve_hist_source(metric)
     try:
-        monthly = load_hist_monthly_all(metric, tuple(areas))
+        monthly = load_hist_monthly_all(metric, tuple(areas), source)
     except Exception as e:
         st.error(f"Failed to load history: {e}")
         return
@@ -253,7 +268,9 @@ def _render_maps():
 
 def render_historical():
     st.markdown("#### HISTORICAL & ANALYSIS")
-    st.caption("Volue actuals vs 30-year normal by country since 2013 · monthly and weekly · multi-year and "
+    st.caption("History by country — temperature from the Meteomatics / ERA5 climatology since 1979 "
+               "(population-weighted country means, the Anomaly Maps' own value / normal / anomaly), wind, "
+               "solar and precipitation energy from Volue since 2013 · monthly and weekly · multi-year and "
                "multi-month selections · ERA5 anomaly maps · analogues from weather indexes.")
     tabs = st.tabs(["History by country", "Anomaly Maps", "Analogues (weather indexes)"])
     with tabs[0]:

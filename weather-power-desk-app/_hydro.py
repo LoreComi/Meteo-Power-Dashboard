@@ -1,11 +1,23 @@
 """Section 3 — Hydro Monitoring.
 
-Live version of P:/QFA/TonyWeather/Hydro_Report/quantify_*.py: for each of
-the three hydro families (reservoir levels, snow & groundwater, hydro
-balance) and each country it shows the climatology chart (grey history, blue
-recent years, dashed norm, red current year) and the report's numbers —
-anomaly in GWh and % of normal, percentile of the current week, and the
-change since last week — plus the stats_*.txt text the report writes.
+Overview tab   What you see on entering: a Europe map of the hydro outlook per
+               country. Each hydro area is painted by its reservoir level as %
+               of normal (or by percentile, or by the anomaly in GWh) with its
+               numbers written on the country, and the full read-out on hover —
+               reservoirs, snow & groundwater, hydro balance, and the flags.
+               Under the map: the criticalities (series at or below the 15th /
+               30th percentile of their history, at or above the 85th, or moving
+               5+ pts of normal in a week) and a grid with every area × every
+               layer side by side. Layers are HYDRO_OVERVIEW_LAYERS in _config;
+               SWE, river levels or temperatures slot in there once their series
+               exist in the sandbox (see _overview_metrics).
+Family tabs    Live version of P:/QFA/TonyWeather/Hydro_Report/quantify_*.py:
+               for each of the three hydro families (reservoir levels, snow &
+               groundwater, hydro balance) and each country the climatology
+               chart (grey history, blue recent years, dashed norm, red current
+               year) and the report's numbers — anomaly in GWh and % of normal,
+               percentile of the current week, and the change since last week —
+               plus the stats_*.txt text the report writes.
 The maths is in _hydro_quantify.py; data comes from {SBX_SCHEMA}.hydro_daily.
 """
 from __future__ import annotations
@@ -16,26 +28,356 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from _config import HYDRO_AREA_CODES, HYDRO_COMPONENTS
-from _data import load_hydro_available, load_hydro_series
-from _charts import make_hydro_climatology_chart, make_hydro_anomaly_bars
+from _config import (
+    HYDRO_AREA_CODES, HYDRO_COMPONENTS, HYDRO_MAP_REGIONS, HYDRO_MAP_LABEL_POS, HYDRO_OVERVIEW_LAYERS,
+    HYDRO_OVERVIEW_DEFAULT_LAYER, HYDRO_COLOUR_MODES, HYDRO_PCT_OF_NORMAL_RANGE,
+    HYDRO_PCTL_CRITICAL, HYDRO_PCTL_LOW, HYDRO_PCTL_HIGH, HYDRO_WEEK_MOVE_PTS,
+)
+from _data import load_hydro_available, load_hydro_series, load_hydro_component
+from _charts import make_hydro_climatology_chart, make_hydro_anomaly_bars, make_hydro_europe_map
 from _hydro_quantify import (
     HYDRO_FAMILIES, HYDRO_DEFAULT_COUNTRIES, build_climatology, quantify_anomaly, split_recent_hist, stats_text,
 )
 from _ui import kpi_card, kpi_row, status_banner, ordinal
 
 
-def _pct_class(q: float | None) -> str:
-    if q is None or np.isnan(q):
-        return "kpi-card-neutral"
-    if q <= 15:
-        return "kpi-card-critical"
-    if q <= 30:
-        return "kpi-card-warning"
-    if q >= 85:
-        return "kpi-card-cool"
-    return "kpi-card-neutral"
+# ══════════════════════════════════════════════════════════════════════════════
+# STATUS — one reading of the thresholds for cards, map labels, flags and grid
+# ══════════════════════════════════════════════════════════════════════════════
 
+def _pct_status(q: float | None) -> str | None:
+    """'critical' | 'low' | 'high' | None from the percentile of this week vs history."""
+    if q is None or (isinstance(q, float) and np.isnan(q)):
+        return None
+    if q <= HYDRO_PCTL_CRITICAL:
+        return "critical"
+    if q <= HYDRO_PCTL_LOW:
+        return "low"
+    if q >= HYDRO_PCTL_HIGH:
+        return "high"
+    return None
+
+
+def _pct_class(q: float | None) -> str:
+    return {"critical": "kpi-card-critical", "low": "kpi-card-warning", "high": "kpi-card-cool"}.get(
+        _pct_status(q), "kpi-card-neutral")
+
+
+def _level_text(q: dict, layer: str) -> str:
+    """'92%' for a level series, '-1,215' (GWh vs norm) for a deviation series."""
+    if HYDRO_OVERVIEW_LAYERS[layer]["level"] == "percent" and q.get("anomaly_percent") is not None:
+        return f"{q['anomaly_percent']:.0f}%"
+    return f"{q['anomaly']:+,.0f}"
+
+
+def _week_move(q: dict, layer: str) -> tuple[float | None, str]:
+    """(move over the last week, unit): pts of normal for a level series, GWh of
+    anomaly for a deviation series whose % of normal means nothing."""
+    cfg = HYDRO_OVERVIEW_LAYERS[layer]
+    if cfg["level"] == "percent":
+        wk = q.get("week_change_pct_points")
+        return (float(wk) if wk is not None else None), "pts"
+    a, aw = q.get("anomaly"), q.get("anomaly_w-1")
+    if a is None or aw is None:
+        return None, cfg["unit"]
+    return float(a - aw), cfg["unit"]
+
+
+def _fmt_move(wk: float | None, unit: str, arrow: bool = False) -> str:
+    if wk is None:
+        return "—"
+    head = ("▲ " if wk > 0 else "▼ " if wk < 0 else "■ ") if arrow else ""
+    body = f"{wk:+.0f} pts" if unit == "pts" else f"{wk:+,.0f} {unit}"
+    return head + (body.lstrip("+-") if arrow else body)
+
+
+def _flags(q: dict, layer: str) -> list[tuple[str, str]]:
+    """Criticality flags for one series' quantify dict: (level, text) with level in
+    critical / warning / high. Percentile first, then — for level series — the
+    week-on-week move in pts of normal."""
+    out: list[tuple[str, str]] = []
+    pq = q.get("anomaly_quantile")
+    status = _pct_status(pq)
+    if status == "critical":
+        out.append(("critical", f"{ordinal(round(pq))} percentile of {q.get('n_hist_years', '?')} yrs — critically low"))
+    elif status == "low":
+        out.append(("warning", f"{ordinal(round(pq))} percentile of {q.get('n_hist_years', '?')} yrs — low"))
+    elif status == "high":
+        out.append(("high", f"{ordinal(round(pq))} percentile of {q.get('n_hist_years', '?')} yrs — very high"))
+    wk, unit = _week_move(q, layer)
+    if unit == "pts" and wk is not None and abs(wk) >= HYDRO_WEEK_MOVE_PTS:
+        out.append(("warning" if wk < 0 else "high",
+                    f"{wk:+.0f} pts of normal in a week — fast {'drawdown' if wk < 0 else 'refill'}"))
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OVERVIEW — every area × every layer quantified once
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _overview_metrics() -> dict[str, dict[str, dict]]:
+    """layer -> hydro area code -> quantify_anomaly dict, for every area with a
+    series. One query per layer (load_hydro_component), then the report maths per
+    area, exactly as the family tabs do it one country at a time.
+
+    To add a layer that is not a hydro_daily component (SWE, river levels,
+    temperatures): load its (area, day, actual[, normal]) series here, run it
+    through build_climatology / quantify_anomaly the same way, and register the
+    layer in HYDRO_OVERVIEW_LAYERS — nothing downstream changes.
+    """
+    out: dict[str, dict[str, dict]] = {}
+    for layer, cfg in HYDRO_OVERVIEW_LAYERS.items():
+        family = cfg["family"]
+        comp = HYDRO_COMPONENTS[family]
+        try:
+            df = load_hydro_component(comp)
+        except Exception:
+            out[layer] = {}
+            continue
+        per_area: dict[str, dict] = {}
+        if df.empty:
+            out[layer] = per_area
+            continue
+        for area, g in df.groupby("area"):
+            actual = g[g["data_type"] == "SA"].set_index("day")["value"].sort_index()
+            normal = g[g["data_type"] == "N"].set_index("day")["value"].sort_index()
+            if actual.dropna().empty:
+                continue
+            try:
+                clim = build_climatology(actual, normal if (HYDRO_FAMILIES[family]["has_norm"] and not normal.empty) else None)
+                q = quantify_anomaly(clim)
+            except Exception:
+                continue
+            if q:
+                per_area[str(area)] = q
+        out[layer] = per_area
+    return out
+
+
+def _colour_value(q: dict, colour_by: str) -> float | None:
+    v = q.get(colour_by)
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    return float(v)
+
+
+def _label(area: str, q: dict, layer: str) -> str:
+    """The numbers written on the country: code, level vs normal, percentile, week move."""
+    pq = q.get("anomaly_quantile")
+    line2 = _level_text(q, layer) + (f" · P{pq:.0f}" if pq is not None else "")
+    wk, unit = _week_move(q, layer)
+    line3 = _fmt_move(wk, unit, arrow=True) if wk is not None else ""
+    return "<br>".join(x for x in (f"<b>{area}</b>", line2, line3) if x)
+
+
+def _hover_html(area: str, cfg: dict, layer: str, metrics: dict[str, dict[str, dict]]) -> str:
+    """The full read-out for one area: every layer's numbers, the chosen layer in
+    bold, then its flags."""
+    name = cfg["name"] + (" — aggregate" if cfg.get("aggregate") else "")
+    lines = [f"<b>{name}</b>"]
+    for lyr in HYDRO_OVERVIEW_LAYERS:
+        q = metrics.get(lyr, {}).get(area)
+        if not q:
+            continue
+        unit = HYDRO_OVERVIEW_LAYERS[lyr]["unit"]
+        as_of = q.get("as_of")
+        as_of_s = f" · {pd.Timestamp(as_of):%d %b}" if as_of is not None else ""
+        head = f"<b>{lyr}</b>" if lyr == layer else lyr
+        lines.append(f"{head}: {q['latest_value']:,.0f} {unit}{as_of_s}")
+        bits = [f"{q['anomaly']:+,.0f} {unit} vs norm"]
+        if HYDRO_OVERVIEW_LAYERS[lyr]["level"] == "percent" and q.get("anomaly_percent") is not None:
+            bits.append(f"{q['anomaly_percent']}% of normal")
+        if q.get("anomaly_quantile") is not None:
+            bits.append(f"{ordinal(round(q['anomaly_quantile']))} pct of {q['n_hist_years']} yrs")
+        wk, wunit = _week_move(q, lyr)
+        if wk is not None:
+            bits.append(f"Δ week {_fmt_move(wk, wunit)}")
+        lines.append("&nbsp;&nbsp;" + " · ".join(bits))
+        for _lvl, text in _flags(q, lyr):
+            lines.append(f"&nbsp;&nbsp;⚑ {text}")
+    return "<br>".join(lines)
+
+
+def _paint(layer: str, colour_by: str, metrics: dict[str, dict[str, dict]]) -> list[dict]:
+    """One row per ISO-3 country to draw. A country's own series wins; an
+    aggregate (Nordics, SEE) paints the members that have none; what is left is
+    drawn without a value."""
+    lm = metrics.get(layer, {})
+    rows: dict[str, dict] = {}
+    own = [(a, c) for a, c in HYDRO_MAP_REGIONS.items() if not c.get("aggregate")]
+    aggs = [(a, c) for a, c in HYDRO_MAP_REGIONS.items() if c.get("aggregate")]
+    for area, cfg in own + aggs:
+        q = lm.get(area)
+        if not q:
+            continue
+        labelled = False
+        for iso in cfg["iso3"]:
+            if iso in rows:
+                continue
+            lat, lon = HYDRO_MAP_LABEL_POS.get(iso, (None, None))
+            # an aggregate is labelled once, on its first painted member
+            label = "" if (cfg.get("aggregate") and labelled) else _label(area, q, layer)
+            labelled = True
+            rows[iso] = {"iso3": iso, "area": area, "z": _colour_value(q, colour_by),
+                         "label": label, "hover": _hover_html(area, cfg, layer, metrics),
+                         "lat": lat, "lon": lon}
+    for area, cfg in own + aggs:
+        for iso in cfg["iso3"]:
+            if iso in rows:
+                continue
+            lat, lon = HYDRO_MAP_LABEL_POS.get(iso, (None, None))
+            rows[iso] = {"iso3": iso, "area": area, "z": None,
+                         "label": "" if cfg.get("aggregate") else f"{area}<br>—",
+                         "hover": f"<b>{cfg['name']}</b><br>no {layer.lower()} series in hydro_daily",
+                         "lat": lat, "lon": lon}
+    return list(rows.values())
+
+
+def _grid_html(metrics: dict[str, dict[str, dict]]) -> str:
+    """Areas as rows, layers as column groups — each layer's level, percentile and
+    week move side by side, shaded by status (the number and the word carry it too)."""
+    layers = list(HYDRO_OVERVIEW_LAYERS)
+    known = list(HYDRO_MAP_REGIONS)
+    extra = sorted({a for l in layers for a in metrics.get(l, {}) if a not in known})
+    areas = [a for a in known + extra if any(a in metrics.get(l, {}) for l in layers)]
+
+    def level_head(l: str) -> str:
+        return "% norm" if HYDRO_OVERVIEW_LAYERS[l]["level"] == "percent" else f"{HYDRO_OVERVIEW_LAYERS[l]['unit']} vs norm"
+
+    head = ("<tr><th rowspan='2' style='text-align:left;vertical-align:bottom'>Area</th>"
+            + "".join(f"<th colspan='3' class='hy-layer'>{l}</th>" for l in layers) + "</tr>"
+            + "<tr>" + "".join(f"<th class='hy-sub hy-first'>{level_head(l)}</th><th class='hy-sub'>Pctl</th>"
+                               f"<th class='hy-sub'>Δ wk</th>" for l in layers) + "</tr>")
+    body = []
+    for a in areas:
+        cfg = HYDRO_MAP_REGIONS.get(a, {"name": a})
+        name = cfg["name"] + (" <span class='hy-agg'>aggregate</span>" if cfg.get("aggregate") else "")
+        cells = [f"<td class='mc-region'>{name}</td>"]
+        for l in layers:
+            q = metrics.get(l, {}).get(a)
+            if not q:
+                cells += ["<td class='hy-na hy-first'>—</td>", "<td class='hy-na'>—</td>", "<td class='hy-na'>—</td>"]
+                continue
+            pq = q.get("anomaly_quantile")
+            level = _level_text(q, l)
+            wk, wunit = _week_move(q, l)
+            pcls = {"critical": "hy-crit", "low": "hy-low", "high": "hy-high"}.get(_pct_status(pq), "")
+            ptxt = f"{ordinal(round(pq))}" if pq is not None else "—"
+            if pcls == "hy-crit":
+                ptxt += " crit. low"
+            elif pcls == "hy-low":
+                ptxt += " low"
+            elif pcls == "hy-high":
+                ptxt += " high"
+            wcls = "" if (wunit != "pts" or wk is None or abs(wk) < HYDRO_WEEK_MOVE_PTS) else ("hy-low" if wk < 0 else "hy-high")
+            wtxt = _fmt_move(wk, wunit)
+            cells += [f"<td class='hy-first'>{level}</td>", f"<td class='{pcls}'>{ptxt}</td>", f"<td class='{wcls}'>{wtxt}</td>"]
+        body.append("<tr>" + "".join(cells) + "</tr>")
+    return (f"<div class='mc-block'><table class='mc-table hy-table'><thead>{head}</thead>"
+            f"<tbody>{''.join(body)}</tbody></table></div>")
+
+
+def _overview_table(metrics: dict[str, dict[str, dict]]) -> pd.DataFrame:
+    rows = []
+    for layer, per_area in metrics.items():
+        for area, q in per_area.items():
+            wk, wunit = _week_move(q, layer)
+            rows.append({"area": area, "name": HYDRO_MAP_REGIONS.get(area, {}).get("name", area), "layer": layer,
+                         "as_of": pd.Timestamp(q["as_of"]).date() if q.get("as_of") is not None else None,
+                         "latest_value": q.get("latest_value"), "norm_today": q.get("norm_today"),
+                         "anomaly": q.get("anomaly"),
+                         "anomaly_percent": q.get("anomaly_percent") if HYDRO_OVERVIEW_LAYERS[layer]["level"] == "percent" else None,
+                         "anomaly_quantile": q.get("anomaly_quantile"),
+                         "week_move": wk, "week_move_unit": wunit,
+                         "n_hist_years": q.get("n_hist_years"),
+                         "flags": "; ".join(t for _l, t in _flags(q, layer))})
+    return pd.DataFrame(rows)
+
+
+def _render_overview(avail: pd.DataFrame):
+    c1, c2 = st.columns([1.5, 1.8])
+    with c1:
+        layers = list(HYDRO_OVERVIEW_LAYERS)
+        layer = st.radio("Map layer", layers, index=layers.index(HYDRO_OVERVIEW_DEFAULT_LAYER),
+                         horizontal=True, key="hy_ov_layer")
+    with c2:
+        # a deviation series (hydro balance) has no meaningful % of normal to colour by
+        modes = [m for m in HYDRO_COLOUR_MODES
+                 if not (m == "anomaly_percent" and HYDRO_OVERVIEW_LAYERS[layer]["level"] != "percent")]
+        default_mode = HYDRO_OVERVIEW_LAYERS[layer]["colour_by"]
+        colour_by = st.radio("Colour by", modes, index=modes.index(default_mode), horizontal=True,
+                             format_func=HYDRO_COLOUR_MODES.get, key=f"hy_ov_mode_{layer}")
+
+    with st.spinner("Quantifying every hydro series…"):
+        metrics = _overview_metrics()
+    lm = metrics.get(layer, {})
+    if not lm:
+        status_banner(f"No {layer.lower()} series in hydro_daily — nothing to paint. "
+                      "Has power_desk_refresh.py run, and do the Volue area codes match?", "warning")
+        return
+
+    painted = _paint(layer, colour_by, metrics)
+    if colour_by == "anomaly_percent":
+        zmin, zmax = HYDRO_PCT_OF_NORMAL_RANGE
+        zmid, cb = 100.0, "% of normal"
+    elif colour_by == "anomaly_quantile":
+        zmin, zmax, zmid, cb = 0.0, 100.0, 50.0, "percentile of this week"
+    else:
+        m = max([abs(r["z"]) for r in painted if r.get("z") is not None] or [1.0])
+        zmin, zmax, zmid, cb = -m, m, 0.0, f"{HYDRO_OVERVIEW_LAYERS[layer]['unit']} vs norm"
+    as_of = [pd.Timestamp(q["as_of"]) for q in lm.values() if q.get("as_of") is not None]
+    n_yrs = sorted({q.get("n_hist_years") for q in lm.values() if q.get("n_hist_years")})
+    yrs = "–".join(str(n) for n in (n_yrs[0], n_yrs[-1])) if len(n_yrs) > 1 else (str(n_yrs[0]) if n_yrs else "?")
+    aggs = [f"{a} paints {', '.join(c['iso3'])} where they have no series of their own"
+            for a, c in HYDRO_MAP_REGIONS.items() if c.get("aggregate") and a in lm]
+    legend = (layer + (f" as of {max(as_of):%d %b %Y}" if as_of else "")
+              + " · red = below normal / low in the history, blue = above / high · on each country: level vs "
+              f"normal · percentile of this week against the same week in {yrs} years · move in a week · hover for "
+              "every layer and the flags" + (" · " + "; ".join(aggs) if aggs else "") + ".")
+
+    left, right = st.columns([1.15, 1], gap="large")
+    with left:
+        st.plotly_chart(make_hydro_europe_map(painted, zmin, zmax, zmid, cb), use_container_width=True,
+                        config={"scrollZoom": False})
+        st.caption(legend)
+
+    # ── Criticalities across every layer, beside the map ──────────────────────
+    with right:
+        st.markdown("##### Criticalities")
+        order = {"critical": 0, "warning": 1, "high": 2}
+        items = []
+        for lyr in HYDRO_OVERVIEW_LAYERS:
+            for area, q in metrics.get(lyr, {}).items():
+                for level, text in _flags(q, lyr):
+                    items.append((order[level], HYDRO_MAP_REGIONS.get(area, {}).get("name", area), lyr, level, text))
+        items.sort(key=lambda t: (t[0], t[1], t[2]))
+        if items:
+            chips = "".join(f"<span class='hy-flag hy-flag-{lvl}'><b>{name}</b> {lyr.lower()}: {text}</span>"
+                            for _o, name, lyr, lvl, text in items)
+            st.markdown(f"<div class='hy-flags'>{chips}</div>", unsafe_allow_html=True)
+        else:
+            status_banner(f"None flagged — every series sits between the {ordinal(HYDRO_PCTL_LOW)} and "
+                          f"{ordinal(HYDRO_PCTL_HIGH)} percentile of its history and moved less than "
+                          f"{HYDRO_WEEK_MOVE_PTS} pts of normal in the week.", "good")
+        st.caption(f"Flags: at or below the {ordinal(HYDRO_PCTL_CRITICAL)} percentile = critically low, the "
+                   f"{ordinal(HYDRO_PCTL_LOW)} = low, at or above the {ordinal(HYDRO_PCTL_HIGH)} = very high; "
+                   f"|Δ| ≥ {HYDRO_WEEK_MOVE_PTS} pts of normal in a week = fast drawdown / refill (level series "
+                   "only — the hydro balance is a deviation, so its week move is shown in GWh and not flagged). "
+                   "Thresholds in _config (HYDRO_PCTL_*, HYDRO_WEEK_MOVE_PTS).")
+
+    # ── Every area × every layer, side by side ────────────────────────────────
+    st.markdown("##### All areas · all layers")
+    st.markdown(_grid_html(metrics), unsafe_allow_html=True)
+    table = _overview_table(metrics)
+    if not table.empty:
+        st.download_button("Download overview CSV", table.to_csv(index=False).encode(),
+                           f"hydro_overview_{dt.date.today():%Y%m%d}.csv", "text/csv", key="hy_ov_dl")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FAMILY TABS — the report's figures per country
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _country_kpis(country: str, q: dict, unit: str) -> list[str]:
     if not q:
@@ -141,8 +483,9 @@ def _render_family(family: str, avail: pd.DataFrame):
 
 def render_hydro():
     st.markdown("#### HYDRO MONITORING")
-    st.caption("Reservoir levels · snow & groundwater · hydro balance — Volue hydro curves since 2013 vs normal, "
-               "the Hydro Report quantify_* figures and statistics computed live.")
+    st.caption("The hydro outlook on a map of Europe — reservoirs first, snow & groundwater and hydro balance "
+               "alongside, criticalities flagged — then the Hydro Report quantify_* figures and statistics per "
+               "family, computed live from the Volue hydro curves since 2013 vs normal.")
     try:
         avail = load_hydro_available()
     except Exception as e:
@@ -151,7 +494,9 @@ def render_hydro():
     if not avail.empty:
         last = avail["last_day"].max()
         st.caption(f"Latest hydro observation: {pd.Timestamp(last):%d %b %Y}")
-    tabs = st.tabs(list(HYDRO_FAMILIES.keys()))
-    for tab, family in zip(tabs, HYDRO_FAMILIES.keys()):
+    tabs = st.tabs(["Overview"] + list(HYDRO_FAMILIES.keys()))
+    with tabs[0]:
+        _render_overview(avail)
+    for tab, family in zip(tabs[1:], HYDRO_FAMILIES.keys()):
         with tab:
             _render_family(family, avail)

@@ -25,7 +25,13 @@ Tables written (all read by weather-power-desk-app/_data.py):
   fcst_members          latest EC-ENS run, per member daily values (Volue) and
                         Meteomatics EC-ENS / AIFS-ENS members as population-
                         weighted country means
-  hist_daily            Volue actuals + normal per metric/area/day since 2013
+  hist_daily            actual + normal + anomaly per metric/area/day, with a
+                        `source` column: Volue ('AF' / 'N') for every metric since
+                        2013, and Meteomatics for temperature — the gold-layer ERA5
+                        climatology (the Anomaly Maps' rows) reduced to population-
+                        weighted country means since HIST_MM_START_YEAR. The
+                        Historical section reads Meteomatics for temperature; the
+                        Gas Demand seed keeps Volue
   hydro_daily           Volue hydro reservoir components (WTR/SGW/BAL),
                         actual (SA) and normal (N), per area/day since 2013
   gas_demand_daily      daily temperature / wind / solar with the normal, per
@@ -103,6 +109,22 @@ COUNTRY_BBOX = {
 
 HYDRO_AREAS = ["FR", "CH", "AT", "IT", "NP", "ES", "SEE", "DE", "NO", "SE", "FI"]
 HYDRO_COMPONENTS = ["WTR", "SGW", "BAL"]
+
+# Gold-layer ERA5 climatology: value / normal / anomaly per 0.5° grid point and
+# day. Two cells read it — 8 (the Anomaly Maps' monthly grid means) and 5 (the
+# Meteomatics temperature history) — so that a country's anomaly in the history
+# tab and the map it sits on are the same numbers. The notebook must run as a
+# user with dna_prod_gold access; the app SP never touches it.
+GOLD = "dna_prod_gold.weather"
+GOLD_BBOX = "CAST(t.latitude AS DOUBLE) BETWEEN 34 AND 72 AND CAST(t.longitude AS DOUBLE) BETWEEN -12 AND 36"
+MAP_SOURCES = [
+    # (app metric name, gold table, curve, unit)
+    ("Temperature",          "temperature_meteomatics_climatology",              "t_mean_2m_24h_c_ecmwf_era5_p1d",      "°C"),
+    ("Wind speed (200 hPa)", "wind_speed_meteomatics_climatology",               "wind_speed_200hpa_ms_ecmwf_era5_p1d",  "m/s"),
+    ("Precipitation",        "precipitation_forecast_meteomatics_climatology",   "precip_24h_mm_mix_p1d",                "mm"),
+]
+HIST_MM_TABLE, HIST_MM_CURVE = MAP_SOURCES[0][1], MAP_SOURCES[0][2]   # the temperature rows
+HIST_MM_START_YEAR = 1979           # ERA5 record as far back as the maps offer it
 
 
 def country_case_sql(lat="latitude", lon="longitude") -> str:
@@ -553,7 +575,30 @@ else:
 
 # COMMAND ----------
 
-# DBTITLE 1,5. Historical actuals + normals per metric/area/day (since 2013)
+# DBTITLE 1,5. Historical actuals + normals per metric/area/day — Volue, and Meteomatics for temperature
+# Two sources, told apart by the `source` column:
+#
+#   'Volue'        wind, solar, precipitation energy — and temperature — as the
+#                  daily CET mean of the actual ('AF') and normal ('N') curves per
+#                  Volue area since 2013, exactly as before. The Volue temperature
+#                  stays in the table because the Gas Demand section seeds its
+#                  LDZ curves with it: those curves were fitted on Volue
+#                  temperatures and the forecast leg is Volue, so the trailing
+#                  actual must be the same series or the first forecast day gets
+#                  a step. The Historical section does NOT show it.
+#
+#   'Meteomatics'  temperature only: the ERA5 climatology of the gold layer —
+#                  the very rows the Anomaly Maps tab is drawn from (value,
+#                  normal and anomaly per 0.5° grid point and day) — reduced to
+#                  one value per country with the population weights of cell 1a,
+#                  the way every Meteomatics forecast mean is. Value, normal and
+#                  anomaly are each the weighted mean of the gold column, so the
+#                  country anomaly in the history tab is the population-weighted
+#                  mean of the map's anomaly field, not a different normal.
+#                  Since HIST_MM_START_YEAR, i.e. as far back as the maps go.
+#
+# The two must not be averaged together in the app (different normals, different
+# grids); _data.hist_source_filter picks one per metric.
 hist_blocks = []
 for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
     hist_blocks.append(f"""
@@ -564,6 +609,39 @@ for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
       AND delivery_start >= '2013-01-01' AND delivery_start < current_date()
     GROUP BY area, {CET_DAY}, data_type
     """)
+
+# The Meteomatics block. CM (cell 1a) is the same population-weighted reduction
+# the forecast means use; with the weights missing it degrades to the bounding-
+# box CASE like everything else, and says so. A cell contributes only when both
+# value and normal are present, so numerator and denominator cover the same
+# people; the gold anomaly is taken as stored, falling back to value - normal.
+_w = CM["weight"]
+mm_hist_sql = f"""
+    SELECT 'Meteomatics' AS source, 'Temperature' AS metric, {CM['area']} AS area,
+           CAST(t.delivery_start AS DATE) AS day,
+           SUM(t.value * {_w}) / SUM({_w})                                   AS actual,
+           SUM(t.normal * {_w}) / SUM({_w})                                  AS normal,
+           SUM(COALESCE(t.anomaly, t.value - t.normal) * {_w}) / SUM({_w})   AS anomaly
+    FROM {GOLD}.{HIST_MM_TABLE} t {CM['join']}
+    WHERE t.curve_name = '{HIST_MM_CURVE}' AND {GOLD_BBOX}
+      AND t.delivery_start >= '{HIST_MM_START_YEAR}-01-01' AND t.delivery_start < current_date()
+      AND t.value IS NOT NULL AND t.normal IS NOT NULL
+    GROUP BY {CM['area']}, CAST(t.delivery_start AS DATE)
+"""
+
+# Without gold access the Volue half is still built, so the rest of the app is
+# not held hostage by a grant — but the Historical section then has no
+# Meteomatics temperature and says so (hist_source_filter finds no such rows).
+try:
+    spark.table(f"{GOLD}.{HIST_MM_TABLE}").limit(1).count()
+    GOLD_OK = True
+except Exception as _e:
+    GOLD_OK = False
+    print(f"!! {GOLD}.{HIST_MM_TABLE} not readable ({str(_e)[:160]}) — hist_daily gets Volue rows only; "
+          "run the notebook as a user with dna_prod_gold access for the Meteomatics temperature history")
+
+mm_union = f"UNION ALL SELECT source, metric, area, day, actual, normal, anomaly FROM meteomatics" if GOLD_OK else ""
+mm_cte = f", meteomatics AS (SELECT * FROM ({mm_hist_sql}) WHERE area IS NOT NULL)" if GOLD_OK else ""
 
 spark.sql(f"""
 CREATE OR REPLACE TABLE {SBX}.hist_daily AS
@@ -579,17 +657,51 @@ pivoted AS (
 doy_normal AS (
   SELECT metric, area, DAYOFYEAR(day) AS doy, AVG(normal_dated) AS normal_doy
   FROM pivoted WHERE normal_dated IS NOT NULL GROUP BY metric, area, DAYOFYEAR(day)
+),
+volue AS (
+  SELECT 'Volue' AS source, p.metric, p.area, p.day, p.actual,
+         COALESCE(p.normal_dated, d.normal_doy) AS normal,
+         p.actual - COALESCE(p.normal_dated, d.normal_doy) AS anomaly
+  FROM pivoted p LEFT JOIN doy_normal d ON d.metric = p.metric AND d.area = p.area AND d.doy = DAYOFYEAR(p.day)
+  WHERE p.actual IS NOT NULL
+){mm_cte},
+all_rows AS (
+  SELECT source, metric, area, day, actual, normal, anomaly FROM volue
+  {mm_union}
 )
-SELECT p.metric, p.area, p.day, YEAR(p.day) AS year, MONTH(p.day) AS month,
-       WEEKOFYEAR(p.day) AS iso_week, DATE_TRUNC('week', p.day) AS week_start,
-       p.actual, COALESCE(p.normal_dated, d.normal_doy) AS normal,
-       p.actual - COALESCE(p.normal_dated, d.normal_doy) AS anomaly,
-       CASE WHEN COALESCE(p.normal_dated, d.normal_doy) != 0
-            THEN (p.actual / COALESCE(p.normal_dated, d.normal_doy) - 1) * 100 END AS anomaly_pct
-FROM pivoted p LEFT JOIN doy_normal d ON d.metric = p.metric AND d.area = p.area AND d.doy = DAYOFYEAR(p.day)
-WHERE p.actual IS NOT NULL
+SELECT source, metric, area, day, YEAR(day) AS year, MONTH(day) AS month,
+       WEEKOFYEAR(day) AS iso_week, DATE_TRUNC('week', day) AS week_start,
+       actual, normal, anomaly,
+       CASE WHEN normal IS NOT NULL AND normal != 0 THEN (actual / normal - 1) * 100 END AS anomaly_pct,
+       current_timestamp() AS snapshot_ts
+FROM all_rows
 """)
 count("hist_daily")
+for _r in spark.sql(f"""
+    SELECT source, metric, COUNT(DISTINCT area) AS areas, MIN(day) AS first_day, MAX(day) AS last_day, COUNT(*) AS n
+    FROM {SBX}.hist_daily GROUP BY source, metric ORDER BY source, metric
+""").collect():
+    print(f"  {_r['source']:<12s} {_r['metric']:<22s} {_r['areas']:>3d} areas  {_r['first_day']} -> {_r['last_day']}  {_r['n']:>9,d} rows")
+if GOLD_OK:
+    # Did the gold grid meet the weights? Same check as cell 1a, on the gold table:
+    # a share well under 100 % means the climatology is not on the 0.5° points.
+    _cov = spark.sql(f"""
+        WITH g AS (
+          SELECT DISTINCT {snap('t.latitude')} AS latitude, {snap('t.longitude')} AS longitude
+          FROM {GOLD}.{HIST_MM_TABLE} t
+          WHERE t.curve_name = '{HIST_MM_CURVE}' AND {GOLD_BBOX}
+            AND t.delivery_start >= current_date() - INTERVAL 10 DAYS
+        )
+        SELECT SUM(w.population) AS pop,
+               SUM(CASE WHEN g.latitude IS NOT NULL THEN w.population ELSE 0 END) AS pop_matched
+        FROM {SBX}.pop_weights w LEFT JOIN g ON g.latitude = w.latitude AND g.longitude = w.longitude
+    """).first() if POP_WEIGHTED else None
+    if _cov is not None and _cov["pop"]:
+        _share = (_cov["pop_matched"] or 0) / _cov["pop"]
+        print(f"  pop_weights coverage by the gold ERA5 grid: {_share:.1%} of the population sits on a climatology point")
+        if _share < 0.95:
+            print("  !! the gold grid does not line up with the 0.5° weights — the Meteomatics temperature history "
+                  "is weighted on a subset of the population; check latitude/longitude in the gold table")
 
 # COMMAND ----------
 
@@ -1097,15 +1209,11 @@ print(f"Refresh finished: {datetime.now()}")
 #
 # Same approach as the gas desk anomaly_map table: notebook runs as the user
 # (who does have access), sandbox table inherits the SP grants.
-
-GOLD = "dna_prod_gold.weather"
+#
+# GOLD and MAP_SOURCES live in the lookup cell: cell 5 reads the temperature
+# table of this list for the population-weighted country history, so the two
+# views are built from the same rows.
 BBOX = "CAST(latitude AS DOUBLE) BETWEEN 35 AND 72 AND CAST(longitude AS DOUBLE) BETWEEN -12 AND 35"
-
-MAP_SOURCES = [
-    ("Temperature",          "temperature_meteomatics_climatology",              "t_mean_2m_24h_c_ecmwf_era5_p1d",      "°C"),
-    ("Wind speed (200 hPa)", "wind_speed_meteomatics_climatology",               "wind_speed_200hpa_ms_ecmwf_era5_p1d",  "m/s"),
-    ("Precipitation",        "precipitation_forecast_meteomatics_climatology",   "precip_24h_mm_mix_p1d",                "mm"),
-]
 
 blocks = []
 for metric_name, table, curve, unit in MAP_SOURCES:

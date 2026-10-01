@@ -437,6 +437,30 @@ sup.mcg-n {{
 .sc-table th:first-child, .sc-table td:first-child {{ text-align: left; font-family: 'Inter', sans-serif; font-weight: 600; }}
 .sc-table tr:last-child td {{ border-bottom: none; }}
 
+/* Hydro overview — regions × layers grid (reuses .mc-table) and criticality chips.
+   Cell shading is a status job: red = critically low, amber = low / fast drawdown,
+   blue = very high / fast refill — with the number and the word in the cell too. */
+.hy-table th.hy-layer {{
+    text-align: center; color: var(--text-primary); text-transform: none; letter-spacing: 0.01em;
+    font-size: 0.72rem; border-left: 2px solid var(--border-bright); padding: 4px 8px 3px;
+}}
+.hy-table th.hy-sub {{ text-transform: none; letter-spacing: 0; padding-top: 2px; }}
+.hy-table .hy-first {{ border-left: 2px solid var(--border-bright); }}
+.hy-table td.hy-crit {{ background: #fbeaea; color: #7a1f1f !important; font-weight: 600; }}
+.hy-table td.hy-low  {{ background: #fbf1e2; color: #7a5a00 !important; font-weight: 600; }}
+.hy-table td.hy-high {{ background: #e3eefb; color: #184f95 !important; font-weight: 600; }}
+.hy-table td.hy-na   {{ color: var(--text-muted) !important; }}
+.hy-table td.hy-agg  {{ color: var(--text-muted) !important; font-size: 0.72rem; font-family: 'Inter', sans-serif; }}
+.hy-flags {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 10px; }}
+.hy-flag {{
+    display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
+    font-size: 0.8rem; border: 1px solid; line-height: 1.3;
+}}
+.hy-flag b {{ font-weight: 700; }}
+.hy-flag-critical {{ background: #fbeaea; color: #7a1f1f; border-color: rgba(194,47,47,0.30); }}
+.hy-flag-warning  {{ background: #fbf1e2; color: #7a5a00; border-color: rgba(184,121,10,0.35); }}
+.hy-flag-high     {{ background: #e3eefb; color: #184f95; border-color: rgba(42,120,214,0.30); }}
+
 .stTabs [data-baseweb="tab-list"] {{ gap: 4px; }}
 .stTabs [data-baseweb="tab"] {{
     border-radius: var(--radius-md) var(--radius-md) 0 0;

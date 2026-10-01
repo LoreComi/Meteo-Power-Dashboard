@@ -19,7 +19,7 @@ from _config import (
     SBX_SCHEMA, VOLUE_SCHEMA, METRICS, VOLUE_MODELS, HYDRO_COMPONENTS, HYDRO_AREA_CODES, WR_REGIMES,
     MORNING_CURVES, MORNING_REGION_CODES, MORNING_MODELS, MORNING_VOLUE_TABLES,
     GAS_VOLUE_FAMILIES, GAS_VOLUE_PATTERNS, GAS_VOLUE_AREAS, LIVE_HISTORY_DAYS, EXPECTED_HORIZON,
-    DELTASHARE_PATTERN_MAP,
+    DELTASHARE_PATTERN_MAP, hist_source, HIST_DEFAULT_SOURCE,
 )
 
 # ─── Connection config ───────────────────────────────────────────────────────────
@@ -472,11 +472,16 @@ def load_recent_actual_temp(areas: tuple[str, ...], days: int = 30) -> pd.DataFr
     """
     if not areas:
         return pd.DataFrame()
+    # Always the Volue series: the curves were fitted on Volue temperatures and
+    # the forecast leg is Volue, so the seed must be the same series — never the
+    # Meteomatics history the Historical section shows. On a sandbox written
+    # before the `source` column existed every row is Volue's anyway.
     df = run_query(f"""
         SELECT area, day, actual, normal
         FROM {SBX_SCHEMA}.hist_daily
         WHERE metric = 'Temperature' AND area IN ({_sql_list(areas)})
           AND day >= current_date() - INTERVAL {int(days)} DAYS
+          {_hist_where(HIST_DEFAULT_SOURCE if hist_sources() else None)}
         ORDER BY area, day
     """)
     if df.empty:
@@ -576,16 +581,60 @@ def average_multi_runs(df: pd.DataFrame, runs: list[tuple]) -> pd.DataFrame:
 # SECTION 2 — HISTORICAL
 # ══════════════════════════════════════════════════════════════════════════════
 
+# hist_daily carries a `source` column since the Meteomatics temperature history
+# was added: 'Volue' rows for every metric, 'Meteomatics' rows for temperature.
+# The two are different normals on different grids and must never be averaged
+# together, so every history query filters on exactly one source. A sandbox
+# written before the column existed holds Volue rows only — the helpers below
+# notice and leave the filter out, so the app keeps working until the notebook
+# has been re-run.
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_hist_years(metric: str) -> list[int]:
-    df = run_query(f"SELECT DISTINCT year FROM {SBX_SCHEMA}.hist_daily WHERE metric = '{metric}' ORDER BY year")
+def hist_sources() -> dict[str, list[str]]:
+    """metric -> sources present in hist_daily; {} when the table has no `source` column."""
+    try:
+        df = run_query(f"SELECT DISTINCT metric, source FROM {SBX_SCHEMA}.hist_daily")
+    except Exception:
+        return {}
+    out: dict[str, list[str]] = {}
+    for m, s in zip(df["metric"], df["source"]):
+        out.setdefault(str(m), []).append(str(s))
+    return out
+
+
+def resolve_hist_source(metric: str) -> tuple[str | None, str | None]:
+    """(source to read for `metric`, note for the UI when it is not the configured one).
+
+    None as the source means "do not filter" — the sandbox predates the column
+    and its rows are Volue's.
+    """
+    avail = hist_sources()
+    if not avail:
+        return None, ("hist_daily has no `source` column yet, so temperature is still Volue's — re-run "
+                      "power_desk_refresh.py for the Meteomatics / ERA5 population-weighted history.")
+    want = hist_source(metric)
+    have = avail.get(metric, [])
+    if want in have or not have:
+        return want, None
+    return have[0], (f"hist_daily has no {want} rows for {metric} — showing {have[0]} instead. The notebook "
+                     "could not read the gold climatology on its last run (it must run with dna_prod_gold access).")
+
+
+def _hist_where(source: str | None) -> str:
+    return f"AND source = '{source}'" if source else ""
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_hist_years(metric: str, source: str | None = None) -> list[int]:
+    df = run_query(f"SELECT DISTINCT year FROM {SBX_SCHEMA}.hist_daily "
+                   f"WHERE metric = '{metric}' {_hist_where(source)} ORDER BY year")
     return [int(y) for y in pd.to_numeric(df["year"], errors="coerce").dropna()] if not df.empty else []
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_hist_daily(metric: str, areas: tuple[str, ...], years: tuple[int, ...],
-                    months: tuple[int, ...]) -> pd.DataFrame:
-    """Daily actual / normal / anomaly for the selected areas, years and months."""
+                    months: tuple[int, ...], source: str | None = None) -> pd.DataFrame:
+    """Daily actual / normal / anomaly for the selected areas, years and months, from one source."""
     if not areas or not years or not months:
         return pd.DataFrame()
     df = run_query(f"""
@@ -594,6 +643,7 @@ def load_hist_daily(metric: str, areas: tuple[str, ...], years: tuple[int, ...],
         WHERE metric = '{metric}' AND area IN ({_sql_list(areas)})
           AND year IN ({",".join(str(int(y)) for y in years)})
           AND month IN ({",".join(str(int(m)) for m in months)})
+          {_hist_where(source)}
         ORDER BY area, day
     """)
     if df.empty:
@@ -603,7 +653,7 @@ def load_hist_daily(metric: str, areas: tuple[str, ...], years: tuple[int, ...],
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_hist_monthly_all(metric: str, areas: tuple[str, ...]) -> pd.DataFrame:
+def load_hist_monthly_all(metric: str, areas: tuple[str, ...], source: str | None = None) -> pd.DataFrame:
     """Monthly mean actual / normal / anomaly for every year — powers the year×month heatmap."""
     if not areas:
         return pd.DataFrame()
@@ -613,7 +663,7 @@ def load_hist_monthly_all(metric: str, areas: tuple[str, ...]) -> pd.DataFrame:
                CASE WHEN AVG(normal) != 0 THEN (AVG(actual) / AVG(normal) - 1) * 100 END AS anomaly_pct,
                COUNT(*) AS n_days
         FROM {SBX_SCHEMA}.hist_daily
-        WHERE metric = '{metric}' AND area IN ({_sql_list(areas)})
+        WHERE metric = '{metric}' AND area IN ({_sql_list(areas)}) {_hist_where(source)}
         GROUP BY metric, area, year, month ORDER BY area, year, month
     """)
     return _num(df, ["year", "month", "actual", "normal", "anomaly", "anomaly_pct", "n_days"])
@@ -676,6 +726,21 @@ def load_hydro_available() -> pd.DataFrame:
         return df
     df = _dt(df, ["first_day", "last_day"])
     return _num(df, ["n"])
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_hydro_component(component: str) -> pd.DataFrame:
+    """Every area's actual (SA) and normal (N) daily series for one component, in
+    one query — the overview map quantifies all areas at once. ~11 areas × 2
+    curves × 13 years of days: around 100 k rows, well inside the inline limit."""
+    df = run_query(f"""
+        SELECT area, day, data_type, value FROM {SBX_SCHEMA}.hydro_daily
+        WHERE component = '{component}' ORDER BY area, day
+    """)
+    if df.empty:
+        return df
+    df = _dt(df, ["day"])
+    return _num(df, ["value"])
 
 
 @st.cache_data(ttl=3600, show_spinner=False)

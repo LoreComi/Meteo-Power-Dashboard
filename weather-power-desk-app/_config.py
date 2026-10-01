@@ -93,14 +93,16 @@ SECTIONS: dict[str, dict] = {
     },
     "Historical & Analysis": {
         "num": "02",
-        "desc": "Monthly and weekly history by country, multi-year / multi-month anomalies, "
-                "and analogues from weather indexes.",
+        "desc": "Monthly and weekly history by country — temperature from the Meteomatics / ERA5 "
+                "climatology, population-weighted — multi-year / multi-month anomalies, ERA5 anomaly "
+                "maps and analogues from weather indexes.",
         "color": CATEGORICAL[1], "locked": False,
     },
     "Hydro Monitoring": {
         "num": "03",
-        "desc": "Reservoir levels, snow & groundwater and hydro balance vs normal — the "
-                "Hydro Report quantify_* figures and stats, live.",
+        "desc": "A Europe map of the hydro outlook per country — reservoirs first, snow & groundwater "
+                "and hydro balance alongside, criticalities flagged — then the Hydro Report "
+                "quantify_* figures and stats per family, live.",
         "color": CATEGORICAL[4], "locked": False,
     },
     "Gas Demand": {
@@ -534,8 +536,29 @@ SCENARIO_SOURCES: dict[str, dict] = {
 # ══════════════════════════════════════════════════════════════════════════════
 # HISTORICAL
 # ══════════════════════════════════════════════════════════════════════════════
-HIST_START_YEAR = 2013
+HIST_START_YEAR = 2013               # Volue history
+HIST_MM_START_YEAR = 1979            # Meteomatics / ERA5 temperature history (gold climatology)
 MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+# Which `source` of hist_daily the Historical section reads per metric. Temperature
+# is the Meteomatics / ERA5 gold climatology — the same value / normal / anomaly
+# rows the Anomaly Maps are drawn from — reduced to population-weighted country
+# means by the refresh notebook, exactly like the Meteomatics forecast means.
+# Wind, solar and precipitation energy stay Volue actuals vs the Volue normal.
+# The Volue temperature is still in the table (source 'Volue'): the Gas Demand
+# section seeds its LDZ curves with it and must keep doing so (the curves were
+# fitted on Volue temperatures, and the forecast leg is Volue).
+HIST_SOURCES: dict[str, str] = {"Temperature": "Meteomatics"}
+HIST_DEFAULT_SOURCE = "Volue"
+HIST_SOURCE_NOTES: dict[str, str] = {
+    "Meteomatics": "Meteomatics / ERA5 climatology (gold layer) · population-weighted country means · the same "
+                   "value, normal and anomaly fields as the Anomaly Maps tab",
+    "Volue": "Volue actuals vs the Volue normal",
+}
+
+
+def hist_source(metric: str) -> str:
+    return HIST_SOURCES.get(metric, HIST_DEFAULT_SOURCE)
 
 # Weather indexes the analogue tab expects in {SBX_SCHEMA}.weather_indexes
 # (index_name, date, value). Empty table until loaded.
@@ -565,6 +588,70 @@ HYDRO_AREA_CODES: dict[str, str] = {
 }
 HYDRO_COMPONENTS = {"Reservoir levels": "WTR", "Snow & groundwater": "SGW", "Hydro balance": "BAL"}
 HYDRO_START_YEAR = 2013
+
+# ── Overview map (first tab of the section) ──────────────────────────────────
+# Each hydro `area` is painted on a Europe map with its numbers. Values: the
+# countries drawn (ISO-3, the codes Plotly's built-in outlines use) and the
+# label. NP is the Nordic aggregate: it paints only the members that have no
+# series of their own. SEE is Volue's South-East Europe aggregate — the list is
+# the usual SEE hydro scope; adjust it if the share's definition differs. An
+# aggregate is labelled once, on the first of its painted members, so order the
+# list with the country that should carry the label first.
+HYDRO_MAP_REGIONS: dict[str, dict] = {
+    "FR":  {"name": "France",            "iso3": ["FRA"]},
+    "CH":  {"name": "Switzerland",       "iso3": ["CHE"]},
+    "AT":  {"name": "Austria",           "iso3": ["AUT"]},
+    "IT":  {"name": "Italy",             "iso3": ["ITA"]},
+    "ES":  {"name": "Spain",             "iso3": ["ESP"]},
+    "DE":  {"name": "Germany",           "iso3": ["DEU"]},
+    "NO":  {"name": "Norway",            "iso3": ["NOR"]},
+    "SE":  {"name": "Sweden",            "iso3": ["SWE"]},
+    "FI":  {"name": "Finland",           "iso3": ["FIN"]},
+    "NP":  {"name": "Nordics",           "iso3": ["SWE", "NOR", "FIN"], "aggregate": True},
+    "SEE": {"name": "South-East Europe", "iso3": ["SRB", "HRV", "BIH", "SVN", "MNE", "MKD", "BGR", "ROU"],
+            "aggregate": True},
+}
+# Where each painted country's label sits (lat, lon) — nudged so that the Alpine
+# trio and the Nordics do not overprint each other.
+HYDRO_MAP_LABEL_POS: dict[str, tuple[float, float]] = {
+    "FRA": (46.0, 0.6), "CHE": (47.3, 8.6), "AUT": (48.3, 15.2), "ITA": (42.6, 12.6), "ESP": (40.0, -3.7),
+    "DEU": (51.6, 10.2), "NOR": (61.0, 7.8), "SWE": (63.2, 15.6), "FIN": (64.6, 27.2),
+    "SVN": (46.1, 14.9), "HRV": (45.4, 16.4), "BIH": (44.2, 17.8), "SRB": (44.0, 20.9),
+    "MNE": (42.8, 19.3), "MKD": (41.6, 21.7), "BGR": (42.7, 25.4), "ROU": (45.9, 25.0),
+}
+HYDRO_MAP_EXTENT = {"lat_min": 35.5, "lat_max": 71.0, "lon_min": -11.0, "lon_max": 32.0}
+
+# Layers the overview can be coloured by. Each needs, per area, the
+# quantify_anomaly dict (latest_value, anomaly, anomaly_percent,
+# anomaly_quantile, week_change_pct_points, n_hist_years, as_of). The three
+# below come from hydro_daily. To add SWE, river levels or temperatures: write
+# their (area, day, actual[, normal]) series to the sandbox, load them in
+# _hydro._overview_metrics and register the layer here — map, criticality flags
+# and the side-by-side grid pick it up unchanged.
+#
+# `level` says how "vs normal" is expressed: 'percent' (% of normal, and the week
+# move in pts of normal) for a stock such as reservoir content; 'gwh' (the anomaly
+# in GWh, and the week move in GWh) for a deviation series such as the hydro
+# balance, whose norm sits near zero and turns any percentage into noise. The
+# fast-drawdown / refill flag applies to 'percent' layers only.
+HYDRO_OVERVIEW_LAYERS: dict[str, dict] = {
+    "Reservoir levels":   {"family": "Reservoir levels",   "colour_by": "anomaly_percent",  "level": "percent", "unit": "GWh"},
+    "Snow & groundwater": {"family": "Snow & groundwater", "colour_by": "anomaly_percent",  "level": "percent", "unit": "GWh"},
+    "Hydro balance":      {"family": "Hydro balance",      "colour_by": "anomaly_quantile", "level": "gwh",     "unit": "GWh"},
+}
+HYDRO_OVERVIEW_DEFAULT_LAYER = "Reservoir levels"
+HYDRO_COLOUR_MODES: dict[str, str] = {
+    "anomaly_percent": "% of normal", "anomaly_quantile": "Percentile", "anomaly": "Anomaly (GWh)",
+}
+HYDRO_PCT_OF_NORMAL_RANGE = (60.0, 140.0)     # % of normal that saturates the map colour
+
+# Criticality flags — the percentile of this week against the same week in
+# every historical year, and the week-on-week move in % of normal. The same
+# thresholds colour the percentile KPI cards in the family tabs.
+HYDRO_PCTL_CRITICAL = 15      # at or below: critically low
+HYDRO_PCTL_LOW = 30           # at or below: low
+HYDRO_PCTL_HIGH = 85          # at or above: very high
+HYDRO_WEEK_MOVE_PTS = 5       # |Δ % of normal| in a week at or above: fast drawdown / refill
 
 
 # ══════════════════════════════════════════════════════════════════════════════
