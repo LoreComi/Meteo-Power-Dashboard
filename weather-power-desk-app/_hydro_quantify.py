@@ -39,10 +39,11 @@ HYDRO_FAMILIES: dict[str, dict] = {
         "unit": "Accumulated GWh", "stats_title": "RESERVOIR LEVELS",
         "description": "Stored water in hydro reservoirs, energy-equivalent.",
     },
-    "Snow & groundwater": {
+    "Groundwater": {
         "code": "sgw", "has_norm": True,
         "unit": "Accumulated GWh", "stats_title": "SNOW AND GROUND WATERS",
-        "description": "Snowpack plus groundwater, energy-equivalent — the inflow still to come.",
+        "description": "Volue's snow + groundwater stock (`sgw`), energy-equivalent — the inflow still to come. "
+                       "Shown as Groundwater here; the snowpack itself is the Snow water equivalent layer.",
     },
     "Hydro balance": {
         "code": "bal", "has_norm": False,
@@ -65,7 +66,7 @@ HYDRO_AREAS: dict[str, str] = {
 # Default country sets per family — mirrors the __main__ blocks of the three scripts.
 HYDRO_DEFAULT_COUNTRIES: dict[str, list[str]] = {
     "Reservoir levels": ["France", "Switzerland", "Austria", "Italy", "Spain", "SEE"],
-    "Snow & groundwater": ["France", "Switzerland", "Italy", "Austria", "Spain", "SEE"],
+    "Groundwater": ["France", "Switzerland", "Italy", "Austria", "Spain", "SEE"],
     "Hydro balance": ["France", "Switzerland", "Austria", "Italy", "Nordics"],
 }
 

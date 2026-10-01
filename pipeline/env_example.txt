@@ -15,8 +15,8 @@ POWER_DESK_SCHEMA=dna_snbx_weather.power_desk
 # Leave empty to reuse the key in Lorenzo_Trainee/EQ_project/eq_fundamentals.py
 EQ_API_KEY=
 EQ_SSL_VERIFY=false
-# Areas whose "River Temperature" curves are loaded (EQ area tags: FR, DE, HU exist), optional station filter
-RIVER_AREAS=FR
+# Areas whose "River Temperature" curves are loaded (EQ area tags); empty = every area EQ has (FR, DE, HU today)
+RIVER_AREAS=
 # RIVER_STATIONS=golfech,belleville,chooz,cattenom,fessenheim,bugey,saint-alban,tricastin
 RIVER_BACKCAST_DAYS=45
 RIVER_HISTORY_START=2014-01-01

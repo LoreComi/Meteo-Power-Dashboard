@@ -72,13 +72,15 @@ def eq_session(api_key: str, ssl_verify: bool):
 # ─── discovery ──────────────────────────────────────────────────────────────────
 
 def discover_curves(eq, areas: Iterable[str], stations: Iterable[str] = ()) -> list:
-    """Every River Temperature curve of the areas (backcast, normal, forecast,
-    actual), optionally restricted to stations whose place key or name contains
-    one of the given fragments."""
+    """Every River Temperature curve EQ has (backcast, normal, forecast, actual) —
+    for the given areas, or for every area when `areas` is empty — optionally
+    restricted to stations whose place key or name contains one of the fragments."""
     frags = [s.lower() for s in stations]
+    areas = [a for a in areas if a]
     found: dict[str, object] = {}
-    for area in areas:
-        page = _retry(lambda: eq.metadata.curves(q="River Temperature", area=area, page_size=50), f"metadata {area}")
+    for area in (areas or [None]):
+        kw = {"area": area} if area else {}
+        page = _retry(lambda: eq.metadata.curves(q="River Temperature", page_size=50, **kw), f"metadata {area or 'all'}")
         curves = list(page)
         while page.has_next_page():
             page = page.get_next_page()
@@ -86,7 +88,7 @@ def discover_curves(eq, areas: Iterable[str], stations: Iterable[str] = ()) -> l
         for c in curves:
             if "River Temperature" not in c.name or c.data_type is None or c.data_type.name not in WANTED_TYPES:
                 continue
-            if c.area is not None and c.area.tag != area:
+            if area and c.area is not None and c.area.tag != area:
                 continue
             if frags:
                 hay = (c.name + " " + (c.place.key if c.place else "")).lower()
@@ -94,7 +96,7 @@ def discover_curves(eq, areas: Iterable[str], stations: Iterable[str] = ()) -> l
                     continue
             found[c.name] = c
     out = sorted(found.values(), key=lambda c: c.name)
-    log.info("EQ: %d river-temperature curves in %s (%d stations)", len(out), ",".join(areas),
+    log.info("EQ: %d river-temperature curves in %s (%d stations)", len(out), ",".join(areas) or "all areas",
              len({c.place.key if c.place else c.name for c in out}))
     return out
 

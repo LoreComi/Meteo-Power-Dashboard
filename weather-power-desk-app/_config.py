@@ -100,9 +100,9 @@ SECTIONS: dict[str, dict] = {
     },
     "Hydro Monitoring": {
         "num": "03",
-        "desc": "A Europe map of the hydro outlook per country — reservoirs first, snow & groundwater "
-                "and hydro balance alongside, criticalities flagged — then the Hydro Report "
-                "quantify_* figures and stats per family, live.",
+        "desc": "A Europe map of the hydro outlook — reservoirs, snow water equivalent, groundwater, hydro "
+                "balance and river temperatures, criticalities flagged; click a country for its deep dive — "
+                "then the Hydro Report quantify_* figures and stats per family, live.",
         "color": CATEGORICAL[4], "locked": False,
     },
     "Gas Demand": {
@@ -586,7 +586,7 @@ HYDRO_AREA_CODES: dict[str, str] = {
     "Nordics": "NP", "Spain": "ES", "SEE": "SEE", "Germany": "DE",
     "Norway": "NO", "Sweden": "SE", "Finland": "FI",
 }
-HYDRO_COMPONENTS = {"Reservoir levels": "WTR", "Snow & groundwater": "SGW", "Hydro balance": "BAL"}
+HYDRO_COMPONENTS = {"Reservoir levels": "WTR", "Groundwater": "SGW", "Hydro balance": "BAL"}
 HYDRO_START_YEAR = 2013
 
 # ── Overview map (first tab of the section) ──────────────────────────────────
@@ -636,24 +636,40 @@ HYDRO_MAP_EXTENT = {"lat_min": 35.5, "lat_max": 71.0, "lon_min": -11.0, "lon_max
 # in summer) — where any percentage turns into noise. The fast-drawdown / refill
 # flag applies to 'percent' layers only.
 HYDRO_OVERVIEW_LAYERS: dict[str, dict] = {
-    "Reservoir levels":      {"source": "hydro_daily", "family": "Reservoir levels",   "colour_by": "anomaly_percent",
+    "Reservoir levels":      {"source": "hydro_daily", "family": "Reservoir levels", "colour_by": "anomaly_percent",
                               "level": "percent", "unit": "GWh"},
-    "Snow & groundwater":    {"source": "hydro_daily", "family": "Snow & groundwater", "colour_by": "anomaly_percent",
-                              "level": "percent", "unit": "GWh"},
-    "Hydro balance":         {"source": "hydro_daily", "family": "Hydro balance",      "colour_by": "anomaly_quantile",
-                              "level": "anomaly", "unit": "GWh"},
     "Snow water equivalent": {"source": "swe_daily", "colour_by": "anomaly_quantile", "level": "anomaly", "unit": "mm"},
+    "Groundwater":           {"source": "hydro_daily", "family": "Groundwater", "colour_by": "anomaly_percent",
+                              "level": "percent", "unit": "GWh"},
+    "Hydro balance":         {"source": "hydro_daily", "family": "Hydro balance", "colour_by": "anomaly_quantile",
+                              "level": "anomaly", "unit": "GWh"},
 }
 # swe_daily (pipeline/swe_upload.py): level = 'country', band = 'total', the model's
 # mean SWE in mm per Alpine country → the hydro area it paints.
 HYDRO_SWE_REGIONS: dict[str, str] = {"Austria": "AT", "Italy": "IT", "France": "FR", "Switzerland": "CH"}
 
-# River temperature stations (pipeline/eq_river_temps.py → river_temp_eq,
-# river_stations_eq): drawn as markers on the overview map, coloured by the
-# latest backcast's anomaly vs the EQ normal (red = warm), with the next week's
-# forecast peak in the hover. Thresholds are indicative: discharge limits at the
-# French plants bite from roughly 25–28 °C depending on the site.
-HYDRO_RIVER_FORECAST_TAG = "ec-ens"     # forecast issue read for the 7-day peak
+# River temperature stations, drawn as markers on the overview map (coloured by
+# the latest observation's anomaly vs its normal, red = warm) and charted in the
+# country deep dive. Two sources share one table layout (curve_name, station_key,
+# station, area, data_type, day, value, issued, tag) and one stations table
+# (station_key, station, area, river, site, latitude, longitude):
+#   EQ     river_temp_eq / river_stations_eq — Energy Quantified backcast, normal
+#          and forecasts (ec-ens 15 d, ec-ext 45 d), since 2015; written by
+#          Power_dashboard/pipeline (daily, local)
+#   Volue  river_temp_volue / river_stations_volue — the deltashare's `riv` curves
+#          (synthetic actual + ec00 / ec12 deterministic runs, no normal, since
+#          May 2026); written by the refresh notebook (cell 6b)
+# `lead_tags` are the forecast tags whose latest issue gives the 7-day peak on
+# the map; `forecast_tags` are all the tags drawn in the deep dive.
+HYDRO_RIVER_SOURCES: dict[str, dict] = {
+    "EQ":    {"table": "river_temp_eq", "stations": "river_stations_eq",
+              "lead_tags": ["ec-ens"], "forecast_tags": ["ec-ens", "ec-ext"]},
+    "Volue": {"table": "river_temp_volue", "stations": "river_stations_volue",
+              "lead_tags": ["ec00", "ec12"], "forecast_tags": ["ec00", "ec12"]},
+}
+HYDRO_DEEP_DIVE_RIVER_MONTHS = 14       # observed river temperature drawn in the deep dive
+# Thresholds are indicative: discharge limits at the French plants bite from
+# roughly 25–28 °C depending on the site.
 RIVER_TEMP_WARM_ANOMALY_C = 2.0         # latest value this far above normal → warm (warning)
 RIVER_TEMP_HOT_C = 25.0                 # absolute level → hot (critical); a forecast peak above it → warning
 RIVER_TEMP_COLOUR_RANGE_C = 4.0         # ± anomaly that saturates the marker colour

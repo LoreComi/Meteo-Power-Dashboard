@@ -1,24 +1,29 @@
 """Section 3 — Hydro Monitoring.
 
 Overview tab   What you see on entering: a Europe map of the hydro outlook per
-               country. Each hydro area is painted by its reservoir level as %
-               of normal (or by percentile, or by the anomaly in GWh) with its
-               numbers written on the country, and the full read-out on hover —
-               reservoirs, snow & groundwater, hydro balance, and the flags.
-               Under the map: the criticalities (series at or below the 15th /
-               30th percentile of their history, at or above the 85th, or moving
-               5+ pts of normal in a week) and a grid with every area × every
-               layer side by side. Layers are HYDRO_OVERVIEW_LAYERS in _config;
-               SWE, river levels or temperatures slot in there once their series
-               exist in the sandbox (see _overview_metrics).
+               country. Each hydro area is painted by one layer — reservoir
+               levels as % of normal by default; snow water equivalent, ground-
+               water and hydro balance are the other layers — with its numbers
+               written on the country and the full read-out on hover. River
+               temperature stations (Energy Quantified and the Volue share) sit
+               on the map as markers coloured by their anomaly vs normal. Under
+               the map: the criticalities (series at or below the 15th / 30th
+               percentile of their history, at or above the 85th, moving 5+ pts
+               of normal in a week; rivers hot or warm) and a grid with every
+               area × every layer side by side.
+Deep dive      Click a country (or a river station) on the map — or pick it in
+               the selector — and the section below the map shows that area
+               alone: a KPI card per layer, its flags, the climatology chart of
+               every layer, and each river station in the country with observed
+               temperature, normal and the latest forecast issues.
 Family tabs    Live version of P:/QFA/TonyWeather/Hydro_Report/quantify_*.py:
-               for each of the three hydro families (reservoir levels, snow &
-               groundwater, hydro balance) and each country the climatology
-               chart (grey history, blue recent years, dashed norm, red current
-               year) and the report's numbers — anomaly in GWh and % of normal,
-               percentile of the current week, and the change since last week —
-               plus the stats_*.txt text the report writes.
-The maths is in _hydro_quantify.py; data comes from {SBX_SCHEMA}.hydro_daily.
+               for each Volue hydro family (reservoir levels, groundwater = the
+               `sgw` snow + groundwater stock, hydro balance) and each country
+               the climatology chart and the report's numbers plus the
+               stats_*.txt text the report writes.
+The maths is in _hydro_quantify.py; hydro data comes from {SBX_SCHEMA}.hydro_daily,
+SWE from swe_daily (pipeline/), rivers from river_temp_eq (pipeline/) and
+river_temp_volue (notebook cell 6b).
 """
 from __future__ import annotations
 
@@ -32,17 +37,22 @@ from _config import (
     HYDRO_AREA_CODES, HYDRO_COMPONENTS, HYDRO_MAP_REGIONS, HYDRO_MAP_LABEL_POS, HYDRO_OVERVIEW_LAYERS,
     HYDRO_OVERVIEW_DEFAULT_LAYER, HYDRO_COLOUR_MODES, HYDRO_PCT_OF_NORMAL_RANGE,
     HYDRO_PCTL_CRITICAL, HYDRO_PCTL_LOW, HYDRO_PCTL_HIGH, HYDRO_WEEK_MOVE_PTS,
-    HYDRO_SWE_REGIONS, HYDRO_RIVER_FORECAST_TAG, RIVER_TEMP_WARM_ANOMALY_C, RIVER_TEMP_HOT_C,
-    RIVER_TEMP_COLOUR_RANGE_C,
+    HYDRO_SWE_REGIONS, HYDRO_DEEP_DIVE_RIVER_MONTHS,
+    RIVER_TEMP_WARM_ANOMALY_C, RIVER_TEMP_HOT_C, RIVER_TEMP_COLOUR_RANGE_C,
 )
 from _data import (
     load_hydro_available, load_hydro_series, load_hydro_component, load_swe_country_daily, load_river_latest,
+    load_river_series,
 )
-from _charts import make_hydro_climatology_chart, make_hydro_anomaly_bars, make_hydro_europe_map
+from _charts import (
+    make_hydro_climatology_chart, make_hydro_anomaly_bars, make_hydro_europe_map, make_river_temp_chart,
+)
 from _hydro_quantify import (
     HYDRO_FAMILIES, HYDRO_DEFAULT_COUNTRIES, build_climatology, quantify_anomaly, split_recent_hist, stats_text,
 )
 from _ui import kpi_card, kpi_row, status_banner, ordinal
+
+NONE_LABEL = "— none —"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -68,15 +78,15 @@ def _pct_class(q: float | None) -> str:
 
 
 def _level_text(q: dict, layer: str) -> str:
-    """'92%' for a level series, '-1,215' (GWh vs norm) for a deviation series."""
+    """'92%' for a level series, '-1,215' (unit vs norm) for an anomaly series."""
     if HYDRO_OVERVIEW_LAYERS[layer]["level"] == "percent" and q.get("anomaly_percent") is not None:
         return f"{q['anomaly_percent']:.0f}%"
     return f"{q['anomaly']:+,.0f}"
 
 
 def _week_move(q: dict, layer: str) -> tuple[float | None, str]:
-    """(move over the last week, unit): pts of normal for a level series, GWh of
-    anomaly for a deviation series whose % of normal means nothing."""
+    """(move over the last week, unit): pts of normal for a level series, the
+    layer's unit for an anomaly series whose % of normal means nothing."""
     cfg = HYDRO_OVERVIEW_LAYERS[layer]
     if cfg["level"] == "percent":
         wk = q.get("week_change_pct_points")
@@ -116,26 +126,50 @@ def _flags(q: dict, layer: str) -> list[tuple[str, str]]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# OVERVIEW — every area × every layer quantified once
+# SERIES AND METRICS — every area × every layer, from each layer's source
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def _overview_metrics() -> dict[str, dict[str, dict]]:
-    """layer -> hydro area code -> quantify_anomaly dict, for every area with a
-    series. One query per layer, then the report maths per area, exactly as the
-    family tabs do it one country at a time.
+def _layer_series(layer: str) -> dict[str, tuple[pd.Series, pd.Series | None]]:
+    """area code -> (actual, normal) daily series for one layer.
 
     Sources (HYDRO_OVERVIEW_LAYERS[layer]['source']):
       hydro_daily  a Volue component (actual SA, normal N where the family has one)
       swe_daily    the internal Exolabs SWE model's mean mm per Alpine country,
                    uploaded by pipeline/swe_upload.py; no normal → mean of years
     To add another (river levels, …): load its (area, day, actual[, normal])
-    series here, run it through build_climatology / quantify_anomaly the same
-    way, and register the layer — nothing downstream changes.
+    series here and register the layer — metrics, map, flags, grid and the deep
+    dive pick it up unchanged. The loaders are cached, so this is cheap to call.
     """
-    def quantify(series: dict[str, tuple[pd.Series, pd.Series | None]]) -> dict[str, dict]:
+    cfg = HYDRO_OVERVIEW_LAYERS[layer]
+    src = cfg.get("source", "hydro_daily")
+    series: dict[str, tuple[pd.Series, pd.Series | None]] = {}
+    try:
+        if src == "hydro_daily":
+            family = cfg["family"]
+            df = load_hydro_component(HYDRO_COMPONENTS[family])
+            for area, g in (df.groupby("area") if not df.empty else []):
+                actual = g[g["data_type"] == "SA"].set_index("day")["value"].sort_index()
+                normal = g[g["data_type"] == "N"].set_index("day")["value"].sort_index()
+                series[str(area)] = (actual, normal if (HYDRO_FAMILIES[family]["has_norm"] and not normal.empty) else None)
+        elif src == "swe_daily":
+            df = load_swe_country_daily()
+            for region, g in (df.groupby("region") if not df.empty else []):
+                area = HYDRO_SWE_REGIONS.get(str(region))
+                if area:
+                    series[area] = (g.set_index("day")["swe_mean_mm"].sort_index(), None)
+    except Exception:
+        return {}
+    return series
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _overview_metrics() -> dict[str, dict[str, dict]]:
+    """layer -> hydro area code -> quantify_anomaly dict, for every area with a
+    series — the report maths per area, exactly as the family tabs do it."""
+    out: dict[str, dict[str, dict]] = {}
+    for layer in HYDRO_OVERVIEW_LAYERS:
         per_area: dict[str, dict] = {}
-        for area, (actual, normal) in series.items():
+        for area, (actual, normal) in _layer_series(layer).items():
             if actual.dropna().empty:
                 continue
             try:
@@ -143,35 +177,13 @@ def _overview_metrics() -> dict[str, dict[str, dict]]:
             except Exception:
                 continue
             if q:
-                per_area[str(area)] = q
-        return per_area
-
-    out: dict[str, dict[str, dict]] = {}
-    for layer, cfg in HYDRO_OVERVIEW_LAYERS.items():
-        src = cfg.get("source", "hydro_daily")
-        series: dict[str, tuple[pd.Series, pd.Series | None]] = {}
-        try:
-            if src == "hydro_daily":
-                family = cfg["family"]
-                df = load_hydro_component(HYDRO_COMPONENTS[family])
-                for area, g in (df.groupby("area") if not df.empty else []):
-                    actual = g[g["data_type"] == "SA"].set_index("day")["value"].sort_index()
-                    normal = g[g["data_type"] == "N"].set_index("day")["value"].sort_index()
-                    series[str(area)] = (actual, normal if (HYDRO_FAMILIES[family]["has_norm"] and not normal.empty) else None)
-            elif src == "swe_daily":
-                df = load_swe_country_daily()
-                for region, g in (df.groupby("region") if not df.empty else []):
-                    area = HYDRO_SWE_REGIONS.get(str(region))
-                    if area:
-                        series[area] = (g.set_index("day")["swe_mean_mm"].sort_index(), None)
-        except Exception:
-            series = {}
-        out[layer] = quantify(series)
+                per_area[area] = q
+        out[layer] = per_area
     return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# RIVER TEMPERATURE STATIONS (EQ, via pipeline/eq_river_temps.py)
+# RIVER TEMPERATURE STATIONS (EQ via pipeline/, Volue via notebook cell 6b)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _river_flags(value, anom, fc_max7) -> list[tuple[str, str]]:
@@ -186,8 +198,9 @@ def _river_flags(value, anom, fc_max7) -> list[tuple[str, str]]:
 
 
 def _river_rows() -> list[dict]:
-    """One dict per station for the map (lat, lon, z, hover) and the table."""
-    df = load_river_latest(HYDRO_RIVER_FORECAST_TAG)
+    """One dict per station, every source: for the map (lat, lon, z, hover, code),
+    the tables and the deep dive."""
+    df = load_river_latest()
     if df is None or df.empty:
         return []
     rows = []
@@ -198,36 +211,42 @@ def _river_rows() -> list[dict]:
         fc_max, fc_min, fc_norm = f(r.fc_max7), f(r.fc_min7), f(r.fc_normal7)
         flags = _river_flags(value, anom, fc_max)
         day = pd.Timestamp(r.day) if not pd.isna(r.day) else None
-        lines = [f"<b>{r.station}</b> · river temperature (EQ)"]
+        area = str(r.area).upper() if r.area is not None else ""
+        lines = [f"<b>{r.station}</b> · river temperature ({r.source})"]
         if value is not None:
             lines.append(f"Latest {value:.1f} °C" + (f" · {day:%d %b}" if day is not None else "")
-                         + (f" · normal {normal:.1f} °C · <b>{anom:+.1f} °C</b>" if anom is not None else ""))
+                         + (f" · normal {normal:.1f} °C · <b>{anom:+.1f} °C</b>" if anom is not None else " · no normal"))
         if fc_max is not None:
             issued = pd.Timestamp(r.fc_issued) if not pd.isna(r.fc_issued) else None
             lines.append(f"Next 7 days ({r.fc_tag}{f', issued {issued:%d %b %Hz}' if issued is not None else ''}): "
                          f"{fc_min:.1f}–{fc_max:.1f} °C" + (f" · normal {fc_norm:.1f} °C" if fc_norm is not None else ""))
         for _l, t in flags:
             lines.append(f"⚑ {t}")
-        rows.append({"station_key": r.station_key, "name": r.station, "river": r.river, "site": r.site, "area": r.area,
-                     "lat": f(r.latitude), "lon": f(r.longitude), "day": day, "value": value, "normal": normal,
-                     "anomaly": anom, "fc_tag": r.fc_tag, "fc_max7": fc_max, "fc_min7": fc_min, "fc_normal7": fc_norm,
-                     "z": anom, "flags": flags, "hover": "<br>".join(lines)})
+        lines.append("<i>click for the country's deep dive</i>")
+        rows.append({"station_key": r.station_key, "name": r.station, "river": r.river, "site": r.site, "area": area,
+                     "source": r.source, "lat": f(r.latitude), "lon": f(r.longitude), "day": day, "value": value,
+                     "normal": normal, "anomaly": anom, "fc_tag": r.fc_tag, "fc_max7": fc_max, "fc_min7": fc_min,
+                     "fc_normal7": fc_norm, "z": anom, "flags": flags, "hover": "<br>".join(lines),
+                     "code": f"station:{r.station_key}|{area}"})
     return rows
 
 
 def _river_table_html(rows: list[dict]) -> str:
-    head = ("<tr><th style='text-align:left'>Station</th><th>Latest</th><th>°C</th><th>Normal</th><th>Δ</th>"
-            f"<th class='hy-first'>7-day forecast ({HYDRO_RIVER_FORECAST_TAG})</th><th>vs normal</th><th style='text-align:left'>Flags</th></tr>")
+    head = ("<tr><th style='text-align:left'>Station</th><th style='text-align:left'>Source</th><th>Latest</th><th>°C</th>"
+            "<th>Normal</th><th>Δ</th><th class='hy-first'>7-day forecast</th><th>vs normal</th>"
+            "<th style='text-align:left'>Flags</th></tr>")
     body = []
     for r in sorted(rows, key=lambda x: -(x["value"] if x["value"] is not None else -99)):
         acls = "hy-crit" if (r["value"] is not None and r["value"] >= RIVER_TEMP_HOT_C) else \
             ("hy-low" if (r["anomaly"] is not None and r["anomaly"] >= RIVER_TEMP_WARM_ANOMALY_C) else "")
         fcls = "hy-low" if (r["fc_max7"] is not None and r["fc_max7"] >= RIVER_TEMP_HOT_C) else ""
-        fc = f"{r['fc_min7']:.1f}–{r['fc_max7']:.1f}" if r["fc_max7"] is not None else "—"
+        fc = (f"{r['fc_min7']:.1f}–{r['fc_max7']:.1f} <span class='hy-agg'>{r['fc_tag']}</span>"
+              if r["fc_max7"] is not None else "—")
         fcd = f"{r['fc_max7'] - r['fc_normal7']:+.1f}" if (r["fc_max7"] is not None and r["fc_normal7"] is not None) else "—"
         flags = " · ".join(t for _l, t in r["flags"]) or "—"
         cells = [
-            f"<td class='mc-region'>{r['name']}</td>",
+            f"<td class='mc-region'>{r['name']} <span class='hy-agg'>{r['area']}</span></td>",
+            f"<td class='hy-agg' style='text-align:left'>{r['source']}</td>",
             f"<td>{r['day']:%d %b}</td>" if r["day"] is not None else "<td class='hy-na'>—</td>",
             f"<td class='{acls}'>{r['value']:.1f}</td>" if r["value"] is not None else "<td class='hy-na'>—</td>",
             f"<td>{r['normal']:.1f}</td>" if r["normal"] is not None else "<td class='hy-na'>—</td>",
@@ -240,6 +259,10 @@ def _river_table_html(rows: list[dict]) -> str:
     return (f"<div class='mc-block'><table class='mc-table hy-table'><thead>{head}</thead>"
             f"<tbody>{''.join(body)}</tbody></table></div>")
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAP PAINTING
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _colour_value(q: dict, colour_by: str) -> float | None:
     v = q.get(colour_by)
@@ -282,13 +305,14 @@ def _hover_html(area: str, cfg: dict, layer: str, metrics: dict[str, dict[str, d
         lines.append("&nbsp;&nbsp;" + " · ".join(bits))
         for _lvl, text in _flags(q, lyr):
             lines.append(f"&nbsp;&nbsp;⚑ {text}")
+    lines.append("<i>click for the deep dive</i>")
     return "<br>".join(lines)
 
 
 def _paint(layer: str, colour_by: str, metrics: dict[str, dict[str, dict]]) -> list[dict]:
     """One row per ISO-3 country to draw. A country's own series wins; an
-    aggregate (Nordics, SEE) paints the members that have none; what is left is
-    drawn without a value."""
+    aggregate (Nordics, SEE) paints the members that have none and is labelled
+    once; what is left is drawn without a value. `code` is what a click returns."""
     lm = metrics.get(layer, {})
     rows: dict[str, dict] = {}
     own = [(a, c) for a, c in HYDRO_MAP_REGIONS.items() if not c.get("aggregate")]
@@ -302,12 +326,11 @@ def _paint(layer: str, colour_by: str, metrics: dict[str, dict[str, dict]]) -> l
             if iso in rows:
                 continue
             lat, lon = HYDRO_MAP_LABEL_POS.get(iso, (None, None))
-            # an aggregate is labelled once, on its first painted member
             label = "" if (cfg.get("aggregate") and labelled) else _label(area, q, layer)
             labelled = True
-            rows[iso] = {"iso3": iso, "area": area, "z": _colour_value(q, colour_by),
-                         "label": label, "hover": _hover_html(area, cfg, layer, metrics),
-                         "lat": lat, "lon": lon}
+            rows[iso] = {"iso3": iso, "area": area, "z": _colour_value(q, colour_by), "label": label,
+                         "hover": _hover_html(area, cfg, layer, metrics), "lat": lat, "lon": lon,
+                         "code": f"area:{area}"}
     for area, cfg in own + aggs:
         for iso in cfg["iso3"]:
             if iso in rows:
@@ -315,8 +338,8 @@ def _paint(layer: str, colour_by: str, metrics: dict[str, dict[str, dict]]) -> l
             lat, lon = HYDRO_MAP_LABEL_POS.get(iso, (None, None))
             rows[iso] = {"iso3": iso, "area": area, "z": None,
                          "label": "" if cfg.get("aggregate") else f"{area}<br>—",
-                         "hover": f"<b>{cfg['name']}</b><br>no {layer.lower()} series in hydro_daily",
-                         "lat": lat, "lon": lon}
+                         "hover": f"<b>{cfg['name']}</b><br>no {layer.lower()} series<br><i>click for the deep dive</i>",
+                         "lat": lat, "lon": lon, "code": f"area:{area}"}
     return list(rows.values())
 
 
@@ -381,18 +404,161 @@ def _overview_table(metrics: dict[str, dict[str, dict]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# DEEP DIVE — one area, every variable
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _selection_from_event(event) -> tuple[str | None, str | None]:
+    """(area code, station key) from a plotly_chart selection — the second item of
+    customdata is 'area:FR' for a country or 'station:<key>|FR' for a marker.
+    Falls back to the choropleth location (ISO-3) when customdata is missing."""
+    try:
+        sel = event.selection if hasattr(event, "selection") else (event or {}).get("selection")
+        pts = sel.points if hasattr(sel, "points") else (sel or {}).get("points", [])
+    except Exception:
+        pts = []
+    iso_to_area = {iso: a for a, c in HYDRO_MAP_REGIONS.items() if not c.get("aggregate") for iso in c["iso3"]}
+    for a, c in HYDRO_MAP_REGIONS.items():
+        if c.get("aggregate"):
+            for iso in c["iso3"]:
+                iso_to_area.setdefault(iso, a)
+    for p in pts or []:
+        get = p.get if isinstance(p, dict) else (lambda k, d=None: getattr(p, k, d))
+        cd = get("customdata")
+        code = cd[1] if isinstance(cd, (list, tuple)) and len(cd) >= 2 else (cd if isinstance(cd, str) else None)
+        if isinstance(code, str):
+            if code.startswith("area:"):
+                return code[5:], None
+            if code.startswith("station:"):
+                key, _, area = code[8:].partition("|")
+                return (area or None), key
+        loc = get("location")
+        if isinstance(loc, str) and loc in iso_to_area:
+            return iso_to_area[loc], None
+    return None, None
+
+
+def _close_deep_dive() -> None:
+    st.session_state["hy_dd_area"] = None
+    st.session_state["hy_dd_station"] = None
+
+
+def _sync_select(name_to_area: dict[str, str]) -> None:
+    v = st.session_state.get("hy_dd_select")
+    st.session_state["hy_dd_area"] = name_to_area.get(v) if v and v != NONE_LABEL else None
+    st.session_state["hy_dd_station"] = None
+
+
+def _layer_kpi(layer: str, q: dict) -> str:
+    cfg = HYDRO_OVERVIEW_LAYERS[layer]
+    unit = cfg["unit"]
+    pq = q.get("anomaly_quantile")
+    cls = _pct_class(pq)
+    level = _level_text(q, layer) + (" of normal" if cfg["level"] == "percent" else f" {unit} vs norm")
+    delta = (f"<div class='kpi-delta kpi-delta-flat'>{level}"
+             + (f" · {ordinal(round(pq))} pctl of {q.get('n_hist_years', '?')} yrs" if pq is not None else "") + "</div>")
+    wk, wunit = _week_move(q, layer)
+    rank = f"<div class='kpi-rank'>{_fmt_move(wk, wunit)} in a week</div>" if wk is not None else ""
+    as_of = q.get("as_of")
+    label = layer + (f" · {pd.Timestamp(as_of):%d %b}" if as_of is not None else "")
+    return kpi_card(label, f"{q['latest_value']:,.0f} {unit}", cls, delta, rank)
+
+
+def _chips(items: list[tuple[str, str, str]]) -> None:
+    """items: (level, head, text)."""
+    order = {"critical": 0, "warning": 1, "high": 2}
+    items = sorted(items, key=lambda t: (order.get(t[0], 9), t[1]))
+    html = "".join(f"<span class='hy-flag hy-flag-{lvl}'><b>{head}</b> {text}</span>" for lvl, head, text in items)
+    st.markdown(f"<div class='hy-flags'>{html}</div>", unsafe_allow_html=True)
+
+
+def _render_deep_dive(area: str, metrics: dict[str, dict[str, dict]], rivers: list[dict],
+                      focus_station: str | None) -> None:
+    cfg = HYDRO_MAP_REGIONS.get(area, {"name": area, "iso3": []})
+    name = cfg["name"] + (" (aggregate)" if cfg.get("aggregate") else "")
+    h1, h2 = st.columns([6, 1])
+    with h1:
+        st.markdown(f"##### Deep dive · {name}")
+    with h2:
+        st.button("Close", key="hy_dd_close", on_click=_close_deep_dive, use_container_width=True)
+
+    layers_with = [l for l in HYDRO_OVERVIEW_LAYERS if metrics.get(l, {}).get(area)]
+    stations = [r for r in rivers if r["area"] == area]
+    if not layers_with and not stations:
+        status_banner(f"No hydro series or river stations for {name} yet.", "warning")
+        return
+
+    if layers_with:
+        kpi_row([_layer_kpi(l, metrics[l][area]) for l in layers_with], max_cols=4)
+        flags = [(lvl, l, t) for l in layers_with for lvl, t in _flags(metrics[l][area], l)]
+        flags += [(lvl, r["name"], t) for r in stations for lvl, t in r["flags"]]
+        if flags:
+            _chips(flags)
+        else:
+            st.caption("No criticalities flagged for this area.")
+        cols = st.columns(2)
+        i = 0
+        for l in layers_with:
+            series = _layer_series(l).get(area)
+            if not series:
+                continue
+            actual, normal = series
+            try:
+                clim = build_climatology(actual, normal)
+            except Exception:
+                continue
+            hist, recent = split_recent_hist(clim["years"], 3)
+            with cols[i % 2]:
+                st.plotly_chart(make_hydro_climatology_chart(clim, hist, recent, f"{cfg['name']} — {l.lower()}",
+                                                             HYDRO_OVERVIEW_LAYERS[l]["unit"], height=360),
+                                use_container_width=True, key=f"hy_dd_chart_{area}_{i}")
+                if clim["norm_source"] == "mean_of_years":
+                    st.caption("norm = mean of completed years (no provider normal for this series)")
+            i += 1
+    elif stations:
+        flags = [(lvl, r["name"], t) for r in stations for lvl, t in r["flags"]]
+        if flags:
+            _chips(flags)
+
+    if stations:
+        st.markdown(f"**River temperatures** · {len(stations)} station{'s' if len(stations) > 1 else ''} · "
+                    f"observed, normal and the latest forecast issues; dotted line = {RIVER_TEMP_HOT_C:.0f} °C")
+        st.markdown(_river_table_html(stations), unsafe_allow_html=True)
+        order = sorted(stations, key=lambda r: (r["station_key"] != focus_station,
+                                                -(r["value"] if r["value"] is not None else -99)))
+        series_by_source: dict[str, pd.DataFrame] = {}
+        with st.spinner("Loading river series…"):
+            for src in sorted({r["source"] for r in order}):
+                keys = tuple(sorted(r["station_key"] for r in order if r["source"] == src))
+                series_by_source[src] = load_river_series(src, keys, HYDRO_DEEP_DIVE_RIVER_MONTHS)
+        cols = st.columns(2)
+        for i, r in enumerate(order):
+            df = series_by_source.get(r["source"], pd.DataFrame())
+            if not df.empty:
+                df = df[df["station_key"] == r["station_key"]]
+            with cols[i % 2]:
+                st.plotly_chart(make_river_temp_chart(df, f"{r['name']} — river temperature ({r['source']})",
+                                                      RIVER_TEMP_HOT_C),
+                                use_container_width=True, key=f"hy_dd_riv_{r['source']}_{r['station_key']}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OVERVIEW TAB
+# ══════════════════════════════════════════════════════════════════════════════
+
 def _render_overview(avail: pd.DataFrame):
-    c1, c2, c3 = st.columns([2.2, 1.8, 1.2])
+    c1, c2, c3 = st.columns([2.6, 1.8, 1.2])
     with c1:
         layers = list(HYDRO_OVERVIEW_LAYERS)
         layer = st.radio("Map layer", layers, index=layers.index(HYDRO_OVERVIEW_DEFAULT_LAYER),
                          horizontal=True, key="hy_ov_layer")
     with c3:
         show_rivers = st.checkbox("River temperature stations", value=True, key="hy_ov_rivers",
-                                  help="Latest EQ backcast vs normal per station (red = warm), 7-day forecast peak on hover. "
-                                       "Needs river_temp_eq from Power_dashboard/pipeline.")
+                                  help="Latest observation vs normal per station (red = warm), 7-day forecast peak on "
+                                       "hover. EQ stations from Power_dashboard/pipeline, Volue stations from the "
+                                       "refresh notebook.")
     with c2:
-        # a deviation series (hydro balance) has no meaningful % of normal to colour by
+        # a deviation series has no meaningful % of normal to colour by
         modes = [m for m in HYDRO_COLOUR_MODES
                  if not (m == "anomaly_percent" and HYDRO_OVERVIEW_LAYERS[layer]["level"] != "percent")]
         default_mode = HYDRO_OVERVIEW_LAYERS[layer]["colour_by"]
@@ -412,7 +578,8 @@ def _render_overview(avail: pd.DataFrame):
                           "Has power_desk_refresh.py run, and do the Volue area codes match?", "warning")
         return
     if show_rivers and not rivers:
-        st.caption("No river temperature stations yet — river_temp_eq is written by Power_dashboard/pipeline.")
+        st.caption("No river temperature stations yet — river_temp_eq is written by Power_dashboard/pipeline, "
+                   "river_temp_volue by the refresh notebook.")
 
     painted = _paint(layer, colour_by, metrics)
     if colour_by == "anomaly_percent":
@@ -423,6 +590,7 @@ def _render_overview(avail: pd.DataFrame):
     else:
         m = max([abs(r["z"]) for r in painted if r.get("z") is not None] or [1.0])
         zmin, zmax, zmid, cb = -m, m, 0.0, f"{HYDRO_OVERVIEW_LAYERS[layer]['unit']} vs norm"
+
     as_of = [pd.Timestamp(q["as_of"]) for q in lm.values() if q.get("as_of") is not None]
     n_yrs = sorted({q.get("n_hist_years") for q in lm.values() if q.get("n_hist_years")})
     yrs = "–".join(str(n) for n in (n_yrs[0], n_yrs[-1])) if len(n_yrs) > 1 else (str(n_yrs[0]) if n_yrs else "?")
@@ -431,34 +599,40 @@ def _render_overview(avail: pd.DataFrame):
     legend = (layer + (f" as of {max(as_of):%d %b %Y}" if as_of else "")
               + " · red = below normal / low in the history, blue = above / high · on each country: level vs "
               f"normal · percentile of this week against the same week in {yrs} years · move in a week · hover for "
-              "every layer and the flags" + (" · " + "; ".join(aggs) if aggs else "")
-              + (f" · ● river temperature stations: latest EQ backcast vs normal, red = warm, ±{RIVER_TEMP_COLOUR_RANGE_C:.0f} °C"
+              "every layer and the flags · <b>click a country or a station for its deep dive</b>"
+              + (" · " + "; ".join(aggs) if aggs else "")
+              + (f" · ● river temperature stations: latest observation vs normal, red = warm, ±{RIVER_TEMP_COLOUR_RANGE_C:.0f} °C"
                  if rivers else "") + ".")
 
     left, right = st.columns([1.15, 1], gap="large")
     with left:
-        st.plotly_chart(make_hydro_europe_map(painted, zmin, zmax, zmid, cb, stations=rivers,
-                                              station_range=RIVER_TEMP_COLOUR_RANGE_C),
-                        use_container_width=True, config={"scrollZoom": False})
-        st.caption(legend)
+        fig = make_hydro_europe_map(painted, zmin, zmax, zmid, cb, stations=rivers,
+                                    station_range=RIVER_TEMP_COLOUR_RANGE_C)
+        event = st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": False},
+                                key="hy_map", on_select="rerun", selection_mode="points")
+        area_sel, station_sel = _selection_from_event(event)
+        sig = f"{area_sel}|{station_sel}"
+        if area_sel and sig != st.session_state.get("hy_map_last_sel"):
+            # a new click: open that area (a repeated selection on rerun is ignored,
+            # so the selector below can still change or close the deep dive)
+            st.session_state["hy_map_last_sel"] = sig
+            st.session_state["hy_dd_area"] = area_sel
+            st.session_state["hy_dd_station"] = station_sel
+        st.markdown(f"<div class='mc-sub'>{legend}</div>", unsafe_allow_html=True)
 
     # ── Criticalities across every layer, beside the map ──────────────────────
     with right:
         st.markdown("##### Criticalities")
-        order = {"critical": 0, "warning": 1, "high": 2}
         items = []
         for lyr in HYDRO_OVERVIEW_LAYERS:
             for area, q in metrics.get(lyr, {}).items():
                 for level, text in _flags(q, lyr):
-                    items.append((order[level], HYDRO_MAP_REGIONS.get(area, {}).get("name", area), lyr, level, text))
+                    items.append((level, HYDRO_MAP_REGIONS.get(area, {}).get("name", area), f"{lyr.lower()}: {text}"))
         for r in rivers:
             for level, text in r["flags"]:
-                items.append((order[level], r["name"], "river temperature", level, text))
-        items.sort(key=lambda t: (t[0], t[1], t[2]))
+                items.append((level, r["name"], f"river temperature: {text}"))
         if items:
-            chips = "".join(f"<span class='hy-flag hy-flag-{lvl}'><b>{name}</b> {lyr.lower()}: {text}</span>"
-                            for _o, name, lyr, lvl, text in items)
-            st.markdown(f"<div class='hy-flags'>{chips}</div>", unsafe_allow_html=True)
+            _chips(items)
         else:
             status_banner(f"None flagged — every series sits between the {ordinal(HYDRO_PCTL_LOW)} and "
                           f"{ordinal(HYDRO_PCTL_HIGH)} percentile of its history and moved less than "
@@ -471,6 +645,24 @@ def _render_overview(avail: pd.DataFrame):
                    "above normal = warm (indicative — discharge limits differ by plant). Thresholds in _config "
                    "(HYDRO_PCTL_*, HYDRO_WEEK_MOVE_PTS, RIVER_TEMP_*).")
 
+    # ── Deep dive: the clicked area, or the one picked here ───────────────────
+    river_areas = sorted({r["area"] for r in rivers if r["area"] and r["area"] not in HYDRO_MAP_REGIONS})
+    area_to_name = {a: c["name"] + (" (aggregate)" if c.get("aggregate") else "") for a, c in HYDRO_MAP_REGIONS.items()}
+    area_to_name.update({a: f"{a} (river stations only)" for a in river_areas})
+    name_to_area = {v: k for k, v in area_to_name.items()}
+    current = st.session_state.get("hy_dd_area")
+    if current and current not in area_to_name:
+        area_to_name[current] = current
+        name_to_area[current] = current
+    st.session_state["hy_dd_select"] = area_to_name.get(current, NONE_LABEL)
+    d1, d2 = st.columns([1.6, 4])
+    with d1:
+        st.selectbox("Deep dive on", [NONE_LABEL] + list(area_to_name.values()), key="hy_dd_select",
+                     on_change=_sync_select, args=(name_to_area,),
+                     help="Or click a country / a river station on the map.")
+    if current:
+        _render_deep_dive(current, metrics, rivers, st.session_state.get("hy_dd_station"))
+
     # ── Every area × every layer, side by side ────────────────────────────────
     st.markdown("##### All areas · all layers")
     st.markdown(_grid_html(metrics), unsafe_allow_html=True)
@@ -480,9 +672,9 @@ def _render_overview(avail: pd.DataFrame):
                            f"hydro_overview_{dt.date.today():%Y%m%d}.csv", "text/csv", key="hy_ov_dl")
 
     if rivers:
-        st.markdown("##### River temperatures · stations")
+        st.markdown("##### River temperatures · all stations")
         st.markdown(_river_table_html(rivers), unsafe_allow_html=True)
-        riv = pd.DataFrame([{k: v for k, v in r.items() if k not in ("hover", "flags", "z")}
+        riv = pd.DataFrame([{k: v for k, v in r.items() if k not in ("hover", "flags", "z", "code")}
                             | {"flags": "; ".join(t for _l, t in r["flags"])} for r in rivers])
         st.download_button("Download river temperatures CSV", riv.to_csv(index=False).encode(),
                            f"river_temps_{dt.date.today():%Y%m%d}.csv", "text/csv", key="hy_ov_riv_dl")
@@ -596,9 +788,10 @@ def _render_family(family: str, avail: pd.DataFrame):
 
 def render_hydro():
     st.markdown("#### HYDRO MONITORING")
-    st.caption("The hydro outlook on a map of Europe — reservoirs first, snow & groundwater and hydro balance "
-               "alongside, criticalities flagged — then the Hydro Report quantify_* figures and statistics per "
-               "family, computed live from the Volue hydro curves since 2013 vs normal.")
+    st.caption("The hydro outlook on a map of Europe — reservoirs, snow water equivalent, groundwater, hydro balance "
+               "and river temperatures, criticalities flagged, a deep dive per country on click — then the Hydro "
+               "Report quantify_* figures and statistics per family, computed live from the Volue hydro curves "
+               "since 2013 vs normal.")
     try:
         avail = load_hydro_available()
     except Exception as e:
@@ -607,6 +800,8 @@ def render_hydro():
     if not avail.empty:
         last = avail["last_day"].max()
         st.caption(f"Latest hydro observation: {pd.Timestamp(last):%d %b %Y}")
+    for k, v in (("hy_dd_area", None), ("hy_dd_station", None)):
+        st.session_state.setdefault(k, v)
     tabs = st.tabs(["Overview"] + list(HYDRO_FAMILIES.keys()))
     with tabs[0]:
         _render_overview(avail)

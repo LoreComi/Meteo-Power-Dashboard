@@ -88,7 +88,7 @@ class Settings:
     # ── Energy Quantified ───────────────────────────────────────────────────
     eq_api_key: str
     eq_ssl_verify: bool                  # the EQ project runs with ssl_verify=False behind the proxy
-    river_areas: list[str]               # EQ area tags whose "River Temperature" curves are loaded
+    river_areas: list[str]               # EQ area tags whose "River Temperature" curves are loaded; empty = all
     river_stations: list[str]            # place keys / name fragments to keep; empty = every station of the areas
     river_backcast_days: int             # incremental window for backcast / actual / normal
     river_history_start: dt.date         # first day of a backfill (first run, --backfill, or a new curve)
@@ -151,7 +151,7 @@ def load_settings() -> Settings:
     return Settings(
         eq_api_key=key,
         eq_ssl_verify=_bool("EQ_SSL_VERIFY", False),
-        river_areas=_list("RIVER_AREAS", ["FR"]),
+        river_areas=_list("RIVER_AREAS", []),          # empty = every area EQ has river curves for (FR, DE, HU today)
         river_stations=_list("RIVER_STATIONS", []),
         river_backcast_days=_int("RIVER_BACKCAST_DAYS", 45),
         river_history_start=_date("RIVER_HISTORY_START", "2014-01-01"),   # EQ's river backcasts start in 2015

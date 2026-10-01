@@ -18,9 +18,9 @@ from _config import AREAS, MONTH_NAMES, SPREAD_RATIO_HIGH, SPREAD_RATIO_LOW, WR_
 from _style import (
     PLOTLY_LAYOUT, INK_PRIMARY, INK_SECONDARY, INK_MUTED, BASELINE, GRIDLINE,
     CATEGORICAL, PROVIDER_COLORS, SCENARIO_COLORS, ENS_FAN_ALPHA, SEQ_BLUE,
-    DIV_NEG, DIV_POS, DIV_MID, STATUS_WARNING, STATUS_GOOD,
+    DIV_NEG, DIV_POS, DIV_MID, STATUS_WARNING, STATUS_GOOD, STATUS_CRITICAL,
     HYDRO_HIST_GREY, HYDRO_CURRENT_RED, hydro_recent_colours, hex_to_rgba,
-    CAT_BLUE, CAT_ORANGE,
+    CAT_BLUE, CAT_ORANGE, CAT_RED,
 )
 
 from _config import MAP_EUROPE_BBOX, HYDRO_MAP_EXTENT
@@ -609,12 +609,18 @@ def make_hydro_europe_map(painted: list[dict], zmin: float, zmax: float, zmid: f
     fig = _base_fig(title, height=height)
     with_z = [r for r in painted if r.get("z") is not None]
     without = [r for r in painted if r.get("z") is None]
+    # customdata carries [hover html, selection code]: the hover shows the first,
+    # a click hands the second ("area:FR", "station:<key>|FR") back to the app.
+    def cdata(rows):
+        return [[r["hover"], r.get("code", "")] for r in rows]
+
     if without:
         fig.add_trace(go.Choropleth(
             locations=[r["iso3"] for r in without], locationmode="ISO-3",
             z=[0] * len(without), zmin=0, zmax=1, colorscale=[[0, _LAND_COLOR], [1, _LAND_COLOR]],
             showscale=False, marker_line_color=_BORDER_CLR, marker_line_width=0.6,
-            customdata=[r["hover"] for r in without], hovertemplate="%{customdata}<extra></extra>",
+            customdata=cdata(without), hovertemplate="%{customdata[0]}<extra></extra>",
+            selected=dict(marker=dict(opacity=1)), unselected=dict(marker=dict(opacity=0.85)),
             name="no series"))
     if with_z:
         fig.add_trace(go.Choropleth(
@@ -625,7 +631,8 @@ def make_hydro_europe_map(painted: list[dict], zmin: float, zmax: float, zmid: f
             colorbar=dict(title=dict(text=colorbar_title, font=dict(size=11, color=INK_SECONDARY), side="right"),
                           orientation="h", thickness=10, len=0.6, y=-0.01, yanchor="top", x=0.5, xanchor="center",
                           outlinewidth=0, tickfont=dict(size=10, color=INK_MUTED)),
-            customdata=[r["hover"] for r in with_z], hovertemplate="%{customdata}<extra></extra>",
+            customdata=cdata(with_z), hovertemplate="%{customdata[0]}<extra></extra>",
+            selected=dict(marker=dict(opacity=1)), unselected=dict(marker=dict(opacity=0.85)),
             name=colorbar_title))
     labelled = [r for r in painted if r.get("label") and r.get("lat") is not None]
     if labelled:
@@ -648,7 +655,8 @@ def make_hydro_europe_map(painted: list[dict], zmin: float, zmax: float, zmid: f
             marker.update(color=INK_MUTED)
         fig.add_trace(go.Scattergeo(
             lat=[s["lat"] for s in subset], lon=[s["lon"] for s in subset], mode="markers", marker=marker,
-            customdata=[s["hover"] for s in subset], hovertemplate="%{customdata}<extra></extra>",
+            customdata=cdata(subset), hovertemplate="%{customdata[0]}<extra></extra>",
+            selected=dict(marker=dict(opacity=1)), unselected=dict(marker=dict(opacity=0.9)),
             name="river temperature", showlegend=False))
     fig.update_geos(
         scope="europe", resolution=50, domain=dict(x=[0, 1], y=[0, 1]),
@@ -658,6 +666,52 @@ def make_hydro_europe_map(painted: list[dict], zmin: float, zmax: float, zmid: f
         showcoastlines=True, coastlinecolor=_COAST_COLOR, showframe=False, bgcolor="rgba(0,0,0,0)",
     )
     fig.update_layout(margin=dict(l=0, r=0, t=40 if title else 6, b=46), hovermode="closest", showlegend=False)
+    return fig
+
+
+def make_river_temp_chart(series: pd.DataFrame, title: str, hot_c: float | None = None,
+                          height: int = 320) -> go.Figure:
+    """One river station: observed temperature (backcast / actual) as a line, the
+    normal dashed, the latest issue of each forecast tag continuing past the last
+    observation, and the hot threshold as a dotted line. `series` is the long
+    frame of _data.load_river_series for one station."""
+    fig = _base_fig(title, height=height)
+    if series is None or series.empty:
+        return fig
+    s = series.sort_values("day")
+    obs = s[s["data_type"].isin(["backcast", "actual"])]
+    if not obs.empty:
+        # one observed line: backcast where it exists, actual otherwise
+        pref = obs.assign(_p=(obs["data_type"] != "backcast").astype(int)).sort_values(["day", "_p"])
+        pref = pref.drop_duplicates("day", keep="first")
+        fig.add_trace(go.Scatter(x=pref["day"], y=pref["value"], mode="lines", name="observed",
+                                 line=dict(color=INK_PRIMARY, width=2),
+                                 hovertemplate="%{y:.1f} °C<extra>observed</extra>"))
+    nm = s[s["data_type"] == "normal"]
+    if not nm.empty:
+        fig.add_trace(go.Scatter(x=nm["day"], y=nm["value"], mode="lines", name="normal",
+                                 line=dict(color=INK_MUTED, width=1.6, dash="dash"),
+                                 hovertemplate="%{y:.1f} °C<extra>normal</extra>"))
+    fc = s[s["data_type"] == "forecast"]
+    last_obs = obs.sort_values("day").iloc[-1] if not obs.empty else None
+    for i, (tag, g) in enumerate(sorted(fc.groupby("tag"), key=lambda kv: kv[0])):
+        g = g.sort_values("day")
+        x, y = list(g["day"]), list(g["value"])
+        if last_obs is not None and len(x) and x[0] > last_obs["day"]:
+            x, y = [last_obs["day"]] + x, [last_obs["value"]] + y       # join the forecast to the last observation
+        issued = g["issued"].dropna()
+        lbl = f"{tag}" + (f" · {pd.Timestamp(issued.iloc[0]):%d %b %Hz}" if len(issued) else "")
+        fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=lbl,
+                                 line=dict(color=CATEGORICAL[(i + 5) % len(CATEGORICAL)], width=2,
+                                           dash="solid" if i == 0 else "dot"),
+                                 hovertemplate="%{y:.1f} °C<extra>" + lbl + "</extra>"))
+    if hot_c is not None:
+        fig.add_hline(y=hot_c, line=dict(color=STATUS_CRITICAL, width=1, dash="dot"),
+                      annotation_text=f"{hot_c:.0f} °C", annotation_position="top left",
+                      annotation_font=dict(size=10, color=INK_MUTED))
+    fig.update_yaxes(title_text="°C")
+    fig.update_xaxes(tickformat="%b %y")
+    fig.update_layout(hovermode="x unified", legend=dict(y=-0.25))
     return fig
 
 

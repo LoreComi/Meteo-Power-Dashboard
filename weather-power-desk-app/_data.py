@@ -762,56 +762,110 @@ def load_swe_country_daily() -> pd.DataFrame:
     return _num(df, ["swe_mean_mm", "swe_total", "swe_mean_roll_mm"])
 
 
+def _river_latest_sql(table: str, stations: str, lead_tags: tuple[str, ...]) -> str:
+    """Latest observation (backcast preferred over actual on the same day), the
+    normal for that day, and the newest forecast issue's 7-day range."""
+    return f"""
+        WITH obs AS (
+          SELECT station_key, station, area, day, value, data_type,
+                 ROW_NUMBER() OVER (PARTITION BY station_key
+                                    ORDER BY day DESC, CASE WHEN data_type = 'backcast' THEN 0 ELSE 1 END) AS rn
+          FROM {SBX_SCHEMA}.{table} WHERE data_type IN ('backcast', 'actual')
+        ),
+        latest AS (SELECT station_key, station, area, day, value, data_type FROM obs WHERE rn = 1),
+        nm AS (SELECT station_key, day, value AS normal FROM {SBX_SCHEMA}.{table} WHERE data_type = 'normal'),
+        fc AS (
+          SELECT station_key, tag, issued, day, value, MAX(issued) OVER (PARTITION BY station_key) AS max_issued
+          FROM {SBX_SCHEMA}.{table} WHERE data_type = 'forecast' AND tag IN ({_sql_list(lead_tags)})
+        ),
+        fc7 AS (
+          SELECT f.station_key, f.tag, f.issued, MAX(f.value) AS fc_max7, MIN(f.value) AS fc_min7, MAX(f.day) AS fc_last_day
+          FROM fc f JOIN latest l ON l.station_key = f.station_key
+          WHERE f.issued = f.max_issued AND f.day > l.day AND f.day <= l.day + INTERVAL 7 DAYS
+          GROUP BY f.station_key, f.tag, f.issued
+        ),
+        fcn AS (
+          SELECT l.station_key, AVG(n.normal) AS fc_normal7
+          FROM latest l JOIN nm n ON n.station_key = l.station_key AND n.day > l.day AND n.day <= l.day + INTERVAL 7 DAYS
+          GROUP BY l.station_key
+        )
+        SELECT l.station_key, l.station, l.area, l.day, l.value, l.data_type, n.normal, l.value - n.normal AS anomaly,
+               f.tag AS fc_tag, f.issued AS fc_issued, f.fc_max7, f.fc_min7, f.fc_last_day, fcn.fc_normal7,
+               s.latitude, s.longitude, s.river, s.site
+        FROM latest l
+        LEFT JOIN nm n ON n.station_key = l.station_key AND n.day = l.day
+        LEFT JOIN fc7 f ON f.station_key = l.station_key
+        LEFT JOIN fcn ON fcn.station_key = l.station_key
+        LEFT JOIN {SBX_SCHEMA}.{stations} s ON s.station_key = l.station_key
+        ORDER BY l.station
+    """
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
-def load_river_latest(forecast_tag: str = "ec-ens") -> pd.DataFrame:
-    """One row per river-temperature station: the latest EQ backcast, the normal
-    for that day, and the latest forecast issue's extremes over the following
-    seven days with the normal of the same days — plus the station coordinates.
-    Tables come from Power_dashboard/pipeline; empty (never raises) until it ran."""
+def load_river_latest() -> pd.DataFrame:
+    """One row per river-temperature station across every source in
+    HYDRO_RIVER_SOURCES (EQ via the local pipeline, Volue via the notebook): the
+    latest observation, its normal, the newest forecast issue's 7-day range and
+    the station coordinates, with a `source` column. A source whose tables do
+    not exist yet is skipped; never raises."""
+    from _config import HYDRO_RIVER_SOURCES
+    parts = []
+    for source, cfg in HYDRO_RIVER_SOURCES.items():
+        try:
+            df = run_query(_river_latest_sql(cfg["table"], cfg["stations"], tuple(cfg["lead_tags"])))
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        df["source"] = source
+        parts.append(df)
+    if not parts:
+        return pd.DataFrame()
+    df = pd.concat(parts, ignore_index=True)
+    df = _dt(df, ["day", "fc_last_day"])
+    df = _dt(df, ["fc_issued"], utc=True)
+    return _num(df, ["value", "normal", "anomaly", "fc_max7", "fc_min7", "fc_normal7", "latitude", "longitude"])
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_river_series(source: str, station_keys: tuple[str, ...], months: int = 14) -> pd.DataFrame:
+    """Daily series for the deep dive, one source at a time: observed (backcast /
+    actual) and normal over the last `months` months (normal also 60 days
+    ahead), plus the latest issue of every forecast tag. Long frame: station_key,
+    station, data_type, tag, issued, day, value."""
+    from _config import HYDRO_RIVER_SOURCES
+    cfg = HYDRO_RIVER_SOURCES.get(source)
+    if not cfg or not station_keys:
+        return pd.DataFrame()
+    t = f"{SBX_SCHEMA}.{cfg['table']}"
+    keys = _sql_list(station_keys)
     try:
         df = run_query(f"""
-            WITH bc AS (
-              SELECT station_key, station, area, day, value,
-                     ROW_NUMBER() OVER (PARTITION BY station_key ORDER BY day DESC) AS rn
-              FROM {SBX_SCHEMA}.river_temp_eq WHERE data_type = 'backcast'
+            WITH obs AS (
+              SELECT station_key, station, data_type, '' AS tag, CAST(NULL AS TIMESTAMP) AS issued, day, value
+              FROM {t}
+              WHERE station_key IN ({keys}) AND data_type IN ('backcast', 'actual', 'normal')
+                AND day >= current_date() - INTERVAL {int(months) * 31} DAYS
+                AND day <= current_date() + INTERVAL 60 DAYS
             ),
-            latest AS (SELECT station_key, station, area, day, value FROM bc WHERE rn = 1),
-            nm AS (SELECT station_key, day, value AS normal FROM {SBX_SCHEMA}.river_temp_eq WHERE data_type = 'normal'),
             fc AS (
-              SELECT station_key, tag, issued, day, value,
+              SELECT station_key, station, data_type, tag, issued, day, value,
                      MAX(issued) OVER (PARTITION BY station_key, tag) AS max_issued
-              FROM {SBX_SCHEMA}.river_temp_eq WHERE data_type = 'forecast' AND tag = '{forecast_tag}'
-            ),
-            fc7 AS (
-              SELECT f.station_key, f.tag, f.issued, MAX(f.value) AS fc_max7, MIN(f.value) AS fc_min7,
-                     MAX(f.day) AS fc_last_day
-              FROM fc f JOIN latest l ON l.station_key = f.station_key
-              WHERE f.issued = f.max_issued AND f.day > l.day AND f.day <= l.day + INTERVAL 7 DAYS
-              GROUP BY f.station_key, f.tag, f.issued
-            ),
-            fcn AS (
-              SELECT l.station_key, AVG(n.normal) AS fc_normal7
-              FROM latest l JOIN nm n ON n.station_key = l.station_key
-                                     AND n.day > l.day AND n.day <= l.day + INTERVAL 7 DAYS
-              GROUP BY l.station_key
+              FROM {t}
+              WHERE station_key IN ({keys}) AND data_type = 'forecast' AND tag IN ({_sql_list(cfg['forecast_tags'])})
             )
-            SELECT l.station_key, l.station, l.area, l.day, l.value, n.normal, l.value - n.normal AS anomaly,
-                   f.tag AS fc_tag, f.issued AS fc_issued, f.fc_max7, f.fc_min7, f.fc_last_day, fcn.fc_normal7,
-                   s.latitude, s.longitude, s.river, s.site
-            FROM latest l
-            LEFT JOIN nm n ON n.station_key = l.station_key AND n.day = l.day
-            LEFT JOIN fc7 f ON f.station_key = l.station_key
-            LEFT JOIN fcn ON fcn.station_key = l.station_key
-            LEFT JOIN {SBX_SCHEMA}.river_stations_eq s ON s.station_key = l.station_key
-            ORDER BY l.station
+            SELECT station_key, station, data_type, tag, issued, day, value FROM obs
+            UNION ALL
+            SELECT station_key, station, data_type, tag, issued, day, value FROM fc WHERE issued = max_issued
         """)
     except Exception:
         return pd.DataFrame()
     if df.empty:
         return df
-    df = _dt(df, ["day", "fc_last_day"])
-    df = _dt(df, ["fc_issued"], utc=True)
-    return _num(df, ["value", "normal", "anomaly", "fc_max7", "fc_min7", "fc_normal7", "latitude", "longitude"])
+    df = _dt(df, ["day"])
+    df = _dt(df, ["issued"], utc=True)
+    df["source"] = source
+    return _num(df, ["value"])
 
 
 @st.cache_data(ttl=3600, show_spinner=False)

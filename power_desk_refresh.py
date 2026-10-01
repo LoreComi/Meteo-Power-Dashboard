@@ -34,6 +34,9 @@ Tables written (all read by weather-power-desk-app/_data.py):
                         Gas Demand seed keeps Volue
   hydro_daily           Volue hydro reservoir components (WTR/SGW/BAL),
                         actual (SA) and normal (N), per area/day since 2013
+  river_temp_volue      the deltashare's 27 river-temperature stations (`riv`
+  river_stations_volue  curves): daily synthetic actual + latest ec00/ec12 run,
+                        in the layout of the pipeline's river_temp_eq
   gas_demand_daily      daily temperature / wind / solar with the normal, per
                         pattern and run, last 8 days of runs — ENS means
                         (ec00ens/ec12ens/gfs00ens, tag='Avg') plus Op
@@ -725,6 +728,98 @@ SELECT UPPER(area) AS area, component, day, data_type, value, current_timestamp(
 FROM ({" UNION ALL ".join(comp_blocks)})
 """)
 count("hydro_daily")
+
+# COMMAND ----------
+
+# DBTITLE 1,6b. River temperatures from the Volue share — `riv` curves, daily means
+# The deltashare's temperature_hydro view carries 27 river-temperature stations
+# (`tt <area> <river>-<site> riv °c cet min15 …`: BE, CH, DE, FR, NL, SK) with a
+# synthetic actual (`sa`), an actual (`af`) and the EC 00z / 12z deterministic
+# runs (`ec00` / `ec12`, 15 days; the ensemble versions stopped in June 2026).
+# History starts 2026-05-19 and there is no normal curve, so these stations show
+# a level and a forecast but no anomaly — the Energy Quantified stations (loaded
+# by Power_dashboard/pipeline into river_temp_eq) carry the normals.
+#
+# Written in the SAME layout as river_temp_eq so the app reads both sources
+# through one code path (_config.HYDRO_RIVER_SOURCES):
+#   river_temp_volue      curve_name, station_key, station, area, data_type
+#                         ('actual' | 'forecast'), day, value, issued, tag, unit, loaded_at
+#   river_stations_volue  station_key, station, area, river, site, latitude, longitude, data_types
+# Coordinates are not in the share; the dict below places the stations by the
+# gauge's town (approximate — a station without an entry is listed in the deep
+# dive but not drawn on the map).
+VOLUE_DS = "dna_prod_silver.volue_deltashare"
+RIVER_VOLUE_COORDS = {
+    "aare-beznau": (47.552, 8.228), "aare-mühleberg": (46.969, 7.269), "meuse-eijsden": (50.780, 5.698),
+    "danube-donauworth": (48.711, 10.802), "danube-ingolstadt": (48.760, 11.425), "danube-passau": (48.574, 13.462),
+    "ems-rheda": (51.846, 8.301), "isar-landshut-birket": (48.546, 12.155), "isar-munich": (48.137, 11.575),
+    "lippe-wesel": (51.652, 6.645), "main-kahl": (50.067, 9.005), "main-schweinfurt": (50.044, 10.233),
+    "neckar-lauffen": (49.072, 9.160), "rhine-bad-honnef": (50.645, 7.227), "rhine-flehe": (51.187, 6.776),
+    "rhine-karlsruhe": (49.011, 8.298), "rhine-kobelnz": (50.357, 7.598), "weser-porta": (52.249, 8.922),
+    "rhine-rheinfelden": (47.554, 7.794), "rhone-lyon": (45.757, 4.832), "rhine-bimmen": (51.857, 6.078),
+    "danube-bratislava": (48.139, 17.107), "danube-sturovo": (47.797, 18.718), "hron-brehy": (48.405, 18.654),
+    "laborec-izkovce": (48.47, 21.94), "nitra-chalmova": (48.70, 18.40),
+    # "erft-brata": gauge not placed
+}
+try:
+    import pandas as _pd
+    _st = spark.sql(f"""
+        SELECT DISTINCT split(curve_name, ' ')[1] AS area_lc, split(curve_name, ' ')[2] AS station_lc
+        FROM {VOLUE_DS}.temperature_hydro WHERE LOWER(curve_name) LIKE '% riv %'
+    """).toPandas()
+    if _st.empty:
+        raise RuntimeError("no ' riv ' curves in temperature_hydro")
+    _rows = []
+    for a, s_ in zip(_st["area_lc"], _st["station_lc"]):
+        name = "-".join(p.capitalize() for p in s_.split("-"))
+        lat, lon = RIVER_VOLUE_COORDS.get(s_, (None, None))
+        river, _, site = name.partition("-")
+        _rows.append({"station_key": f"volue-{a}-{s_}", "station_lc": s_, "station": name, "area": a.upper(),
+                      "river": river, "site": site, "latitude": lat, "longitude": lon,
+                      "data_types": "actual,forecast", "loaded_at": datetime.utcnow()})
+    spark.createDataFrame(_pd.DataFrame(_rows)).write.mode("overwrite").option("overwriteSchema", "true") \
+        .saveAsTable(f"{SBX}.river_stations_volue")
+    _placed = sum(1 for r in _rows if r["latitude"] is not None)
+    print(f"river_stations_volue: {len(_rows)} stations, {_placed} with coordinates")
+
+    spark.sql(f"""
+    CREATE OR REPLACE TABLE {SBX}.river_temp_volue AS
+    WITH src AS (
+      SELECT curve_name, split(curve_name, ' ')[1] AS area_lc, split(curve_name, ' ')[2] AS station_lc,
+             issue_date, delivery_start, value
+      FROM {VOLUE_DS}.temperature_hydro
+      WHERE LOWER(curve_name) LIKE '% riv %'
+    ),
+    actual AS (
+      SELECT curve_name, area_lc, station_lc, 'actual' AS data_type, {CET_DAY} AS day, AVG(value) AS value,
+             CAST(NULL AS TIMESTAMP) AS issued, '' AS tag
+      FROM src WHERE curve_name LIKE '% sa'
+      GROUP BY curve_name, area_lc, station_lc, {CET_DAY}
+    ),
+    fc_latest AS (
+      SELECT curve_name, MAX(issue_date) AS issue_date FROM src
+      WHERE curve_name LIKE '% ec00 %' OR curve_name LIKE '% ec12 %' GROUP BY curve_name
+    ),
+    forecast AS (
+      -- issue_date is Volue's issue DAY (midnight CET stored in UTC, the same for 00z and 12z);
+      -- `issued` is that day at the cycle hour, as _data.volue_init_time labels runs
+      SELECT s.curve_name, s.area_lc, s.station_lc, 'forecast' AS data_type, {CET_DAY.replace('delivery_start', 's.delivery_start')} AS day,
+             AVG(s.value) AS value,
+             CAST(DATE(from_utc_timestamp(s.issue_date, 'CET')) AS TIMESTAMP)
+               + (CASE WHEN s.curve_name LIKE '% ec12 %' THEN INTERVAL 12 HOURS ELSE INTERVAL 0 HOURS END) AS issued,
+             CASE WHEN s.curve_name LIKE '% ec00 %' THEN 'ec00' ELSE 'ec12' END AS tag
+      FROM src s JOIN fc_latest f ON f.curve_name = s.curve_name AND f.issue_date = s.issue_date
+      GROUP BY s.curve_name, s.area_lc, s.station_lc, {CET_DAY.replace('delivery_start', 's.delivery_start')}, s.issue_date,
+               CASE WHEN s.curve_name LIKE '% ec00 %' THEN 'ec00' ELSE 'ec12' END
+    ),
+    all_rows AS (SELECT * FROM actual UNION ALL SELECT * FROM forecast)
+    SELECT r.curve_name, st.station_key, st.station, st.area, r.data_type, r.day, r.value, r.issued, r.tag,
+           '°C' AS unit, current_timestamp() AS loaded_at
+    FROM all_rows r JOIN {SBX}.river_stations_volue st ON st.station_lc = r.station_lc
+    """)
+    count("river_temp_volue")
+except Exception as _e:
+    print(f"!! river_temp_volue skipped: {str(_e)[:200]}")
 
 # COMMAND ----------
 
