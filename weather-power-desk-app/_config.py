@@ -623,22 +623,40 @@ HYDRO_MAP_EXTENT = {"lat_min": 35.5, "lat_max": 71.0, "lon_min": -11.0, "lon_max
 
 # Layers the overview can be coloured by. Each needs, per area, the
 # quantify_anomaly dict (latest_value, anomaly, anomaly_percent,
-# anomaly_quantile, week_change_pct_points, n_hist_years, as_of). The three
-# below come from hydro_daily. To add SWE, river levels or temperatures: write
-# their (area, day, actual[, normal]) series to the sandbox, load them in
-# _hydro._overview_metrics and register the layer here — map, criticality flags
-# and the side-by-side grid pick it up unchanged.
+# anomaly_quantile, week_change_pct_points, n_hist_years, as_of). `source` says
+# where the daily series come from: 'hydro_daily' (a Volue component, `family`)
+# or 'swe_daily' (the internal Exolabs SWE model, uploaded by pipeline/). To add
+# a layer: give it a source in _hydro._overview_metrics and register it here —
+# map, criticality flags and the side-by-side grid pick it up unchanged.
 #
 # `level` says how "vs normal" is expressed: 'percent' (% of normal, and the week
-# move in pts of normal) for a stock such as reservoir content; 'gwh' (the anomaly
-# in GWh, and the week move in GWh) for a deviation series such as the hydro
-# balance, whose norm sits near zero and turns any percentage into noise. The
-# fast-drawdown / refill flag applies to 'percent' layers only.
+# move in pts of normal) for a stock such as reservoir content; 'anomaly' (the
+# anomaly in `unit`, and the week move in `unit`) for a series whose norm sits
+# near zero part of the year — the hydro balance (a deviation) and SWE (no snow
+# in summer) — where any percentage turns into noise. The fast-drawdown / refill
+# flag applies to 'percent' layers only.
 HYDRO_OVERVIEW_LAYERS: dict[str, dict] = {
-    "Reservoir levels":   {"family": "Reservoir levels",   "colour_by": "anomaly_percent",  "level": "percent", "unit": "GWh"},
-    "Snow & groundwater": {"family": "Snow & groundwater", "colour_by": "anomaly_percent",  "level": "percent", "unit": "GWh"},
-    "Hydro balance":      {"family": "Hydro balance",      "colour_by": "anomaly_quantile", "level": "gwh",     "unit": "GWh"},
+    "Reservoir levels":      {"source": "hydro_daily", "family": "Reservoir levels",   "colour_by": "anomaly_percent",
+                              "level": "percent", "unit": "GWh"},
+    "Snow & groundwater":    {"source": "hydro_daily", "family": "Snow & groundwater", "colour_by": "anomaly_percent",
+                              "level": "percent", "unit": "GWh"},
+    "Hydro balance":         {"source": "hydro_daily", "family": "Hydro balance",      "colour_by": "anomaly_quantile",
+                              "level": "anomaly", "unit": "GWh"},
+    "Snow water equivalent": {"source": "swe_daily", "colour_by": "anomaly_quantile", "level": "anomaly", "unit": "mm"},
 }
+# swe_daily (pipeline/swe_upload.py): level = 'country', band = 'total', the model's
+# mean SWE in mm per Alpine country → the hydro area it paints.
+HYDRO_SWE_REGIONS: dict[str, str] = {"Austria": "AT", "Italy": "IT", "France": "FR", "Switzerland": "CH"}
+
+# River temperature stations (pipeline/eq_river_temps.py → river_temp_eq,
+# river_stations_eq): drawn as markers on the overview map, coloured by the
+# latest backcast's anomaly vs the EQ normal (red = warm), with the next week's
+# forecast peak in the hover. Thresholds are indicative: discharge limits at the
+# French plants bite from roughly 25–28 °C depending on the site.
+HYDRO_RIVER_FORECAST_TAG = "ec-ens"     # forecast issue read for the 7-day peak
+RIVER_TEMP_WARM_ANOMALY_C = 2.0         # latest value this far above normal → warm (warning)
+RIVER_TEMP_HOT_C = 25.0                 # absolute level → hot (critical); a forecast peak above it → warning
+RIVER_TEMP_COLOUR_RANGE_C = 4.0         # ± anomaly that saturates the marker colour
 HYDRO_OVERVIEW_DEFAULT_LAYER = "Reservoir levels"
 HYDRO_COLOUR_MODES: dict[str, str] = {
     "anomaly_percent": "% of normal", "anomaly_quantile": "Percentile", "anomaly": "Anomaly (GWh)",

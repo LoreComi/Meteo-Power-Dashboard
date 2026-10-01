@@ -1,0 +1,36 @@
+# Copy this file to pipeline/.env or pipeline/local_settings.txt (both git-ignored) and fill in.
+# Do NOT fill in this file itself — it is committed. Lines are KEY=VALUE; # starts a comment.
+
+# ── Databricks (required for the upload; without them run_daily.py does a dry run) ──
+DATABRICKS_HOST=adb-xxxxxxxxxxxxxxxx.x.azuredatabricks.net
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/2f4ff6b7c65abb1a
+# A personal access token (User Settings > Developer > Access tokens) …
+DATABRICKS_TOKEN=
+# … or leave the token empty and pick an auth type of the SQL connector instead, e.g.
+# DATABRICKS_AUTH_TYPE=databricks-oauth   (browser login — fine for a manual run, not for Task Scheduler)
+# DATABRICKS_TLS_NO_VERIFY=true           (only if the proxy breaks TLS verification)
+POWER_DESK_SCHEMA=dna_snbx_weather.power_desk
+
+# ── Energy Quantified ──
+# Leave empty to reuse the key in Lorenzo_Trainee/EQ_project/eq_fundamentals.py
+EQ_API_KEY=
+EQ_SSL_VERIFY=false
+# Areas whose "River Temperature" curves are loaded (EQ area tags: FR, DE, HU exist), optional station filter
+RIVER_AREAS=FR
+# RIVER_STATIONS=golfech,belleville,chooz,cattenom,fessenheim,bugey,saint-alban,tricastin
+RIVER_BACKCAST_DAYS=45
+RIVER_HISTORY_START=2014-01-01
+RIVER_NORMAL_AHEAD_DAYS=400
+# Forecast tags to keep (empty = every tag EQ has, today 'ec-ens' and 'ec-ext'); issues per tag per upload
+RIVER_FORECAST_TAGS=
+RIVER_FORECAST_RUNS=1
+
+# ── SWE model ──
+SWE_ROOT=P:\QFA\TonyWeather\Hydro_Report\SWE_Exolabs
+SWE_REFRESH_DAYS=30
+SWE_INCLUDE_HEIGHTBANDS=true
+SWE_MODEL_TIMEOUT_MIN=120
+
+# ── Local ──
+MERGE_CHUNK_ROWS=2000
+# PIPELINE_LOG_DIR=P:\QFA\TonyWeather\Power_dashboard\pipeline\logs

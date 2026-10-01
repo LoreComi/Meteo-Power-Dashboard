@@ -744,6 +744,77 @@ def load_hydro_component(component: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def load_swe_country_daily() -> pd.DataFrame:
+    """The internal Exolabs SWE model per Alpine country (mean mm, daily) from
+    swe_daily — written by Power_dashboard/pipeline, not by the notebook. Empty
+    (never raises) until the pipeline has run."""
+    try:
+        df = run_query(f"""
+            SELECT day, region, swe_mean_mm, swe_total, swe_mean_roll_mm
+            FROM {SBX_SCHEMA}.swe_daily
+            WHERE level = 'country' AND band = 'total' ORDER BY region, day
+        """)
+    except Exception:
+        return pd.DataFrame(columns=["day", "region", "swe_mean_mm", "swe_total", "swe_mean_roll_mm"])
+    if df.empty:
+        return df
+    df = _dt(df, ["day"])
+    return _num(df, ["swe_mean_mm", "swe_total", "swe_mean_roll_mm"])
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_river_latest(forecast_tag: str = "ec-ens") -> pd.DataFrame:
+    """One row per river-temperature station: the latest EQ backcast, the normal
+    for that day, and the latest forecast issue's extremes over the following
+    seven days with the normal of the same days — plus the station coordinates.
+    Tables come from Power_dashboard/pipeline; empty (never raises) until it ran."""
+    try:
+        df = run_query(f"""
+            WITH bc AS (
+              SELECT station_key, station, area, day, value,
+                     ROW_NUMBER() OVER (PARTITION BY station_key ORDER BY day DESC) AS rn
+              FROM {SBX_SCHEMA}.river_temp_eq WHERE data_type = 'backcast'
+            ),
+            latest AS (SELECT station_key, station, area, day, value FROM bc WHERE rn = 1),
+            nm AS (SELECT station_key, day, value AS normal FROM {SBX_SCHEMA}.river_temp_eq WHERE data_type = 'normal'),
+            fc AS (
+              SELECT station_key, tag, issued, day, value,
+                     MAX(issued) OVER (PARTITION BY station_key, tag) AS max_issued
+              FROM {SBX_SCHEMA}.river_temp_eq WHERE data_type = 'forecast' AND tag = '{forecast_tag}'
+            ),
+            fc7 AS (
+              SELECT f.station_key, f.tag, f.issued, MAX(f.value) AS fc_max7, MIN(f.value) AS fc_min7,
+                     MAX(f.day) AS fc_last_day
+              FROM fc f JOIN latest l ON l.station_key = f.station_key
+              WHERE f.issued = f.max_issued AND f.day > l.day AND f.day <= l.day + INTERVAL 7 DAYS
+              GROUP BY f.station_key, f.tag, f.issued
+            ),
+            fcn AS (
+              SELECT l.station_key, AVG(n.normal) AS fc_normal7
+              FROM latest l JOIN nm n ON n.station_key = l.station_key
+                                     AND n.day > l.day AND n.day <= l.day + INTERVAL 7 DAYS
+              GROUP BY l.station_key
+            )
+            SELECT l.station_key, l.station, l.area, l.day, l.value, n.normal, l.value - n.normal AS anomaly,
+                   f.tag AS fc_tag, f.issued AS fc_issued, f.fc_max7, f.fc_min7, f.fc_last_day, fcn.fc_normal7,
+                   s.latitude, s.longitude, s.river, s.site
+            FROM latest l
+            LEFT JOIN nm n ON n.station_key = l.station_key AND n.day = l.day
+            LEFT JOIN fc7 f ON f.station_key = l.station_key
+            LEFT JOIN fcn ON fcn.station_key = l.station_key
+            LEFT JOIN {SBX_SCHEMA}.river_stations_eq s ON s.station_key = l.station_key
+            ORDER BY l.station
+        """)
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    df = _dt(df, ["day", "fc_last_day"])
+    df = _dt(df, ["fc_issued"], utc=True)
+    return _num(df, ["value", "normal", "anomaly", "fc_max7", "fc_min7", "fc_normal7", "latitude", "longitude"])
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_hydro_series(country: str, family: str) -> tuple[pd.Series, pd.Series | None]:
     """(actual, normal) daily series for one country and hydro family.
 

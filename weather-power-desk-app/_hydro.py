@@ -32,8 +32,12 @@ from _config import (
     HYDRO_AREA_CODES, HYDRO_COMPONENTS, HYDRO_MAP_REGIONS, HYDRO_MAP_LABEL_POS, HYDRO_OVERVIEW_LAYERS,
     HYDRO_OVERVIEW_DEFAULT_LAYER, HYDRO_COLOUR_MODES, HYDRO_PCT_OF_NORMAL_RANGE,
     HYDRO_PCTL_CRITICAL, HYDRO_PCTL_LOW, HYDRO_PCTL_HIGH, HYDRO_WEEK_MOVE_PTS,
+    HYDRO_SWE_REGIONS, HYDRO_RIVER_FORECAST_TAG, RIVER_TEMP_WARM_ANOMALY_C, RIVER_TEMP_HOT_C,
+    RIVER_TEMP_COLOUR_RANGE_C,
 )
-from _data import load_hydro_available, load_hydro_series, load_hydro_component
+from _data import (
+    load_hydro_available, load_hydro_series, load_hydro_component, load_swe_country_daily, load_river_latest,
+)
 from _charts import make_hydro_climatology_chart, make_hydro_anomaly_bars, make_hydro_europe_map
 from _hydro_quantify import (
     HYDRO_FAMILIES, HYDRO_DEFAULT_COUNTRIES, build_climatology, quantify_anomaly, split_recent_hist, stats_text,
@@ -118,41 +122,123 @@ def _flags(q: dict, layer: str) -> list[tuple[str, str]]:
 @st.cache_data(ttl=3600, show_spinner=False)
 def _overview_metrics() -> dict[str, dict[str, dict]]:
     """layer -> hydro area code -> quantify_anomaly dict, for every area with a
-    series. One query per layer (load_hydro_component), then the report maths per
-    area, exactly as the family tabs do it one country at a time.
+    series. One query per layer, then the report maths per area, exactly as the
+    family tabs do it one country at a time.
 
-    To add a layer that is not a hydro_daily component (SWE, river levels,
-    temperatures): load its (area, day, actual[, normal]) series here, run it
-    through build_climatology / quantify_anomaly the same way, and register the
-    layer in HYDRO_OVERVIEW_LAYERS — nothing downstream changes.
+    Sources (HYDRO_OVERVIEW_LAYERS[layer]['source']):
+      hydro_daily  a Volue component (actual SA, normal N where the family has one)
+      swe_daily    the internal Exolabs SWE model's mean mm per Alpine country,
+                   uploaded by pipeline/swe_upload.py; no normal → mean of years
+    To add another (river levels, …): load its (area, day, actual[, normal])
+    series here, run it through build_climatology / quantify_anomaly the same
+    way, and register the layer — nothing downstream changes.
     """
-    out: dict[str, dict[str, dict]] = {}
-    for layer, cfg in HYDRO_OVERVIEW_LAYERS.items():
-        family = cfg["family"]
-        comp = HYDRO_COMPONENTS[family]
-        try:
-            df = load_hydro_component(comp)
-        except Exception:
-            out[layer] = {}
-            continue
+    def quantify(series: dict[str, tuple[pd.Series, pd.Series | None]]) -> dict[str, dict]:
         per_area: dict[str, dict] = {}
-        if df.empty:
-            out[layer] = per_area
-            continue
-        for area, g in df.groupby("area"):
-            actual = g[g["data_type"] == "SA"].set_index("day")["value"].sort_index()
-            normal = g[g["data_type"] == "N"].set_index("day")["value"].sort_index()
+        for area, (actual, normal) in series.items():
             if actual.dropna().empty:
                 continue
             try:
-                clim = build_climatology(actual, normal if (HYDRO_FAMILIES[family]["has_norm"] and not normal.empty) else None)
-                q = quantify_anomaly(clim)
+                q = quantify_anomaly(build_climatology(actual, normal))
             except Exception:
                 continue
             if q:
                 per_area[str(area)] = q
-        out[layer] = per_area
+        return per_area
+
+    out: dict[str, dict[str, dict]] = {}
+    for layer, cfg in HYDRO_OVERVIEW_LAYERS.items():
+        src = cfg.get("source", "hydro_daily")
+        series: dict[str, tuple[pd.Series, pd.Series | None]] = {}
+        try:
+            if src == "hydro_daily":
+                family = cfg["family"]
+                df = load_hydro_component(HYDRO_COMPONENTS[family])
+                for area, g in (df.groupby("area") if not df.empty else []):
+                    actual = g[g["data_type"] == "SA"].set_index("day")["value"].sort_index()
+                    normal = g[g["data_type"] == "N"].set_index("day")["value"].sort_index()
+                    series[str(area)] = (actual, normal if (HYDRO_FAMILIES[family]["has_norm"] and not normal.empty) else None)
+            elif src == "swe_daily":
+                df = load_swe_country_daily()
+                for region, g in (df.groupby("region") if not df.empty else []):
+                    area = HYDRO_SWE_REGIONS.get(str(region))
+                    if area:
+                        series[area] = (g.set_index("day")["swe_mean_mm"].sort_index(), None)
+        except Exception:
+            series = {}
+        out[layer] = quantify(series)
     return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RIVER TEMPERATURE STATIONS (EQ, via pipeline/eq_river_temps.py)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _river_flags(value, anom, fc_max7) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    if value is not None and value >= RIVER_TEMP_HOT_C:
+        out.append(("critical", f"{value:.1f} °C — at or above {RIVER_TEMP_HOT_C:.0f} °C"))
+    elif anom is not None and anom >= RIVER_TEMP_WARM_ANOMALY_C:
+        out.append(("warning", f"{anom:+.1f} °C vs normal — warm"))
+    if fc_max7 is not None and fc_max7 >= RIVER_TEMP_HOT_C and not (value is not None and value >= RIVER_TEMP_HOT_C):
+        out.append(("warning", f"forecast peaks at {fc_max7:.1f} °C within 7 days"))
+    return out
+
+
+def _river_rows() -> list[dict]:
+    """One dict per station for the map (lat, lon, z, hover) and the table."""
+    df = load_river_latest(HYDRO_RIVER_FORECAST_TAG)
+    if df is None or df.empty:
+        return []
+    rows = []
+    for r in df.itertuples(index=False):
+        def f(x):
+            return None if x is None or (isinstance(x, float) and np.isnan(x)) else float(x)
+        value, normal, anom = f(r.value), f(r.normal), f(r.anomaly)
+        fc_max, fc_min, fc_norm = f(r.fc_max7), f(r.fc_min7), f(r.fc_normal7)
+        flags = _river_flags(value, anom, fc_max)
+        day = pd.Timestamp(r.day) if not pd.isna(r.day) else None
+        lines = [f"<b>{r.station}</b> · river temperature (EQ)"]
+        if value is not None:
+            lines.append(f"Latest {value:.1f} °C" + (f" · {day:%d %b}" if day is not None else "")
+                         + (f" · normal {normal:.1f} °C · <b>{anom:+.1f} °C</b>" if anom is not None else ""))
+        if fc_max is not None:
+            issued = pd.Timestamp(r.fc_issued) if not pd.isna(r.fc_issued) else None
+            lines.append(f"Next 7 days ({r.fc_tag}{f', issued {issued:%d %b %Hz}' if issued is not None else ''}): "
+                         f"{fc_min:.1f}–{fc_max:.1f} °C" + (f" · normal {fc_norm:.1f} °C" if fc_norm is not None else ""))
+        for _l, t in flags:
+            lines.append(f"⚑ {t}")
+        rows.append({"station_key": r.station_key, "name": r.station, "river": r.river, "site": r.site, "area": r.area,
+                     "lat": f(r.latitude), "lon": f(r.longitude), "day": day, "value": value, "normal": normal,
+                     "anomaly": anom, "fc_tag": r.fc_tag, "fc_max7": fc_max, "fc_min7": fc_min, "fc_normal7": fc_norm,
+                     "z": anom, "flags": flags, "hover": "<br>".join(lines)})
+    return rows
+
+
+def _river_table_html(rows: list[dict]) -> str:
+    head = ("<tr><th style='text-align:left'>Station</th><th>Latest</th><th>°C</th><th>Normal</th><th>Δ</th>"
+            f"<th class='hy-first'>7-day forecast ({HYDRO_RIVER_FORECAST_TAG})</th><th>vs normal</th><th style='text-align:left'>Flags</th></tr>")
+    body = []
+    for r in sorted(rows, key=lambda x: -(x["value"] if x["value"] is not None else -99)):
+        acls = "hy-crit" if (r["value"] is not None and r["value"] >= RIVER_TEMP_HOT_C) else \
+            ("hy-low" if (r["anomaly"] is not None and r["anomaly"] >= RIVER_TEMP_WARM_ANOMALY_C) else "")
+        fcls = "hy-low" if (r["fc_max7"] is not None and r["fc_max7"] >= RIVER_TEMP_HOT_C) else ""
+        fc = f"{r['fc_min7']:.1f}–{r['fc_max7']:.1f}" if r["fc_max7"] is not None else "—"
+        fcd = f"{r['fc_max7'] - r['fc_normal7']:+.1f}" if (r["fc_max7"] is not None and r["fc_normal7"] is not None) else "—"
+        flags = " · ".join(t for _l, t in r["flags"]) or "—"
+        cells = [
+            f"<td class='mc-region'>{r['name']}</td>",
+            f"<td>{r['day']:%d %b}</td>" if r["day"] is not None else "<td class='hy-na'>—</td>",
+            f"<td class='{acls}'>{r['value']:.1f}</td>" if r["value"] is not None else "<td class='hy-na'>—</td>",
+            f"<td>{r['normal']:.1f}</td>" if r["normal"] is not None else "<td class='hy-na'>—</td>",
+            f"<td class='{acls}'>{r['anomaly']:+.1f}</td>" if r["anomaly"] is not None else "<td class='hy-na'>—</td>",
+            f"<td class='hy-first {fcls}'>{fc}</td>",
+            f"<td class='{fcls}'>{fcd}</td>",
+            f"<td class='hy-agg' style='text-align:left'>{flags}</td>",
+        ]
+        body.append("<tr>" + "".join(cells) + "</tr>")
+    return (f"<div class='mc-block'><table class='mc-table hy-table'><thead>{head}</thead>"
+            f"<tbody>{''.join(body)}</tbody></table></div>")
 
 
 def _colour_value(q: dict, colour_by: str) -> float | None:
@@ -296,11 +382,15 @@ def _overview_table(metrics: dict[str, dict[str, dict]]) -> pd.DataFrame:
 
 
 def _render_overview(avail: pd.DataFrame):
-    c1, c2 = st.columns([1.5, 1.8])
+    c1, c2, c3 = st.columns([2.2, 1.8, 1.2])
     with c1:
         layers = list(HYDRO_OVERVIEW_LAYERS)
         layer = st.radio("Map layer", layers, index=layers.index(HYDRO_OVERVIEW_DEFAULT_LAYER),
                          horizontal=True, key="hy_ov_layer")
+    with c3:
+        show_rivers = st.checkbox("River temperature stations", value=True, key="hy_ov_rivers",
+                                  help="Latest EQ backcast vs normal per station (red = warm), 7-day forecast peak on hover. "
+                                       "Needs river_temp_eq from Power_dashboard/pipeline.")
     with c2:
         # a deviation series (hydro balance) has no meaningful % of normal to colour by
         modes = [m for m in HYDRO_COLOUR_MODES
@@ -311,11 +401,18 @@ def _render_overview(avail: pd.DataFrame):
 
     with st.spinner("Quantifying every hydro series…"):
         metrics = _overview_metrics()
+        rivers = _river_rows() if show_rivers else []
     lm = metrics.get(layer, {})
     if not lm:
-        status_banner(f"No {layer.lower()} series in hydro_daily — nothing to paint. "
-                      "Has power_desk_refresh.py run, and do the Volue area codes match?", "warning")
+        if HYDRO_OVERVIEW_LAYERS[layer].get("source") == "swe_daily":
+            status_banner("No SWE rows in swe_daily yet — run Power_dashboard/pipeline/run_daily.bat "
+                          "(it uploads the Exolabs model's CSVs).", "warning")
+        else:
+            status_banner(f"No {layer.lower()} series in hydro_daily — nothing to paint. "
+                          "Has power_desk_refresh.py run, and do the Volue area codes match?", "warning")
         return
+    if show_rivers and not rivers:
+        st.caption("No river temperature stations yet — river_temp_eq is written by Power_dashboard/pipeline.")
 
     painted = _paint(layer, colour_by, metrics)
     if colour_by == "anomaly_percent":
@@ -334,12 +431,15 @@ def _render_overview(avail: pd.DataFrame):
     legend = (layer + (f" as of {max(as_of):%d %b %Y}" if as_of else "")
               + " · red = below normal / low in the history, blue = above / high · on each country: level vs "
               f"normal · percentile of this week against the same week in {yrs} years · move in a week · hover for "
-              "every layer and the flags" + (" · " + "; ".join(aggs) if aggs else "") + ".")
+              "every layer and the flags" + (" · " + "; ".join(aggs) if aggs else "")
+              + (f" · ● river temperature stations: latest EQ backcast vs normal, red = warm, ±{RIVER_TEMP_COLOUR_RANGE_C:.0f} °C"
+                 if rivers else "") + ".")
 
     left, right = st.columns([1.15, 1], gap="large")
     with left:
-        st.plotly_chart(make_hydro_europe_map(painted, zmin, zmax, zmid, cb), use_container_width=True,
-                        config={"scrollZoom": False})
+        st.plotly_chart(make_hydro_europe_map(painted, zmin, zmax, zmid, cb, stations=rivers,
+                                              station_range=RIVER_TEMP_COLOUR_RANGE_C),
+                        use_container_width=True, config={"scrollZoom": False})
         st.caption(legend)
 
     # ── Criticalities across every layer, beside the map ──────────────────────
@@ -351,6 +451,9 @@ def _render_overview(avail: pd.DataFrame):
             for area, q in metrics.get(lyr, {}).items():
                 for level, text in _flags(q, lyr):
                     items.append((order[level], HYDRO_MAP_REGIONS.get(area, {}).get("name", area), lyr, level, text))
+        for r in rivers:
+            for level, text in r["flags"]:
+                items.append((order[level], r["name"], "river temperature", level, text))
         items.sort(key=lambda t: (t[0], t[1], t[2]))
         if items:
             chips = "".join(f"<span class='hy-flag hy-flag-{lvl}'><b>{name}</b> {lyr.lower()}: {text}</span>"
@@ -363,8 +466,10 @@ def _render_overview(avail: pd.DataFrame):
         st.caption(f"Flags: at or below the {ordinal(HYDRO_PCTL_CRITICAL)} percentile = critically low, the "
                    f"{ordinal(HYDRO_PCTL_LOW)} = low, at or above the {ordinal(HYDRO_PCTL_HIGH)} = very high; "
                    f"|Δ| ≥ {HYDRO_WEEK_MOVE_PTS} pts of normal in a week = fast drawdown / refill (level series "
-                   "only — the hydro balance is a deviation, so its week move is shown in GWh and not flagged). "
-                   "Thresholds in _config (HYDRO_PCTL_*, HYDRO_WEEK_MOVE_PTS).")
+                   "only — the hydro balance and SWE are shown as anomalies, so their week move is in GWh / mm and "
+                   f"not flagged). River temperature: ≥ {RIVER_TEMP_HOT_C:.0f} °C = hot, ≥ {RIVER_TEMP_WARM_ANOMALY_C:.0f} °C "
+                   "above normal = warm (indicative — discharge limits differ by plant). Thresholds in _config "
+                   "(HYDRO_PCTL_*, HYDRO_WEEK_MOVE_PTS, RIVER_TEMP_*).")
 
     # ── Every area × every layer, side by side ────────────────────────────────
     st.markdown("##### All areas · all layers")
@@ -373,6 +478,14 @@ def _render_overview(avail: pd.DataFrame):
     if not table.empty:
         st.download_button("Download overview CSV", table.to_csv(index=False).encode(),
                            f"hydro_overview_{dt.date.today():%Y%m%d}.csv", "text/csv", key="hy_ov_dl")
+
+    if rivers:
+        st.markdown("##### River temperatures · stations")
+        st.markdown(_river_table_html(rivers), unsafe_allow_html=True)
+        riv = pd.DataFrame([{k: v for k, v in r.items() if k not in ("hover", "flags", "z")}
+                            | {"flags": "; ".join(t for _l, t in r["flags"])} for r in rivers])
+        st.download_button("Download river temperatures CSV", riv.to_csv(index=False).encode(),
+                           f"river_temps_{dt.date.today():%Y%m%d}.csv", "text/csv", key="hy_ov_riv_dl")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

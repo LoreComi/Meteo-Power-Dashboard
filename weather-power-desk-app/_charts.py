@@ -587,7 +587,8 @@ def make_hydro_climatology_chart(clim: dict, hist_years: list[int], recent_years
 
 
 def make_hydro_europe_map(painted: list[dict], zmin: float, zmax: float, zmid: float | None,
-                          colorbar_title: str, title: str = "", height: int = 640) -> go.Figure:
+                          colorbar_title: str, title: str = "", height: int = 640,
+                          stations: list[dict] | None = None, station_range: float = 4.0) -> go.Figure:
     """The hydro overview: a Europe choropleth, one colour per painted country, with
     the country's numbers written on it and the full read-out on hover.
 
@@ -596,6 +597,10 @@ def make_hydro_europe_map(painted: list[dict], zmin: float, zmax: float, zmid: f
     Colour is polarity on the app's diverging pair — red = deficit / low, blue =
     surplus / high — so the map reads like the anomaly bars and the KPI cards.
     Countries without a series are drawn in the land colour with a muted label.
+
+    `stations` (optional) are river-temperature points: lat, lon, z (anomaly in °C
+    vs normal, or None), hover. Markers take the temperature convention — red =
+    warmer than normal, blue = colder — saturating at ±station_range °C.
 
     Plotly's built-in country outlines are used (locationmode ISO-3); the browser
     fetches them from cdn.plot.ly, as it already does the fonts.
@@ -630,6 +635,21 @@ def make_hydro_europe_map(painted: list[dict], zmin: float, zmax: float, zmid: f
             textfont=dict(family="JetBrains Mono, monospace", size=10,
                           color=[INK_PRIMARY if r.get("z") is not None else INK_MUTED for r in labelled]),
             hoverinfo="skip", showlegend=False))
+    for subset, has_z in ((
+            [s for s in (stations or []) if s.get("z") is not None and s.get("lat") is not None], True),
+            ([s for s in (stations or []) if s.get("z") is None and s.get("lat") is not None], False)):
+        if not subset:
+            continue
+        marker = dict(size=13, symbol="circle", line=dict(color="#ffffff", width=1.6), opacity=0.95)
+        if has_z:
+            marker.update(color=[s["z"] for s in subset], cmin=-station_range, cmax=station_range,
+                          colorscale=[[0.0, DIV_NEG], [0.5, DIV_MID], [1.0, DIV_POS]], showscale=False)
+        else:
+            marker.update(color=INK_MUTED)
+        fig.add_trace(go.Scattergeo(
+            lat=[s["lat"] for s in subset], lon=[s["lon"] for s in subset], mode="markers", marker=marker,
+            customdata=[s["hover"] for s in subset], hovertemplate="%{customdata}<extra></extra>",
+            name="river temperature", showlegend=False))
     fig.update_geos(
         scope="europe", resolution=50, domain=dict(x=[0, 1], y=[0, 1]),
         lonaxis_range=[ext["lon_min"], ext["lon_max"]], lataxis_range=[ext["lat_min"], ext["lat_max"]],

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+pipeline/.env
+pipeline/local_settings.txt
+pipeline/logs/
+pipeline/out/
