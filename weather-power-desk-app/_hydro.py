@@ -37,16 +37,18 @@ from _config import (
     HYDRO_AREA_CODES, HYDRO_COMPONENTS, HYDRO_MAP_REGIONS, HYDRO_MAP_LABEL_POS, HYDRO_OVERVIEW_LAYERS,
     HYDRO_OVERVIEW_DEFAULT_LAYER, HYDRO_COLOUR_MODES, HYDRO_PCT_OF_NORMAL_RANGE,
     HYDRO_PCTL_CRITICAL, HYDRO_PCTL_LOW, HYDRO_PCTL_HIGH, HYDRO_WEEK_MOVE_PTS,
-    HYDRO_SWE_REGIONS, HYDRO_DEEP_DIVE_RIVER_MONTHS,
+    HYDRO_SWE_REGIONS, HYDRO_DEEP_DIVE_RIVER_MONTHS, HYDRO_STATION_MODES,
     RIVER_TEMP_WARM_ANOMALY_C, RIVER_TEMP_HOT_C, RIVER_TEMP_COLOUR_RANGE_C,
+    RIVER_FLOW_CRITICAL_PCT, RIVER_FLOW_LOW_PCT, RIVER_FLOW_HIGH_PCT, RIVER_FLOW_COLOUR_RANGE_PCT, RIVER_STALE_DAYS,
 )
 from _data import (
     load_hydro_available, load_hydro_series, load_hydro_component, load_swe_country_daily, load_river_latest,
     load_river_series,
 )
 from _charts import (
-    make_hydro_climatology_chart, make_hydro_anomaly_bars, make_hydro_europe_map, make_river_temp_chart,
+    make_hydro_climatology_chart, make_hydro_anomaly_bars, make_hydro_europe_map, make_river_chart,
 )
+from _style import DIV_NEG, DIV_MID, DIV_POS
 from _hydro_quantify import (
     HYDRO_FAMILIES, HYDRO_DEFAULT_COUNTRIES, build_climatology, quantify_anomaly, split_recent_hist, stats_text,
 )
@@ -186,7 +188,8 @@ def _overview_metrics() -> dict[str, dict[str, dict]]:
 # RIVER TEMPERATURE STATIONS (EQ via pipeline/, Volue via notebook cell 6b)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _river_flags(value, anom, fc_max7) -> list[tuple[str, str]]:
+def _river_flags(value, anom, fc_max7, flow_pct=None) -> list[tuple[str, str]]:
+    """Temperature flags first (hot / warm / forecast peak), then flow vs its normal."""
     out: list[tuple[str, str]] = []
     if value is not None and value >= RIVER_TEMP_HOT_C:
         out.append(("critical", f"{value:.1f} °C — at or above {RIVER_TEMP_HOT_C:.0f} °C"))
@@ -194,12 +197,20 @@ def _river_flags(value, anom, fc_max7) -> list[tuple[str, str]]:
         out.append(("warning", f"{anom:+.1f} °C vs normal — warm"))
     if fc_max7 is not None and fc_max7 >= RIVER_TEMP_HOT_C and not (value is not None and value >= RIVER_TEMP_HOT_C):
         out.append(("warning", f"forecast peaks at {fc_max7:.1f} °C within 7 days"))
+    if flow_pct is not None:
+        if flow_pct <= RIVER_FLOW_CRITICAL_PCT:
+            out.append(("critical", f"flow {flow_pct:.0f}% of normal — very low water"))
+        elif flow_pct <= RIVER_FLOW_LOW_PCT:
+            out.append(("warning", f"flow {flow_pct:.0f}% of normal — low water"))
+        elif flow_pct >= RIVER_FLOW_HIGH_PCT:
+            out.append(("high", f"flow {flow_pct:.0f}% of normal — high water"))
     return out
 
 
-def _river_rows() -> list[dict]:
+def _river_rows(mode: str = "temperature") -> list[dict]:
     """One dict per station, every source: for the map (lat, lon, z, hover, code),
-    the tables and the deep dive."""
+    the tables and the deep dive. `mode` picks the marker colour value: the
+    temperature anomaly, or the flow as % of normal."""
     df = load_river_latest()
     if df is None or df.empty:
         return []
@@ -209,50 +220,89 @@ def _river_rows() -> list[dict]:
             return None if x is None or (isinstance(x, float) and np.isnan(x)) else float(x)
         value, normal, anom = f(r.value), f(r.normal), f(r.anomaly)
         fc_max, fc_min, fc_norm = f(r.fc_max7), f(r.fc_min7), f(r.fc_normal7)
-        flags = _river_flags(value, anom, fc_max)
+        flow, flow_norm, flow_pct = f(getattr(r, "flow", None)), f(getattr(r, "flow_normal", None)), f(getattr(r, "flow_pct", None))
+        flow_day = pd.Timestamp(r.flow_day) if hasattr(r, "flow_day") and not pd.isna(r.flow_day) else None
         day = pd.Timestamp(r.day) if not pd.isna(r.day) else None
+        # a series that stopped updating (EQ's Bugey flow ends in 2019) is shown with
+        # its date but is neither flagged nor used to colour the marker
+        today = pd.Timestamp.today().normalize()
+        t_stale = day is not None and (today - day).days > RIVER_STALE_DAYS
+        q_stale = flow_day is not None and (today - flow_day).days > RIVER_STALE_DAYS
+        flags = _river_flags(None if t_stale else value, None if t_stale else anom, None if t_stale else fc_max,
+                             None if q_stale else flow_pct)
         area = str(r.area).upper() if r.area is not None else ""
-        lines = [f"<b>{r.station}</b> · river temperature ({r.source})"]
+        lines = [f"<b>{r.station}</b> · river station ({r.source})"]
         if value is not None:
-            lines.append(f"Latest {value:.1f} °C" + (f" · {day:%d %b}" if day is not None else "")
-                         + (f" · normal {normal:.1f} °C · <b>{anom:+.1f} °C</b>" if anom is not None else " · no normal"))
-        if fc_max is not None:
+            lines.append(f"Temperature {value:.1f} °C" + (f" · {day:%d %b %Y}" if t_stale else (f" · {day:%d %b}" if day is not None else ""))
+                         + (f" · normal {normal:.1f} °C · <b>{anom:+.1f} °C</b>" if anom is not None else " · no normal")
+                         + (" · <i>stale</i>" if t_stale else ""))
+        if fc_max is not None and not t_stale:
             issued = pd.Timestamp(r.fc_issued) if not pd.isna(r.fc_issued) else None
             lines.append(f"Next 7 days ({r.fc_tag}{f', issued {issued:%d %b %Hz}' if issued is not None else ''}): "
                          f"{fc_min:.1f}–{fc_max:.1f} °C" + (f" · normal {fc_norm:.1f} °C" if fc_norm is not None else ""))
+        if flow is not None:
+            lines.append(f"Flow {flow:,.0f} m³/s" + (f" · {flow_day:%d %b %Y}" if q_stale else (f" · {flow_day:%d %b}" if flow_day is not None else ""))
+                         + (f" · normal {flow_norm:,.0f} · <b>{flow_pct:.0f}% of normal</b>" if flow_pct is not None else " · no normal")
+                         + (" · <i>stale</i>" if q_stale else ""))
         for _l, t in flags:
             lines.append(f"⚑ {t}")
         lines.append("<i>click for the country's deep dive</i>")
         rows.append({"station_key": r.station_key, "name": r.station, "river": r.river, "site": r.site, "area": area,
                      "source": r.source, "lat": f(r.latitude), "lon": f(r.longitude), "day": day, "value": value,
                      "normal": normal, "anomaly": anom, "fc_tag": r.fc_tag, "fc_max7": fc_max, "fc_min7": fc_min,
-                     "fc_normal7": fc_norm, "z": anom, "flags": flags, "hover": "<br>".join(lines),
-                     "code": f"station:{r.station_key}|{area}"})
+                     "fc_normal7": fc_norm, "flow": flow, "flow_normal": flow_norm, "flow_pct": flow_pct,
+                     "flow_day": flow_day, "stale": {"temperature": t_stale, "flow": q_stale},
+                     "z": ((None if q_stale else flow_pct) if mode == "flow" else (None if t_stale else anom)),
+                     "flags": flags, "hover": "<br>".join(lines), "code": f"station:{r.station_key}|{area}"})
     return rows
 
 
+def _flow_class(pct: float | None) -> str:
+    if pct is None:
+        return ""
+    if pct <= RIVER_FLOW_CRITICAL_PCT:
+        return "hy-crit"
+    if pct <= RIVER_FLOW_LOW_PCT:
+        return "hy-low"
+    if pct >= RIVER_FLOW_HIGH_PCT:
+        return "hy-high"
+    return ""
+
+
 def _river_table_html(rows: list[dict]) -> str:
-    head = ("<tr><th style='text-align:left'>Station</th><th style='text-align:left'>Source</th><th>Latest</th><th>°C</th>"
-            "<th>Normal</th><th>Δ</th><th class='hy-first'>7-day forecast</th><th>vs normal</th>"
-            "<th style='text-align:left'>Flags</th></tr>")
+    head = ("<tr><th rowspan='2' style='text-align:left;vertical-align:bottom'>Station</th>"
+            "<th rowspan='2' style='text-align:left;vertical-align:bottom'>Source</th>"
+            "<th colspan='4' class='hy-layer'>Temperature °C</th><th colspan='2' class='hy-layer'>7-day forecast</th>"
+            "<th colspan='3' class='hy-layer'>Flow m³/s</th><th rowspan='2' style='text-align:left;vertical-align:bottom'>Flags</th></tr>"
+            "<tr><th class='hy-sub hy-first'>Latest</th><th class='hy-sub'>°C</th><th class='hy-sub'>Normal</th><th class='hy-sub'>Δ</th>"
+            "<th class='hy-sub hy-first'>Range</th><th class='hy-sub'>vs normal</th>"
+            "<th class='hy-sub hy-first'>Latest</th><th class='hy-sub'>Normal</th><th class='hy-sub'>% norm</th></tr>")
     body = []
     for r in sorted(rows, key=lambda x: -(x["value"] if x["value"] is not None else -99)):
-        acls = "hy-crit" if (r["value"] is not None and r["value"] >= RIVER_TEMP_HOT_C) else \
-            ("hy-low" if (r["anomaly"] is not None and r["anomaly"] >= RIVER_TEMP_WARM_ANOMALY_C) else "")
-        fcls = "hy-low" if (r["fc_max7"] is not None and r["fc_max7"] >= RIVER_TEMP_HOT_C) else ""
+        stale = r.get("stale", {})
+        t_stale, q_stale = stale.get("temperature", False), stale.get("flow", False)
+        acls = "" if t_stale else ("hy-crit" if (r["value"] is not None and r["value"] >= RIVER_TEMP_HOT_C) else
+                                   ("hy-low" if (r["anomaly"] is not None and r["anomaly"] >= RIVER_TEMP_WARM_ANOMALY_C) else ""))
+        fcls = "hy-low" if (r["fc_max7"] is not None and r["fc_max7"] >= RIVER_TEMP_HOT_C and not t_stale) else ""
         fc = (f"{r['fc_min7']:.1f}–{r['fc_max7']:.1f} <span class='hy-agg'>{r['fc_tag']}</span>"
               if r["fc_max7"] is not None else "—")
         fcd = f"{r['fc_max7'] - r['fc_normal7']:+.1f}" if (r["fc_max7"] is not None and r["fc_normal7"] is not None) else "—"
+        qcls = "" if q_stale else _flow_class(r.get("flow_pct"))
         flags = " · ".join(t for _l, t in r["flags"]) or "—"
+        day_txt = (f"{r['day']:%b %Y} <span class='hy-agg'>stale</span>" if t_stale else f"{r['day']:%d %b}") if r["day"] is not None else None
         cells = [
             f"<td class='mc-region'>{r['name']} <span class='hy-agg'>{r['area']}</span></td>",
             f"<td class='hy-agg' style='text-align:left'>{r['source']}</td>",
-            f"<td>{r['day']:%d %b}</td>" if r["day"] is not None else "<td class='hy-na'>—</td>",
+            f"<td class='hy-first'>{day_txt}</td>" if day_txt else "<td class='hy-na hy-first'>—</td>",
             f"<td class='{acls}'>{r['value']:.1f}</td>" if r["value"] is not None else "<td class='hy-na'>—</td>",
             f"<td>{r['normal']:.1f}</td>" if r["normal"] is not None else "<td class='hy-na'>—</td>",
             f"<td class='{acls}'>{r['anomaly']:+.1f}</td>" if r["anomaly"] is not None else "<td class='hy-na'>—</td>",
             f"<td class='hy-first {fcls}'>{fc}</td>",
             f"<td class='{fcls}'>{fcd}</td>",
+            (f"<td class='hy-first {qcls}'>{r['flow']:,.0f}" + (f" <span class='hy-agg'>{r['flow_day']:%b %Y} stale</span>" if q_stale else "") + "</td>")
+            if r.get("flow") is not None else "<td class='hy-na hy-first'>—</td>",
+            f"<td>{r['flow_normal']:,.0f}</td>" if r.get("flow_normal") is not None else "<td class='hy-na'>—</td>",
+            f"<td class='{qcls}'>{r['flow_pct']:.0f}%</td>" if r.get("flow_pct") is not None else "<td class='hy-na'>—</td>",
             f"<td class='hy-agg' style='text-align:left'>{flags}</td>",
         ]
         body.append("<tr>" + "".join(cells) + "</tr>")
@@ -521,8 +571,8 @@ def _render_deep_dive(area: str, metrics: dict[str, dict[str, dict]], rivers: li
             _chips(flags)
 
     if stations:
-        st.markdown(f"**River temperatures** · {len(stations)} station{'s' if len(stations) > 1 else ''} · "
-                    f"observed, normal and the latest forecast issues; dotted line = {RIVER_TEMP_HOT_C:.0f} °C")
+        st.markdown(f"**River stations** · {len(stations)} · temperature (observed, normal, the latest forecast "
+                    f"issues; dotted line = {RIVER_TEMP_HOT_C:.0f} °C) and, where EQ has it, flow against its normal")
         st.markdown(_river_table_html(stations), unsafe_allow_html=True)
         order = sorted(stations, key=lambda r: (r["station_key"] != focus_station,
                                                 -(r["value"] if r["value"] is not None else -99)))
@@ -531,15 +581,23 @@ def _render_deep_dive(area: str, metrics: dict[str, dict[str, dict]], rivers: li
             for src in sorted({r["source"] for r in order}):
                 keys = tuple(sorted(r["station_key"] for r in order if r["source"] == src))
                 series_by_source[src] = load_river_series(src, keys, HYDRO_DEEP_DIVE_RIVER_MONTHS)
-        cols = st.columns(2)
-        for i, r in enumerate(order):
+        for r in order:
             df = series_by_source.get(r["source"], pd.DataFrame())
             if not df.empty:
                 df = df[df["station_key"] == r["station_key"]]
-            with cols[i % 2]:
-                st.plotly_chart(make_river_temp_chart(df, f"{r['name']} — river temperature ({r['source']})",
-                                                      RIVER_TEMP_HOT_C),
-                                use_container_width=True, key=f"hy_dd_riv_{r['source']}_{r['station_key']}")
+            temp = df[df["variable"] == "temperature"] if not df.empty else df
+            flow = df[df["variable"] == "flow"] if not df.empty else pd.DataFrame()
+            # one row per station: temperature on the left, flow on the right when it exists
+            c_t, c_f = st.columns(2)
+            with c_t:
+                st.plotly_chart(make_river_chart(temp, f"{r['name']} — temperature ({r['source']})", "°C", RIVER_TEMP_HOT_C),
+                                use_container_width=True, key=f"hy_dd_riv_t_{r['source']}_{r['station_key']}")
+            with c_f:
+                if not flow.empty:
+                    st.plotly_chart(make_river_chart(flow, f"{r['name']} — flow ({r['source']})", "m³/s", None, fmt=",.0f"),
+                                    use_container_width=True, key=f"hy_dd_riv_q_{r['source']}_{r['station_key']}")
+                else:
+                    st.caption(f"{r['name']}: no flow series in {r['source']}.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -553,10 +611,13 @@ def _render_overview(avail: pd.DataFrame):
         layer = st.radio("Map layer", layers, index=layers.index(HYDRO_OVERVIEW_DEFAULT_LAYER),
                          horizontal=True, key="hy_ov_layer")
     with c3:
-        show_rivers = st.checkbox("River temperature stations", value=True, key="hy_ov_rivers",
-                                  help="Latest observation vs normal per station (red = warm), 7-day forecast peak on "
-                                       "hover. EQ stations from Power_dashboard/pipeline, Volue stations from the "
-                                       "refresh notebook.")
+        show_rivers = st.checkbox("River stations", value=True, key="hy_ov_rivers",
+                                  help="Latest temperature vs normal and flow vs normal per station, 7-day forecast "
+                                       "peak on hover. EQ stations from Power_dashboard/pipeline, Volue stations from "
+                                       "the refresh notebook.")
+        station_mode = st.radio("Colour stations by", list(HYDRO_STATION_MODES), horizontal=True,
+                                format_func=HYDRO_STATION_MODES.get, key="hy_ov_station_mode",
+                                label_visibility="collapsed", disabled=not show_rivers)
     with c2:
         # a deviation series has no meaningful % of normal to colour by
         modes = [m for m in HYDRO_COLOUR_MODES
@@ -567,7 +628,7 @@ def _render_overview(avail: pd.DataFrame):
 
     with st.spinner("Quantifying every hydro series…"):
         metrics = _overview_metrics()
-        rivers = _river_rows() if show_rivers else []
+        rivers = _river_rows(station_mode) if show_rivers else []
     lm = metrics.get(layer, {})
     if not lm:
         if HYDRO_OVERVIEW_LAYERS[layer].get("source") == "swe_daily":
@@ -601,13 +662,20 @@ def _render_overview(avail: pd.DataFrame):
               f"normal · percentile of this week against the same week in {yrs} years · move in a week · hover for "
               "every layer and the flags · <b>click a country or a station for its deep dive</b>"
               + (" · " + "; ".join(aggs) if aggs else "")
-              + (f" · ● river temperature stations: latest observation vs normal, red = warm, ±{RIVER_TEMP_COLOUR_RANGE_C:.0f} °C"
-                 if rivers else "") + ".")
+              + ((f" · ● river stations coloured by the latest temperature vs normal, red = warm, ±{RIVER_TEMP_COLOUR_RANGE_C:.0f} °C"
+                  if station_mode == "temperature" else
+                  f" · ● river stations coloured by the latest flow as % of normal, red = low water, "
+                  f"{RIVER_FLOW_COLOUR_RANGE_PCT[0]:.0f}–{RIVER_FLOW_COLOUR_RANGE_PCT[1]:.0f} %") if rivers else "")
+              + ".")
+    station_scale = None
+    if station_mode == "flow":
+        station_scale = dict(cmin=RIVER_FLOW_COLOUR_RANGE_PCT[0], cmax=RIVER_FLOW_COLOUR_RANGE_PCT[1], cmid=100.0,
+                             colorscale=[[0.0, DIV_POS], [0.5, DIV_MID], [1.0, DIV_NEG]])
 
     left, right = st.columns([1.15, 1], gap="large")
     with left:
         fig = make_hydro_europe_map(painted, zmin, zmax, zmid, cb, stations=rivers,
-                                    station_range=RIVER_TEMP_COLOUR_RANGE_C)
+                                    station_range=RIVER_TEMP_COLOUR_RANGE_C, station_scale=station_scale)
         event = st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": False},
                                 key="hy_map", on_select="rerun", selection_mode="points")
         area_sel, station_sel = _selection_from_event(event)
@@ -642,8 +710,10 @@ def _render_overview(avail: pd.DataFrame):
                    f"|Δ| ≥ {HYDRO_WEEK_MOVE_PTS} pts of normal in a week = fast drawdown / refill (level series "
                    "only — the hydro balance and SWE are shown as anomalies, so their week move is in GWh / mm and "
                    f"not flagged). River temperature: ≥ {RIVER_TEMP_HOT_C:.0f} °C = hot, ≥ {RIVER_TEMP_WARM_ANOMALY_C:.0f} °C "
-                   "above normal = warm (indicative — discharge limits differ by plant). Thresholds in _config "
-                   "(HYDRO_PCTL_*, HYDRO_WEEK_MOVE_PTS, RIVER_TEMP_*).")
+                   f"above normal = warm; river flow: ≤ {RIVER_FLOW_CRITICAL_PCT:.0f} % of normal = very low, "
+                   f"≤ {RIVER_FLOW_LOW_PCT:.0f} % = low, ≥ {RIVER_FLOW_HIGH_PCT:.0f} % = high water (indicative — "
+                   "discharge limits and minimum flows differ by plant and river). Thresholds in _config "
+                   "(HYDRO_PCTL_*, HYDRO_WEEK_MOVE_PTS, RIVER_TEMP_*, RIVER_FLOW_*).")
 
     # ── Deep dive: the clicked area, or the one picked here ───────────────────
     river_areas = sorted({r["area"] for r in rivers if r["area"] and r["area"] not in HYDRO_MAP_REGIONS})
@@ -672,7 +742,7 @@ def _render_overview(avail: pd.DataFrame):
                            f"hydro_overview_{dt.date.today():%Y%m%d}.csv", "text/csv", key="hy_ov_dl")
 
     if rivers:
-        st.markdown("##### River temperatures · all stations")
+        st.markdown("##### River stations · temperature and flow")
         st.markdown(_river_table_html(rivers), unsafe_allow_html=True)
         riv = pd.DataFrame([{k: v for k, v in r.items() if k not in ("hover", "flags", "z", "code")}
                             | {"flags": "; ".join(t for _l, t in r["flags"])} for r in rivers])

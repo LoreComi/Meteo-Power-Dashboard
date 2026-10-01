@@ -588,7 +588,8 @@ def make_hydro_climatology_chart(clim: dict, hist_years: list[int], recent_years
 
 def make_hydro_europe_map(painted: list[dict], zmin: float, zmax: float, zmid: float | None,
                           colorbar_title: str, title: str = "", height: int = 640,
-                          stations: list[dict] | None = None, station_range: float = 4.0) -> go.Figure:
+                          stations: list[dict] | None = None, station_range: float = 4.0,
+                          station_scale: dict | None = None) -> go.Figure:
     """The hydro overview: a Europe choropleth, one colour per painted country, with
     the country's numbers written on it and the full read-out on hover.
 
@@ -598,9 +599,11 @@ def make_hydro_europe_map(painted: list[dict], zmin: float, zmax: float, zmid: f
     surplus / high — so the map reads like the anomaly bars and the KPI cards.
     Countries without a series are drawn in the land colour with a muted label.
 
-    `stations` (optional) are river-temperature points: lat, lon, z (anomaly in °C
-    vs normal, or None), hover. Markers take the temperature convention — red =
-    warmer than normal, blue = colder — saturating at ±station_range °C.
+    `stations` (optional) are river points: lat, lon, z (the colour value, or None),
+    hover, code. By default z is the temperature anomaly in °C and markers take
+    the temperature convention — red = warmer than normal, blue = colder —
+    saturating at ±station_range. `station_scale` = dict(cmin, cmax, cmid,
+    colorscale) overrides that, e.g. flow as % of normal with red = low water.
 
     Plotly's built-in country outlines are used (locationmode ISO-3); the browser
     fetches them from cdn.plot.ly, as it already does the fonts.
@@ -649,8 +652,10 @@ def make_hydro_europe_map(painted: list[dict], zmin: float, zmax: float, zmid: f
             continue
         marker = dict(size=13, symbol="circle", line=dict(color="#ffffff", width=1.6), opacity=0.95)
         if has_z:
-            marker.update(color=[s["z"] for s in subset], cmin=-station_range, cmax=station_range,
-                          colorscale=[[0.0, DIV_NEG], [0.5, DIV_MID], [1.0, DIV_POS]], showscale=False)
+            scale = station_scale or dict(cmin=-station_range, cmax=station_range, cmid=0.0,
+                                          colorscale=[[0.0, DIV_NEG], [0.5, DIV_MID], [1.0, DIV_POS]])
+            marker.update(color=[s["z"] for s in subset], cmin=scale["cmin"], cmax=scale["cmax"],
+                          cmid=scale.get("cmid"), colorscale=scale["colorscale"], showscale=False)
         else:
             marker.update(color=INK_MUTED)
         fig.add_trace(go.Scattergeo(
@@ -669,16 +674,18 @@ def make_hydro_europe_map(painted: list[dict], zmin: float, zmax: float, zmid: f
     return fig
 
 
-def make_river_temp_chart(series: pd.DataFrame, title: str, hot_c: float | None = None,
-                          height: int = 320) -> go.Figure:
-    """One river station: observed temperature (backcast / actual) as a line, the
-    normal dashed, the latest issue of each forecast tag continuing past the last
-    observation, and the hot threshold as a dotted line. `series` is the long
-    frame of _data.load_river_series for one station."""
+def make_river_chart(series: pd.DataFrame, title: str, unit: str = "°C", threshold: float | None = None,
+                     height: int = 320, fmt: str = ".1f") -> go.Figure:
+    """One river station, one variable: the observation (backcast / actual) as a
+    line, the normal dashed, the latest issue of each forecast tag continuing
+    past the last observation, and an optional threshold as a dotted line.
+    `series` is the long frame of _data.load_river_series for one station and
+    one variable (temperature in °C, or flow in m³/s)."""
     fig = _base_fig(title, height=height)
     if series is None or series.empty:
         return fig
     s = series.sort_values("day")
+    tmpl = "%{y:" + fmt + "} " + unit
     obs = s[s["data_type"].isin(["backcast", "actual"])]
     if not obs.empty:
         # one observed line: backcast where it exists, actual otherwise
@@ -686,12 +693,12 @@ def make_river_temp_chart(series: pd.DataFrame, title: str, hot_c: float | None 
         pref = pref.drop_duplicates("day", keep="first")
         fig.add_trace(go.Scatter(x=pref["day"], y=pref["value"], mode="lines", name="observed",
                                  line=dict(color=INK_PRIMARY, width=2),
-                                 hovertemplate="%{y:.1f} °C<extra>observed</extra>"))
+                                 hovertemplate=tmpl + "<extra>observed</extra>"))
     nm = s[s["data_type"] == "normal"]
     if not nm.empty:
         fig.add_trace(go.Scatter(x=nm["day"], y=nm["value"], mode="lines", name="normal",
                                  line=dict(color=INK_MUTED, width=1.6, dash="dash"),
-                                 hovertemplate="%{y:.1f} °C<extra>normal</extra>"))
+                                 hovertemplate=tmpl + "<extra>normal</extra>"))
     fc = s[s["data_type"] == "forecast"]
     last_obs = obs.sort_values("day").iloc[-1] if not obs.empty else None
     for i, (tag, g) in enumerate(sorted(fc.groupby("tag"), key=lambda kv: kv[0])):
@@ -704,15 +711,21 @@ def make_river_temp_chart(series: pd.DataFrame, title: str, hot_c: float | None 
         fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=lbl,
                                  line=dict(color=CATEGORICAL[(i + 5) % len(CATEGORICAL)], width=2,
                                            dash="solid" if i == 0 else "dot"),
-                                 hovertemplate="%{y:.1f} °C<extra>" + lbl + "</extra>"))
-    if hot_c is not None:
-        fig.add_hline(y=hot_c, line=dict(color=STATUS_CRITICAL, width=1, dash="dot"),
-                      annotation_text=f"{hot_c:.0f} °C", annotation_position="top left",
+                                 hovertemplate=tmpl + "<extra>" + lbl + "</extra>"))
+    if threshold is not None:
+        fig.add_hline(y=threshold, line=dict(color=STATUS_CRITICAL, width=1, dash="dot"),
+                      annotation_text=f"{threshold:.0f} {unit}", annotation_position="top left",
                       annotation_font=dict(size=10, color=INK_MUTED))
-    fig.update_yaxes(title_text="°C")
+    fig.update_yaxes(title_text=unit, rangemode="tozero" if unit != "°C" else "normal")
     fig.update_xaxes(tickformat="%b %y")
     fig.update_layout(hovermode="x unified", legend=dict(y=-0.25))
     return fig
+
+
+def make_river_temp_chart(series: pd.DataFrame, title: str, hot_c: float | None = None,
+                          height: int = 320) -> go.Figure:
+    """Temperature flavour of make_river_chart (kept for callers)."""
+    return make_river_chart(series, title, "°C", hot_c, height)
 
 
 def make_hydro_anomaly_bars(rows: list[dict], title: str = "Anomaly vs normal today (GWh)") -> go.Figure:

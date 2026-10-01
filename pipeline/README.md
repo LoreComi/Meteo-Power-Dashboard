@@ -6,6 +6,7 @@ A local, daily job that feeds two inputs the Hydro overview can show but Databri
 |------|--------|---------------|------------|
 | Snow water equivalent | the internal Exolabs model — `Hydro_Report/SWE_Exolabs/Scripts/SWE_main.py`, run by `102_SWE_lorenzo.bat` — read from its CSVs in `Output_files/CSVs` | `dna_snbx_weather.power_desk.swe_daily` | Alps + 4 countries × 3 bands + 34 catchments + 34 × 10 height bands ≈ 390 (× 30 days re-uploaded) |
 | River temperatures | Energy Quantified, the client and key of `Lorenzo_Trainee/EQ_project/eq_fundamentals.py`; every `<AREA> @<River>-<Site> River Temperature °C H Backcast / Normal / Forecast / Actual` curve EQ has — discovered from EQ's metadata (23 stations today: FR 8, DE 14, HU 1), so a new station or area appears by itself; set `RIVER_AREAS=FR` to restrict | `…power_desk.river_temp_eq`, `…power_desk.river_stations_eq` | 23 stations × (45 backcast days + 45 + 400 normal days + 2 forecast issues) ≈ 11 000 |
+| River flows | Energy Quantified `<AREA> @<River>-<Site> River Flow m^3/s H Actual` (hourly, stored as the daily mean) and `… D Normal` — the 8 French stations today, Fessenheim without a normal; no backcast or forecast exists | `…power_desk.river_flow_eq` (same layout as the temperature table, unit m³/s) | 8 × (45 + 445) ≈ 4 000 |
 
 Nothing is computed here: the SWE numbers are the model's, the river values are EQ's daily means. Uploads are `MERGE`s keyed on the natural key, so re-running a day updates instead of duplicating (the SWE model re-reads its last 14 days and EQ revises backcasts).
 
@@ -48,7 +49,7 @@ Check `pipeline/logs/pipeline_YYYYMMDD.log`; the last block is a per-step summar
 | Normal (TIMESERIES) | `'normal'` | same start, to today + `RIVER_NORMAL_AHEAD_DAYS` (EQ publishes the normal to the end of the current year) |
 | Forecast (INSTANCE) | `'forecast'`, with `issued` (UTC) and `tag` | the latest issue per tag — EQ has `ec-ens` (15 days, 00z and 12z) and `ec-ext` (45 days); `RIVER_FORECAST_RUNS` > 1 keeps more issues per run |
 
-MERGE key: `(curve_name, data_type, day, issued, tag)` — `issued` is NULL and `tag` empty for the timeseries types, and the ON clause is null-safe. `river_stations_eq` holds the stations' coordinates (EQ places) for the map.
+MERGE key: `(curve_name, data_type, day, issued, tag)` — `issued` is NULL and `tag` empty for the timeseries types, and the ON clause is null-safe. The same step loads the **River Flow** family into `river_flow_eq` (same layout, unit m³/s; `RIVER_VARIABLES` in `eq_river_temps.py` lists the families). `river_stations_eq` holds the stations' coordinates (EQ places) for the map and, per station, the variables and curve types available.
 
 ## Reading the tables
 

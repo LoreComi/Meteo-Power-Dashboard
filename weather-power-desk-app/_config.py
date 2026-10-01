@@ -661,18 +661,29 @@ HYDRO_SWE_REGIONS: dict[str, str] = {"Austria": "AT", "Italy": "IT", "France": "
 #          May 2026); written by the refresh notebook (cell 6b)
 # `lead_tags` are the forecast tags whose latest issue gives the 7-day peak on
 # the map; `forecast_tags` are all the tags drawn in the deep dive.
+# `flow_table` (EQ only): river flow in m³/s, same layout — hourly actual as a daily
+# mean plus the daily normal; no backcast or forecast exists.
 HYDRO_RIVER_SOURCES: dict[str, dict] = {
-    "EQ":    {"table": "river_temp_eq", "stations": "river_stations_eq",
+    "EQ":    {"table": "river_temp_eq", "flow_table": "river_flow_eq", "stations": "river_stations_eq",
               "lead_tags": ["ec-ens"], "forecast_tags": ["ec-ens", "ec-ext"]},
-    "Volue": {"table": "river_temp_volue", "stations": "river_stations_volue",
+    "Volue": {"table": "river_temp_volue", "flow_table": None, "stations": "river_stations_volue",
               "lead_tags": ["ec00", "ec12"], "forecast_tags": ["ec00", "ec12"]},
 }
-HYDRO_DEEP_DIVE_RIVER_MONTHS = 14       # observed river temperature drawn in the deep dive
+HYDRO_DEEP_DIVE_RIVER_MONTHS = 14       # observed river temperature / flow drawn in the deep dive
+# How the station markers are coloured: by the temperature anomaly (red = warm)
+# or by the flow as % of its normal (red = low water).
+HYDRO_STATION_MODES: dict[str, str] = {"temperature": "Temperature anomaly", "flow": "Flow % of normal"}
 # Thresholds are indicative: discharge limits at the French plants bite from
-# roughly 25–28 °C depending on the site.
+# roughly 25–28 °C depending on the site; low-flow restrictions depend on the
+# river's regulatory minimum flow.
 RIVER_TEMP_WARM_ANOMALY_C = 2.0         # latest value this far above normal → warm (warning)
 RIVER_TEMP_HOT_C = 25.0                 # absolute level → hot (critical); a forecast peak above it → warning
 RIVER_TEMP_COLOUR_RANGE_C = 4.0         # ± anomaly that saturates the marker colour
+RIVER_FLOW_CRITICAL_PCT = 40.0          # flow at or below this % of normal → very low (critical)
+RIVER_FLOW_LOW_PCT = 60.0               # at or below → low (warning)
+RIVER_FLOW_HIGH_PCT = 160.0             # at or above → high water (notice)
+RIVER_FLOW_COLOUR_RANGE_PCT = (40.0, 160.0)   # % of normal saturating the marker colour
+RIVER_STALE_DAYS = 30                   # an observation older than this is shown with its date but neither coloured nor flagged
 HYDRO_OVERVIEW_DEFAULT_LAYER = "Reservoir levels"
 HYDRO_COLOUR_MODES: dict[str, str] = {
     "anomaly_percent": "% of normal", "anomaly_quantile": "Percentile", "anomaly": "Anomaly (GWh)",

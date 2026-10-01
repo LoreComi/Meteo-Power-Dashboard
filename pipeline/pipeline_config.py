@@ -102,7 +102,8 @@ class Settings:
     dbx_auth_type: str                   # '' = PAT in DATABRICKS_TOKEN; else passed to databricks.sql.connect(auth_type=...)
     dbx_tls_no_verify: bool
     schema: str
-    river_table: str
+    river_table: str                     # temperatures
+    river_flow_table: str                # flows (m³/s)
     river_station_table: str
     swe_table: str
     merge_chunk_rows: int
@@ -120,6 +121,10 @@ class Settings:
     @property
     def river_table_fq(self) -> str:
         return f"{self.schema}.{self.river_table}"
+
+    @property
+    def river_flow_table_fq(self) -> str:
+        return f"{self.schema}.{self.river_flow_table}"
 
     @property
     def river_station_table_fq(self) -> str:
@@ -165,6 +170,7 @@ def load_settings() -> Settings:
         dbx_tls_no_verify=_bool("DATABRICKS_TLS_NO_VERIFY", False),
         schema=os.environ.get("POWER_DESK_SCHEMA", DEFAULT_SCHEMA),
         river_table=os.environ.get("RIVER_TABLE", "river_temp_eq"),
+        river_flow_table=os.environ.get("RIVER_FLOW_TABLE", "river_flow_eq"),
         river_station_table=os.environ.get("RIVER_STATION_TABLE", "river_stations_eq"),
         swe_table=os.environ.get("SWE_TABLE", "swe_daily"),
         merge_chunk_rows=_int("MERGE_CHUNK_ROWS", 2000),

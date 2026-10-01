@@ -801,13 +801,30 @@ def _river_latest_sql(table: str, stations: str, lead_tags: tuple[str, ...]) -> 
     """
 
 
+def _river_flow_latest_sql(table: str) -> str:
+    """Latest flow observation per station with the normal of that day."""
+    return f"""
+        WITH obs AS (
+          SELECT station_key, day, value,
+                 ROW_NUMBER() OVER (PARTITION BY station_key ORDER BY day DESC) AS rn
+          FROM {SBX_SCHEMA}.{table} WHERE data_type IN ('actual', 'backcast')
+        ),
+        latest AS (SELECT station_key, day, value FROM obs WHERE rn = 1),
+        nm AS (SELECT station_key, day, value AS normal FROM {SBX_SCHEMA}.{table} WHERE data_type = 'normal')
+        SELECT l.station_key, l.day AS flow_day, l.value AS flow, n.normal AS flow_normal,
+               CASE WHEN n.normal > 0 THEN l.value / n.normal * 100 END AS flow_pct
+        FROM latest l LEFT JOIN nm n ON n.station_key = l.station_key AND n.day = l.day
+    """
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_river_latest() -> pd.DataFrame:
-    """One row per river-temperature station across every source in
-    HYDRO_RIVER_SOURCES (EQ via the local pipeline, Volue via the notebook): the
-    latest observation, its normal, the newest forecast issue's 7-day range and
-    the station coordinates, with a `source` column. A source whose tables do
-    not exist yet is skipped; never raises."""
+    """One row per river station across every source in HYDRO_RIVER_SOURCES (EQ via
+    the local pipeline, Volue via the notebook): the latest temperature, its
+    normal, the newest forecast issue's 7-day range, the latest flow with its
+    normal and % of normal (where the source has a flow table) and the station
+    coordinates, with a `source` column. A source whose tables do not exist yet
+    is skipped; never raises."""
     from _config import HYDRO_RIVER_SOURCES
     parts = []
     for source, cfg in HYDRO_RIVER_SOURCES.items():
@@ -818,50 +835,73 @@ def load_river_latest() -> pd.DataFrame:
         if df.empty:
             continue
         df["source"] = source
+        flow_cols = ["flow_day", "flow", "flow_normal", "flow_pct"]
+        if cfg.get("flow_table"):
+            try:
+                fl = run_query(_river_flow_latest_sql(cfg["flow_table"]))
+            except Exception:
+                fl = pd.DataFrame()
+            if not fl.empty:
+                df = df.merge(fl, on="station_key", how="left")
+        for c in flow_cols:
+            if c not in df.columns:
+                df[c] = None
         parts.append(df)
     if not parts:
         return pd.DataFrame()
     df = pd.concat(parts, ignore_index=True)
-    df = _dt(df, ["day", "fc_last_day"])
+    df = _dt(df, ["day", "fc_last_day", "flow_day"])
     df = _dt(df, ["fc_issued"], utc=True)
-    return _num(df, ["value", "normal", "anomaly", "fc_max7", "fc_min7", "fc_normal7", "latitude", "longitude"])
+    return _num(df, ["value", "normal", "anomaly", "fc_max7", "fc_min7", "fc_normal7", "latitude", "longitude",
+                     "flow", "flow_normal", "flow_pct"])
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_river_series(source: str, station_keys: tuple[str, ...], months: int = 14) -> pd.DataFrame:
     """Daily series for the deep dive, one source at a time: observed (backcast /
     actual) and normal over the last `months` months (normal also 60 days
-    ahead), plus the latest issue of every forecast tag. Long frame: station_key,
-    station, data_type, tag, issued, day, value."""
+    ahead), plus the latest issue of every forecast tag — for the temperature
+    table and, where the source has one, the flow table. Long frame:
+    station_key, station, variable ('temperature' | 'flow'), data_type, tag,
+    issued, day, value."""
     from _config import HYDRO_RIVER_SOURCES
     cfg = HYDRO_RIVER_SOURCES.get(source)
     if not cfg or not station_keys:
         return pd.DataFrame()
-    t = f"{SBX_SCHEMA}.{cfg['table']}"
     keys = _sql_list(station_keys)
-    try:
-        df = run_query(f"""
-            WITH obs AS (
-              SELECT station_key, station, data_type, '' AS tag, CAST(NULL AS TIMESTAMP) AS issued, day, value
-              FROM {t}
-              WHERE station_key IN ({keys}) AND data_type IN ('backcast', 'actual', 'normal')
-                AND day >= current_date() - INTERVAL {int(months) * 31} DAYS
-                AND day <= current_date() + INTERVAL 60 DAYS
-            ),
-            fc AS (
-              SELECT station_key, station, data_type, tag, issued, day, value,
-                     MAX(issued) OVER (PARTITION BY station_key, tag) AS max_issued
-              FROM {t}
-              WHERE station_key IN ({keys}) AND data_type = 'forecast' AND tag IN ({_sql_list(cfg['forecast_tags'])})
-            )
-            SELECT station_key, station, data_type, tag, issued, day, value FROM obs
-            UNION ALL
-            SELECT station_key, station, data_type, tag, issued, day, value FROM fc WHERE issued = max_issued
-        """)
-    except Exception:
+    parts = []
+    for variable, table in (("temperature", cfg["table"]), ("flow", cfg.get("flow_table"))):
+        if not table:
+            continue
+        t = f"{SBX_SCHEMA}.{table}"
+        try:
+            df = run_query(f"""
+                WITH obs AS (
+                  SELECT station_key, station, data_type, '' AS tag, CAST(NULL AS TIMESTAMP) AS issued, day, value
+                  FROM {t}
+                  WHERE station_key IN ({keys}) AND data_type IN ('backcast', 'actual', 'normal')
+                    AND day >= current_date() - INTERVAL {int(months) * 31} DAYS
+                    AND day <= current_date() + INTERVAL 60 DAYS
+                ),
+                fc AS (
+                  SELECT station_key, station, data_type, tag, issued, day, value,
+                         MAX(issued) OVER (PARTITION BY station_key, tag) AS max_issued
+                  FROM {t}
+                  WHERE station_key IN ({keys}) AND data_type = 'forecast' AND tag IN ({_sql_list(cfg['forecast_tags'])})
+                )
+                SELECT station_key, station, data_type, tag, issued, day, value FROM obs
+                UNION ALL
+                SELECT station_key, station, data_type, tag, issued, day, value FROM fc WHERE issued = max_issued
+            """)
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        df["variable"] = variable
+        parts.append(df)
+    if not parts:
         return pd.DataFrame()
-    if df.empty:
-        return df
+    df = pd.concat(parts, ignore_index=True)
     df = _dt(df, ["day"])
     df = _dt(df, ["issued"], utc=True)
     df["source"] = source
