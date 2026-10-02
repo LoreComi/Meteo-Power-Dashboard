@@ -33,7 +33,9 @@ Tables written (all read by weather-power-desk-app/_data.py):
                         Historical section reads Meteomatics for temperature; the
                         Gas Demand seed keeps Volue
   hydro_daily           Volue hydro reservoir components (WTR/SGW/BAL),
-                        actual (SA) and normal (N), per area/day since 2013
+                        actual (SA) and normal (N), per area/day: silver table
+                        since 2013 for the Western / Nordic areas, the share
+                        (since 2026-05) for SEE and the Eastern European countries
   river_temp_volue      the deltashare's 27 river-temperature stations (`riv`
   river_stations_volue  curves): daily synthetic actual + latest ec00/ec12 run,
                         in the layout of the pipeline's river_temp_eq
@@ -110,8 +112,13 @@ COUNTRY_BBOX = {
     "EE": (57.5, 59.5, 22.0, 28.0),  "LV": (55.5, 58.0, 21.0, 28.0),  "LT": (54.0, 56.5, 21.0, 26.5),
 }
 
-HYDRO_AREAS = ["FR", "CH", "AT", "IT", "NP", "ES", "SEE", "DE", "NO", "SE", "FI"]
+# Hydro areas: the silver table (long history, 2011-2013 →) covers the Western and
+# Nordic ones; SEE and the Eastern European countries exist only in the Volue
+# share (since 2026-05-19) and are read from there — cell 6 unions the two.
+HYDRO_AREAS = ["FR", "CH", "AT", "IT", "NP", "ES", "SEE", "DE", "NO", "SE", "FI",
+               "SI", "HR", "BA", "RS", "MK", "BG", "RO", "GR"]
 HYDRO_COMPONENTS = ["WTR", "SGW", "BAL"]
+VOLUE_DS = "dna_prod_silver.volue_deltashare"    # the share: river `riv` curves (6b) and the Eastern hydro areas (6)
 
 # Gold-layer ERA5 climatology: value / normal / anomaly per 0.5° grid point and
 # day. Two cells read it — 8 (the Anomaly Maps' monthly grid means) and 5 (the
@@ -708,12 +715,19 @@ if GOLD_OK:
 
 # COMMAND ----------
 
-# DBTITLE 1,6. Hydro components — actual (SA) and normal (N) since 2013
+# DBTITLE 1,6. Hydro components — actual (SA) and normal (N): silver since 2013 + the share for the Eastern areas
+# The silver hydro_reservoir table carries only the Western / Nordic areas (and
+# their bidding-zone sub-areas). The Volue share's reservoir_hydro view adds SEE
+# and the Eastern European countries with the same curve families
+# (`res <area> hydro <wtr|sgw|bal> gwh cet h sa` and `… h n`), but only since
+# 2026-05-19 and with the normal published to date only — so those areas have an
+# anomaly vs normal and no percentile until a year has completed. Every area is
+# taken from the silver table when it is there, from the share otherwise.
 hydro_area_sql = ",".join(f"'{a}'" for a in HYDRO_AREAS)
 comp_blocks = []
 for comp in HYDRO_COMPONENTS:
     comp_blocks.append(f"""
-    SELECT area, '{comp}' AS component, {CET_DAY} AS day, data_type, AVG(value) AS value
+    SELECT UPPER(area) AS area, '{comp}' AS component, {CET_DAY} AS day, data_type, AVG(value) AS value
     FROM {VOLUE}.hydro_reservoir
     WHERE UPPER(area) IN ({hydro_area_sql}) AND data_type IN ('SA', 'N')
       AND array_contains(categories, 'RES') AND array_contains(categories, 'HYDRO')
@@ -722,12 +736,30 @@ for comp in HYDRO_COMPONENTS:
     GROUP BY area, {CET_DAY}, data_type
     """)
 
+_silver_areas = {r[0] for r in spark.sql(f"SELECT DISTINCT UPPER(area) FROM {VOLUE}.hydro_reservoir "
+                                         f"WHERE UPPER(area) IN ({hydro_area_sql})").collect()}
+HYDRO_SHARE_AREAS = [a for a in HYDRO_AREAS if a not in _silver_areas]
+print(f"hydro areas from the silver table: {sorted(_silver_areas)}; from the share: {HYDRO_SHARE_AREAS}")
+share_blocks = []
+for comp in HYDRO_COMPONENTS:
+    names = ",".join(f"'res {a.lower()} hydro {comp.lower()} gwh cet h {k}'" for a in HYDRO_SHARE_AREAS for k in ("sa", "n"))
+    share_blocks.append(f"""
+    SELECT UPPER(split(curve_name, ' ')[1]) AS area, '{comp}' AS component, {CET_DAY} AS day,
+           CASE WHEN curve_name LIKE '% sa' THEN 'SA' ELSE 'N' END AS data_type, AVG(value) AS value
+    FROM {VOLUE_DS}.reservoir_hydro
+    WHERE curve_name IN ({names})
+    GROUP BY split(curve_name, ' ')[1], {CET_DAY}, CASE WHEN curve_name LIKE '% sa' THEN 'SA' ELSE 'N' END
+    """)
+
 spark.sql(f"""
 CREATE OR REPLACE TABLE {SBX}.hydro_daily AS
-SELECT UPPER(area) AS area, component, day, data_type, value, current_timestamp() AS snapshot_ts
-FROM ({" UNION ALL ".join(comp_blocks)})
+SELECT area, component, day, data_type, value, current_timestamp() AS snapshot_ts
+FROM ({" UNION ALL ".join(comp_blocks + (share_blocks if HYDRO_SHARE_AREAS else []))})
 """)
 count("hydro_daily")
+for _r in spark.sql(f"SELECT area, MIN(day) first_day, MAX(day) last_day, COUNT(DISTINCT component) comps "
+                    f"FROM {SBX}.hydro_daily WHERE data_type = 'SA' GROUP BY area ORDER BY area").collect():
+    print(f"  {_r['area']:5s} {_r['first_day']} -> {_r['last_day']}  {_r['comps']} components")
 
 # COMMAND ----------
 

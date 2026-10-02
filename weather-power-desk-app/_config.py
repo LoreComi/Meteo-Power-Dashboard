@@ -579,12 +579,17 @@ ANALOG_N_YEARS = 5
 # ══════════════════════════════════════════════════════════════════════════════
 # HYDRO (see _hydro_quantify.py for the maths)
 # ══════════════════════════════════════════════════════════════════════════════
-# Country -> Volue hydro `area` value in the shared table. Italy is stored as
-# IT in the silver hydro table (the wapi report used 'it-nord'); SEE as SEE.
+# Country -> Volue hydro `area` value in hydro_daily. Italy is stored as IT in
+# the silver hydro table (the wapi report used 'it-nord'). The Western / Nordic
+# areas come from the silver table (history since 2011–2013); SEE and the
+# Eastern European countries exist only in the Volue share (since May 2026), so
+# they carry an anomaly vs the provider normal but no percentile yet.
 HYDRO_AREA_CODES: dict[str, str] = {
     "France": "FR", "Switzerland": "CH", "Austria": "AT", "Italy": "IT",
     "Nordics": "NP", "Spain": "ES", "SEE": "SEE", "Germany": "DE",
     "Norway": "NO", "Sweden": "SE", "Finland": "FI",
+    "Slovenia": "SI", "Croatia": "HR", "Bosnia and Herzegovina": "BA", "Serbia": "RS",
+    "North Macedonia": "MK", "Bulgaria": "BG", "Romania": "RO", "Greece": "GR",
 }
 HYDRO_COMPONENTS = {"Reservoir levels": "WTR", "Groundwater": "SGW", "Hydro balance": "BAL"}
 HYDRO_START_YEAR = 2013
@@ -607,8 +612,17 @@ HYDRO_MAP_REGIONS: dict[str, dict] = {
     "NO":  {"name": "Norway",            "iso3": ["NOR"]},
     "SE":  {"name": "Sweden",            "iso3": ["SWE"]},
     "FI":  {"name": "Finland",           "iso3": ["FIN"]},
+    # Eastern Europe — the Volue share's own country series (since May 2026)
+    "SI":  {"name": "Slovenia",          "iso3": ["SVN"]},
+    "HR":  {"name": "Croatia",           "iso3": ["HRV"]},
+    "BA":  {"name": "Bosnia and Herzegovina", "iso3": ["BIH"]},
+    "RS":  {"name": "Serbia",            "iso3": ["SRB"]},
+    "MK":  {"name": "North Macedonia",   "iso3": ["MKD"]},
+    "BG":  {"name": "Bulgaria",          "iso3": ["BGR"]},
+    "RO":  {"name": "Romania",           "iso3": ["ROU"]},
+    "GR":  {"name": "Greece",            "iso3": ["GRC"]},
     "NP":  {"name": "Nordics",           "iso3": ["SWE", "NOR", "FIN"], "aggregate": True},
-    "SEE": {"name": "South-East Europe", "iso3": ["SRB", "HRV", "BIH", "SVN", "MNE", "MKD", "BGR", "ROU"],
+    "SEE": {"name": "South-East Europe", "iso3": ["SRB", "HRV", "BIH", "SVN", "MNE", "MKD", "BGR", "ROU", "GRC"],
             "aggregate": True},
 }
 # Where each painted country's label sits (lat, lon) — nudged so that the Alpine
@@ -616,8 +630,8 @@ HYDRO_MAP_REGIONS: dict[str, dict] = {
 HYDRO_MAP_LABEL_POS: dict[str, tuple[float, float]] = {
     "FRA": (46.0, 0.6), "CHE": (47.3, 8.6), "AUT": (48.3, 15.2), "ITA": (42.6, 12.6), "ESP": (40.0, -3.7),
     "DEU": (51.6, 10.2), "NOR": (61.0, 7.8), "SWE": (63.2, 15.6), "FIN": (64.6, 27.2),
-    "SVN": (46.1, 14.9), "HRV": (45.4, 16.4), "BIH": (44.2, 17.8), "SRB": (44.0, 20.9),
-    "MNE": (42.8, 19.3), "MKD": (41.6, 21.7), "BGR": (42.7, 25.4), "ROU": (45.9, 25.0),
+    "SVN": (46.3, 14.6), "HRV": (45.6, 16.0), "BIH": (44.0, 17.6), "SRB": (44.2, 20.8),
+    "MNE": (42.8, 19.3), "MKD": (41.5, 21.7), "BGR": (42.8, 25.3), "ROU": (46.0, 25.0), "GRC": (39.6, 22.0),
 }
 HYDRO_MAP_EXTENT = {"lat_min": 35.5, "lat_max": 71.0, "lon_min": -11.0, "lon_max": 32.0}
 

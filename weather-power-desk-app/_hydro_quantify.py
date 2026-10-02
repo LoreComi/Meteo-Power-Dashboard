@@ -94,9 +94,13 @@ def build_climatology(actual: pd.Series, norm: pd.Series | None = None,
                    one float column per completed historical year plus 'norm'
       current_year Series of this year's values on the same dummy calendar
       years        list of completed historical years (ints)
-      norm_source  'volue' or 'mean_of_years'
-    Mirrors the originals exactly: leap day removed, partial years skipped for
-    hydro balance, the Volue norm read off the most recent completed year.
+      norm_source  'volue' (a complete normal year), 'mean_of_years' (no provider
+                   normal) or 'volue_partial' (a series younger than a year: the
+                   provider normal by day of year, no percentile possible)
+    Mirrors the originals exactly where the originals apply: leap day removed,
+    partial years skipped for hydro balance, the Volue norm read off the most
+    recent completed year. This year's values are placed by day of year, which
+    is the report's positional mapping whenever the year is complete from 1 Jan.
     """
     today = today or dt.date.today()
     actual = _strip_leap_day(actual.dropna())
@@ -123,6 +127,10 @@ def build_climatology(actual: pd.Series, norm: pd.Series | None = None,
     df_years = df_years.dropna(axis=1, how="all")
     hist_years = [int(c) for c in df_years.columns]
 
+    def _doy(idx: pd.DatetimeIndex) -> np.ndarray:
+        """Day of year on the 365-day dummy calendar (29 Feb already removed)."""
+        return (idx.dayofyear - (idx.is_leap_year & (idx.month > 2)).astype(int)).values
+
     if norm is not None and not norm.dropna().empty:
         norm = _strip_leap_day(norm.dropna())
         ny = [y for y in sorted(norm.index.year.unique()) if (norm.index.year == y).sum() == 365]
@@ -130,18 +138,37 @@ def build_climatology(actual: pd.Series, norm: pd.Series | None = None,
         if ref_year is not None:
             df_years["norm"] = norm[norm.index.year == ref_year].values
             norm_source = "volue"
-        else:
+        elif hist_years:
             df_years["norm"] = df_years[hist_years].mean(axis=1)
             norm_source = "mean_of_years"
+        else:
+            # A series that started this year (the Volue share's Eastern European
+            # areas, from May 2026): no complete normal year yet, no history — take
+            # the provider normal by day of year from what exists. Anomaly and the
+            # week move work; the percentile needs completed years and stays empty.
+            col = pd.Series(np.nan, index=dates)
+            by_doy = norm.groupby(_doy(norm.index)).mean()
+            col.iloc[by_doy.index.values - 1] = by_doy.values
+            df_years["norm"] = col.values
+            norm_source = "volue_partial"
     else:
-        df_years["norm"] = df_years[hist_years].mean(axis=1)
+        df_years["norm"] = df_years[hist_years].mean(axis=1) if hist_years else np.nan
         norm_source = "mean_of_years"
 
     df_years["Month"] = df_years.index.month
     df_years["Day"] = df_years.index.day
 
-    this_year = actual[actual.index.year == today.year]
-    this_year = pd.Series(this_year.values, index=dates[: len(this_year)], name="current")
+    # This year's values on the dummy calendar, placed by day of year — identical
+    # to the report's positional mapping when the year is complete from 1 Jan,
+    # and right for a series that starts (or has a gap) later in the year.
+    ty = actual[actual.index.year == today.year]
+    this_year = pd.Series(np.nan, index=dates, name="current")
+    if not ty.empty:
+        doy = _doy(ty.index)
+        this_year.iloc[doy - 1] = ty.values
+        this_year = this_year.iloc[: int(doy[-1])]
+    else:
+        this_year = this_year.iloc[:0]
 
     return {"climatology": df_years, "current_year": this_year,
             "years": hist_years, "norm_source": norm_source}
@@ -165,34 +192,40 @@ def quantify_anomaly(clim: dict, today: dt.date | None = None) -> dict:
         return {}
 
     last_idx = this_year.index[-1]
-    norm_today = float(df_years.loc[last_idx, "norm"])
+    norm_today = float(df_years.loc[last_idx, "norm"])          # NaN when the normal does not cover the day
     anom = float(this_year.iloc[-1] - norm_today)
-    anom_pct = float(this_year.iloc[-1] / norm_today * 100) if norm_today else np.nan
+    anom_pct = float(this_year.iloc[-1] / norm_today * 100) if norm_today and not np.isnan(norm_today) else np.nan
 
     if len(this_year) > 7:
         w_idx = this_year.index[-7]
         norm_w = float(df_years.loc[w_idx, "norm"])
         anom_w = float(this_year.iloc[-7] - norm_w)
-        anom_w_pct = float(this_year.iloc[-7] / norm_w * 100) if norm_w else np.nan
+        anom_w_pct = float(this_year.iloc[-7] / norm_w * 100) if norm_w and not np.isnan(norm_w) else np.nan
     else:
         anom_w, anom_w_pct = np.nan, np.nan
 
     # percentile of this week's mean vs the same calendar week across history
     pos = df_years.index.get_loc(last_idx)
     lo = max(0, pos - 7)
-    this_week_hist = df_years.iloc[lo:pos][years].astype(float).mean(axis=0).dropna()
+    this_week_hist = df_years.iloc[lo:pos][years].astype(float).mean(axis=0).dropna() if years else pd.Series(dtype=float)
     this_week = float(this_year.iloc[-8:].mean())
     quant = float(stats.percentileofscore(this_week_hist.values, this_week)) if len(this_week_hist) else np.nan
+
+    def _r(x, nd=None):
+        """round(), or None when the value is undefined (a normal that does not cover the day)."""
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return None
+        return round(x, nd) if nd is not None else round(x)
 
     return {
         "as_of": last_idx.replace(year=today.year) if last_idx.month <= today.month else last_idx,
         "latest_value": float(this_year.iloc[-1]),
-        "norm_today": norm_today,
-        "anomaly": round(anom),
-        "anomaly_percent": round(anom_pct) if not np.isnan(anom_pct) else None,
-        "anomaly_quantile": round(quant, 1) if not np.isnan(quant) else None,
-        "anomaly_w-1": round(anom_w) if not np.isnan(anom_w) else None,
-        "anomaly_percent_w-1": round(anom_w_pct) if not np.isnan(anom_w_pct) else None,
+        "norm_today": None if np.isnan(norm_today) else norm_today,
+        "anomaly": _r(anom),
+        "anomaly_percent": _r(anom_pct),
+        "anomaly_quantile": _r(quant, 1),
+        "anomaly_w-1": _r(anom_w),
+        "anomaly_percent_w-1": _r(anom_w_pct),
         "week_change_pct_points": (round(anom_pct - anom_w_pct)
                                    if not (np.isnan(anom_pct) or np.isnan(anom_w_pct)) else None),
         "n_hist_years": int(len(this_week_hist)),
@@ -215,10 +248,11 @@ def stats_text(family_title: str, per_country: dict[str, dict]) -> str:
         if not q:
             lines += ["no data", "*** "]
             continue
-        lines.append(f"current anomaly = {q['anomaly']}GWh, at {q['anomaly_percent']}% of seasonal normal")
-        lines.append(f"standing at {q['anomaly_quantile']}th percentile of the distribution")
-        lines.append(f"last week anomaly = {q['anomaly_w-1']}GWh, at {q['anomaly_percent_w-1']}% of seasonal normal")
-        lines.append(f"variation of {q['week_change_pct_points']}% compared to previous week")
+        na = lambda v: "n/a" if v is None else v   # noqa: E731 — a series without a normal for the day
+        lines.append(f"current anomaly = {na(q['anomaly'])}GWh, at {na(q['anomaly_percent'])}% of seasonal normal")
+        lines.append(f"standing at {na(q['anomaly_quantile'])}th percentile of the distribution")
+        lines.append(f"last week anomaly = {na(q['anomaly_w-1'])}GWh, at {na(q['anomaly_percent_w-1'])}% of seasonal normal")
+        lines.append(f"variation of {na(q['week_change_pct_points'])}% compared to previous week")
         lines.append("*** ")
     lines.append("")
     return "\n".join(lines)

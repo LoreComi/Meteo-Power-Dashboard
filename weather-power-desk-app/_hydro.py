@@ -80,10 +80,10 @@ def _pct_class(q: float | None) -> str:
 
 
 def _level_text(q: dict, layer: str) -> str:
-    """'92%' for a level series, '-1,215' (unit vs norm) for an anomaly series."""
+    """'92%' for a level series, '-1,215' (unit vs norm) for an anomaly series, '—' without a normal."""
     if HYDRO_OVERVIEW_LAYERS[layer]["level"] == "percent" and q.get("anomaly_percent") is not None:
         return f"{q['anomaly_percent']:.0f}%"
-    return f"{q['anomaly']:+,.0f}"
+    return f"{q['anomaly']:+,.0f}" if q.get("anomaly") is not None else "—"
 
 
 def _week_move(q: dict, layer: str) -> tuple[float | None, str]:
@@ -344,11 +344,13 @@ def _hover_html(area: str, cfg: dict, layer: str, metrics: dict[str, dict[str, d
         as_of_s = f" · {pd.Timestamp(as_of):%d %b}" if as_of is not None else ""
         head = f"<b>{lyr}</b>" if lyr == layer else lyr
         lines.append(f"{head}: {q['latest_value']:,.0f} {unit}{as_of_s}")
-        bits = [f"{q['anomaly']:+,.0f} {unit} vs norm"]
+        bits = [f"{q['anomaly']:+,.0f} {unit} vs norm" if q.get("anomaly") is not None else "no normal for the day"]
         if HYDRO_OVERVIEW_LAYERS[lyr]["level"] == "percent" and q.get("anomaly_percent") is not None:
             bits.append(f"{q['anomaly_percent']}% of normal")
         if q.get("anomaly_quantile") is not None:
             bits.append(f"{ordinal(round(q['anomaly_quantile']))} pct of {q['n_hist_years']} yrs")
+        elif not q.get("n_hist_years"):
+            bits.append("no history yet for a percentile")
         wk, wunit = _week_move(q, lyr)
         if wk is not None:
             bits.append(f"Δ week {_fmt_move(wk, wunit)}")
@@ -564,6 +566,10 @@ def _render_deep_dive(area: str, metrics: dict[str, dict[str, dict]], rivers: li
                                 use_container_width=True, key=f"hy_dd_chart_{area}_{i}")
                 if clim["norm_source"] == "mean_of_years":
                     st.caption("norm = mean of completed years (no provider normal for this series)")
+                elif clim["norm_source"] == "volue_partial":
+                    first = actual.dropna().index.min()
+                    st.caption(f"series starts {pd.Timestamp(first):%d %b %Y} (the Volue share) — anomaly vs the provider "
+                               "normal only; the percentile and the grey history need completed years")
             i += 1
     elif stations:
         flags = [(lvl, r["name"], t) for r in stations for lvl, t in r["flags"]]
@@ -758,12 +764,13 @@ def _country_kpis(country: str, q: dict, unit: str) -> list[str]:
     if not q:
         return [kpi_card(country, "N/A")]
     anom = q["anomaly"]
-    up = anom >= 0
-    cls = "kpi-card-cool" if up else "kpi-card-warm"
+    up = (anom or 0) >= 0
+    cls = ("kpi-card-cool" if up else "kpi-card-warm") if anom is not None else "kpi-card-neutral"
     d_cls = "kpi-delta-down" if up else "kpi-delta-up"     # more water = blue
     pct = q["anomaly_percent"]
     delta = f'<div class="kpi-delta {d_cls}">{"▲" if up else "▼"} {abs(anom):,.0f} GWh vs norm · {pct}% of normal</div>' \
-        if pct is not None else ""
+        if (pct is not None and anom is not None) else \
+        ('<div class="kpi-delta kpi-delta-flat">no normal for the latest day</div>' if anom is None else "")
     wk = q.get("week_change_pct_points")
     wk_html = (f'<div class="kpi-rank">{wk:+d} pts vs last week</div>' if wk is not None else "")
     val = kpi_card(f"{country} · latest", f"{q['latest_value']:,.0f} GWh", cls, delta, wk_html)
@@ -843,10 +850,13 @@ def _render_family(family: str, avail: pd.DataFrame):
             st.plotly_chart(make_hydro_climatology_chart(clim, hist, recent, f"{c} — {family.lower()}", fam["unit"]),
                             use_container_width=True)
             if q:
-                st.caption(f"current anomaly = {q['anomaly']:+,} GWh, at {q['anomaly_percent']}% of seasonal normal · "
-                           f"{q['anomaly_quantile']}th percentile · last week {q['anomaly_w-1']:+,} GWh "
-                           f"({q['anomaly_percent_w-1']}%) · variation {q['week_change_pct_points']:+d}% "
-                           + ("· norm = mean of years" if clim["norm_source"] == "mean_of_years" else ""))
+                def _s(v, f="{:+,}"):
+                    return "n/a" if v is None else f.format(v)
+                st.caption(f"current anomaly = {_s(q['anomaly'])} GWh, at {_s(q['anomaly_percent'], '{}')}% of seasonal normal · "
+                           f"{_s(q['anomaly_quantile'], '{}')}th percentile · last week {_s(q['anomaly_w-1'])} GWh "
+                           f"({_s(q['anomaly_percent_w-1'], '{}')}%) · variation {_s(q['week_change_pct_points'], '{:+d}')}% "
+                           + ("· norm = mean of years" if clim["norm_source"] == "mean_of_years" else "")
+                           + ("· series younger than a year (Volue share): no percentile" if clim["norm_source"] == "volue_partial" else ""))
         i += 1
 
     txt = stats_text(fam["stats_title"], {c: results[c][1] for c in countries})
