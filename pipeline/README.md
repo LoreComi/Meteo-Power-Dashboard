@@ -7,13 +7,16 @@ A local, daily job that feeds two inputs the Hydro overview can show but Databri
 | Snow water equivalent | the internal Exolabs model — `Hydro_Report/SWE_Exolabs/Scripts/SWE_main.py`, run by `102_SWE_lorenzo.bat` — read from its CSVs in `Output_files/CSVs` | `dna_snbx_weather.power_desk.swe_daily` | Alps + 4 countries × 3 bands + 34 catchments + 34 × 10 height bands ≈ 390 (× 30 days re-uploaded) |
 | River temperatures | Energy Quantified, the client and key of `Lorenzo_Trainee/EQ_project/eq_fundamentals.py`; every `<AREA> @<River>-<Site> River Temperature °C H Backcast / Normal / Forecast / Actual` curve EQ has — discovered from EQ's metadata (23 stations today: FR 8, DE 14, HU 1), so a new station or area appears by itself; set `RIVER_AREAS=FR` to restrict | `…power_desk.river_temp_eq`, `…power_desk.river_stations_eq` | 23 stations × (45 backcast days + 45 + 400 normal days + 2 forecast issues) ≈ 11 000 |
 | River flows | Energy Quantified `<AREA> @<River>-<Site> River Flow m^3/s H Actual` (hourly, stored as the daily mean) and `… D Normal` — the 8 French stations today, Fessenheim without a normal; no backcast or forecast exists | `…power_desk.river_flow_eq` (same layout as the temperature table, unit m³/s) | 8 × (45 + 445) ≈ 4 000 |
+| Morning Call input | Energy Quantified consumption temperature, wind and solar production, hydro precipitation energy — every model (`ec-ens ec gfs-ens gfs aifs-ens aifs icon ecsr` + `ec-ext gfs-ext` from the Medium-term curves) and every cycle, on the Morning Report's regions, with the EQ normals (`eq_morning.py`) | `…power_desk.morning_daily_eq` | per run: the issues of the last 36 h ≈ 20 000 rows; run it every couple of hours (`run_morning.bat`) |
 
 Nothing is computed here: the SWE numbers are the model's, the river values are EQ's daily means. Uploads are `MERGE`s keyed on the natural key, so re-running a day updates instead of duplicating (the SWE model re-reads its last 14 days and EQ revises backcasts).
 
 ```
 pipeline/
-├── run_daily.bat        what Task Scheduler runs: activates snow_obs, calls run_daily.py
-├── run_daily.py         orchestrator — steps swe-model · swe · rivers, each isolated; exit 1 if any failed
+├── run_daily.bat        the daily task: activates snow_obs, calls run_daily.py (all steps)
+├── run_morning.bat      the frequent task: run_daily.py --only morning (EQ Morning Call feed, every 2 h)
+├── run_daily.py         orchestrator — steps swe-model · swe · rivers · morning, each isolated; exit 1 if any failed
+├── eq_morning.py        EQ Morning Call input → morning_daily_eq
 ├── pipeline_config.py   settings from pipeline/.env (copy env_example.txt) and the environment
 ├── dbx_upload.py        MERGE-into-Delta writer over the Databricks SQL connector (+ a dry-run writer)
 ├── swe_upload.py        SWE CSVs → swe_daily
@@ -31,7 +34,10 @@ pipeline/
    P:\QFA\TonyWeather\Power_dashboard\pipeline\run_daily.bat --skip-swe-model --backfill
    ```
    `--backfill` uploads the whole SWE history (2017 →: Alps + countries + catchments ≈ 157 k rows, ~6 min in 2 000-row MERGEs; with height bands another ~1.1 M rows, ~45 min — hence `--no-heightbands` for the first load; the daily run then fills the height bands' last 30 days, or run `--only swe --backfill` later for their full history) and every river curve from `RIVER_HISTORY_START` (2014; EQ's river backcasts begin in 2015; ≈ 70 k rows, ~5 min). Later runs are incremental and take a couple of minutes. A curve that is new to the table is backfilled automatically. First load done on 2026-10-01 from this repo.
-4. Schedule: Task Scheduler → Create Task → *Run whether user is logged on or not* → Action `cmd.exe` with arguments `/c "P:\QFA\TonyWeather\Power_dashboard\pipeline\run_daily.bat"` → daily trigger at **11:30** (Exolabs publishes the day's raster around 10:45; before that `SWE_main.py` processes yesterday). The P: drive must be mapped for the task's account, or use the UNC path `\\vfbdn111.prod.axponet.ch\Projekte$\QFA\TonyWeather\...` like the model's own `.bat` does.
+4. Schedule, two tasks in Task Scheduler (*Run whether user is logged on or not*, action `cmd.exe`):
+   - `/c "P:\QFA\TonyWeather\Power_dashboard\pipeline\run_daily.bat"` — daily at **11:30** (Exolabs publishes the day's raster around 10:45; before that `SWE_main.py` processes yesterday). SWE model, SWE upload, rivers, and the Morning Call feed once.
+   - `/c "P:\QFA\TonyWeather\Power_dashboard\pipeline\run_morning.bat"` — daily at **02:30, repeating every 2 hours for 22 hours**. Each run loads the EQ issues of the last 30 h, so the 08:00 run has every model's 00z and each 06/12/18 cycle is in the dashboard within two hours of EQ publishing it. A run takes about 10 minutes (~190 EQ calls: EQ caps `limit` at 24 instances per call, so the models are requested in cycle groups; plus the Medium-term curves and the normals). Do not schedule two pipeline tasks at the same minute — `conda run` trips over its own temp file when two start together.
+   The P: drive must be mapped for the task's account, or use the UNC path `\\vfbdn111.prod.axponet.ch\Projekte$\QFA\TonyWeather\...` like the model's own `.bat` does.
 
 Check `pipeline/logs/pipeline_YYYYMMDD.log`; the last block is a per-step summary.
 

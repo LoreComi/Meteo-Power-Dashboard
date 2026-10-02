@@ -358,17 +358,22 @@ def load_meteologica_members(metric: str, areas: tuple[str, ...]) -> pd.DataFram
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_morning_daily() -> pd.DataFrame:
-    """Daily 'Avg' values per run from the sandbox morning_daily table.
-
-    Written by power_desk_refresh.py from Volue ensemble curves (ec00ens, etc.).
+def load_morning_daily(source: str = "EQ") -> pd.DataFrame:
+    """Daily values per run for the Morning Call, from the chosen source's table
+    (MORNING_SOURCES): 'EQ' = morning_daily_eq written by Power_dashboard/pipeline
+    (every model and cycle, the issue time is the real one); 'Volue' = the
+    notebook's morning_daily (00z/12z 'Avg' curves, the issue DAY in reference_date).
     Columns: provider, family (tt/wnd/spv/rre), region, pattern, reference_date,
-    day, value, n_points, normal.
+    day, value, n_points, normal, init_time, init_date. Only the last
+    lookback_days of issues are read.
     """
+    from _config import MORNING_SOURCES
+    cfg = MORNING_SOURCES[source]
     df = run_query(f"""
         SELECT provider, family, region, pattern, reference_date, day,
                value, n_points, normal
-        FROM {SBX_SCHEMA}.morning_daily
+        FROM {SBX_SCHEMA}.{cfg['table']}
+        WHERE reference_date >= current_timestamp() - INTERVAL {int(cfg.get('lookback_days', 10))} DAYS
         ORDER BY family, region, pattern, day
     """)
     if df.empty:
@@ -376,8 +381,12 @@ def load_morning_daily() -> pd.DataFrame:
     df = _dt(df, ["reference_date"], utc=True)
     df = _dt(df, ["day"])
     df = _num(df, ["value", "n_points", "normal"])
-    # Volue patterns: CET issue day + cycle; Meteomatics: nearest cycle to created_at
-    df["init_time"] = [init_time_for(p, r) for r, p in zip(df["reference_date"], df["pattern"])]
+    if source == "EQ":
+        # EQ's reference_date is the issue time itself (00/06/12/18 UTC)
+        df["init_time"] = df["reference_date"].dt.floor("h")
+    else:
+        # Volue patterns: CET issue day + cycle; Meteomatics: nearest cycle to created_at
+        df["init_time"] = [init_time_for(p, r) for r, p in zip(df["reference_date"], df["pattern"])]
     df["init_date"] = df["init_time"].dt.normalize()
     return df
 

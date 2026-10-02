@@ -513,6 +513,36 @@ BRIEF_CSS = f"""
 </style>
 """
 
+# Morning Call phone layout: the page narrows to one column, paddings shrink, the
+# tables grow to a thumb-readable size. Injected only while "Phone" is selected.
+PHONE_CSS = f"""
+<style>
+.main .block-container {{ padding: 10px 10px 24px !important; margin-top: 6px !important; border-radius: 8px; }}
+[data-testid="stSidebar"] {{ display: none; }}
+[data-testid="collapsedControl"] {{ display: block; }}
+h4 {{ font-size: 0.8rem !important; }}
+.mc-block {{ padding: 8px 8px 4px; margin-bottom: 10px; }}
+.mcp-table {{ width: 100%; border-collapse: collapse; font-size: 1.0rem; table-layout: fixed; }}
+.mcp-table th {{
+    font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted);
+    padding: 4px 4px; border-bottom: 1px solid var(--border); text-align: right; line-height: 1.2;
+}}
+.mcp-table th:first-child, .mcp-table td:first-child {{ text-align: left; }}
+.mcp-table th .mcg-date {{ display: block; font-weight: 500; text-transform: none; letter-spacing: 0; font-size: 0.62rem; }}
+.mcp-table td {{
+    padding: 9px 4px; border-bottom: 1px solid var(--border); text-align: right;
+    font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; font-size: 1.0rem;
+}}
+.mcp-table td.mc-region {{ font-family: 'Inter', sans-serif; font-weight: 600; font-size: 0.95rem; }}
+.mcp-table tr:last-child td {{ border-bottom: none; }}
+.mcp-table td .mcp-sub {{ display: block; font-size: 0.74rem; color: var(--text-muted); }}
+.mcp-title {{ font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-secondary); margin: 2px 0 4px; }}
+.mcp-title span {{ font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text-muted); margin-left: 6px; }}
+.agent-card {{ margin-bottom: 8px; }}
+.stButton > button {{ width: 100%; }}
+</style>
+"""
+
 PLOTLY_LAYOUT = dict(
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor=SURFACE,

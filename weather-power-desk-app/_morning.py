@@ -29,9 +29,13 @@ reference run's numbers and write the commentary (see _ai_brief.py). Week 3 is
 still reached: it is handed to the agents whenever the reference run has enough
 days in it, which is normal for EC-Extended and rare for EC-ENS.
 
-Data: {SBX_SCHEMA}.morning_daily, written by power_desk_refresh.py from the
-exact wapi curve names, daily CET means ('Avg' tag) per run, with the normal;
-plus Meteomatics population-weighted country means (temperature only) on the report regions.
+Data (MORNING_SOURCES): by default {SBX_SCHEMA}.morning_daily_eq — Energy
+Quantified, every model EQ has and every cycle (00/06/12/18), with the EQ
+normal, refreshed every couple of hours by Power_dashboard/pipeline/run_morning.bat,
+so the grid opens on the latest issue and the agents brief about it; or
+{SBX_SCHEMA}.morning_daily — the notebook's Volue 'Avg' curves (00z/12z) with
+the Volue normal plus Meteomatics means. Layout: PC (the full grid) or Phone
+(one window, the reference run plus one compare column, big type).
 """
 from __future__ import annotations
 
@@ -43,13 +47,13 @@ import pandas as pd
 import streamlit as st
 
 from _config import (
-    MORNING_BLOCKS, MORNING_MIN_DAY_COVERAGE, MORNING_MODEL_LABELS, MORNING_DEFAULT_REFERENCE_PATTERN,
-    MORNING_DEFAULT_COMPARE_PATTERNS, MORNING_PREV_RULES, MORNING_PRECIP_SUM_DAYS, EXPECTED_HORIZON,
+    MORNING_BLOCKS, MORNING_MIN_DAY_COVERAGE, MORNING_MODEL_LABELS, MORNING_PREV_RULES, MORNING_PRECIP_SUM_DAYS,
+    EXPECTED_HORIZON, MORNING_SOURCES, MORNING_DEFAULT_SOURCE, MORNING_PHONE_MAX_COMPARE,
     AI_BRIEF_MODEL, AI_BRIEF_MAX_TOKENS, AI_BRIEF_SYNTHESIS_MAX_TOKENS, AI_POWER_AGENTS, AI_GAS_AGENTS,
     SCENARIO_MIN_WEEK_DAYS,
 )
 from _data import load_morning_daily
-from _style import BRIEF_CSS, INK_MUTED, CAT_BLUE, STATUS_CRITICAL, DIV_NEG, DIV_MID, DIV_POS
+from _style import BRIEF_CSS, PHONE_CSS, INK_MUTED, CAT_BLUE, STATUS_CRITICAL, DIV_NEG, DIV_MID, DIV_POS
 from _ui import status_banner
 
 # What a cell shows. None = the report's triple; otherwise the grid column to put in the cell.
@@ -161,6 +165,10 @@ def block_values(cur: pd.DataFrame, prev: pd.DataFrame, block: dict, window: tup
 
 def _run_label(pattern: str, init: pd.Timestamp) -> str:
     return f"{MORNING_MODEL_LABELS.get(pattern, pattern)} {init:%H}z · {init:%a %d %b}"
+
+
+def _run_label_short(pattern: str, init: pd.Timestamp) -> str:
+    return f"{MORNING_MODEL_LABELS.get(pattern, pattern)} {init:%H}z"
 
 
 def _list_runs(df: pd.DataFrame) -> list[tuple[str, pd.Timestamp]]:
@@ -430,6 +438,48 @@ def _grid_block_html(cells: pd.DataFrame, name: str, block: dict, cols: list[Run
     return f'<div class="mc-block"><table class="mc-table mcg-table">{colgroup}{head1}{head2}{body}</table></div>'
 
 
+def _grid_block_html_phone(cells: pd.DataFrame, name: str, block: dict, cols: list[RunCol], win: dict,
+                           wkey: str, delta_label: str) -> str:
+    """One block for a phone: one window, regions as rows, the reference run's
+    triple spread over three columns (value · Δ run · Δ norm) and, for each compare
+    run, its value with its Δ vs the reference underneath."""
+    fmt, unit = block["fmt"], block["unit"]
+    is_sum = block["agg"] == "sum"
+    use = "w1" if is_sum else wkey                 # precipitation is the 15-day sum, whatever the window
+    s, e = win[use]
+    ref = cols[0]
+    short = name.split(" (")[0]
+    sub = (f"sum of the first {MORNING_PRECIP_SUM_DAYS} forecast days" if is_sum
+           else f"{win['t1'] if use == 'w1' else win['t2']} · {s:%d %b} – {e:%d %b}")
+    head = (f"<tr><th>[{unit}]</th><th>{ref.model}<span class='mcg-date'>{ref.init:%a %d %b}</span></th>"
+            f"<th>{delta_label}<span class='mcg-date'>vs {ref.prev_label}</span></th><th>Δ norm</th>")
+    for c in cols[1:]:
+        head += f"<th>{c.model}<span class='mcg-date'>{c.init:%a %d %b}<br>value · Δ vs ref</span></th>"
+    head += "</tr>"
+    span = None if is_sum else (e - s).days + 1
+    body = ""
+    for region, _ in block["rows"]:
+        sel = cells[(cells["window"] == use) & (cells["region"] == region)].set_index("col")
+        body += f"<tr><td class='mc-region'>{region}</td>"
+        if 0 not in sel.index or np.isnan(float(sel.loc[0, "value"])):
+            body += "<td><span class='mc-muted'>·</span></td><td></td><td></td>" + "<td></td>" * (len(cols) - 1) + "</tr>"
+            continue
+        r0 = sel.loc[0]
+        n_days = int(r0["n_days"])
+        sup = f"<span class='mcp-sub'>{n_days}/{span} days</span>" if span and 0 < n_days < span else ""
+        body += (f"<td>{fmt.format(float(r0['value']))}{sup}</td><td>{_fmt_delta(r0['d_run'], fmt)}</td>"
+                 f"<td>{_fmt_delta(r0['d_norm'], fmt)}</td>")
+        for i, c in enumerate(cols[1:], start=1):
+            if i not in sel.index or np.isnan(float(sel.loc[i, "value"])):
+                body += "<td><span class='mc-muted'>·</span></td>"
+                continue
+            r = sel.loc[i]
+            body += f"<td>{fmt.format(float(r['value']))}<span class='mcp-sub'>{_fmt_delta(r['d_ref'], fmt)}</span></td>"
+        body += "</tr>"
+    return (f"<div class='mc-block'><div class='mcp-title'>{short} <span>{sub}</span></div>"
+            f"<table class='mcp-table'>{head}{body}</table></div>")
+
+
 def _grid_footer(cols: list[RunCol], delta_label: str, view_key: str | None) -> str:
     """Legend for the shaded views, then one line per column: which run, paired with which."""
     out = ""
@@ -512,15 +562,19 @@ def _signal_card(label: str, subtitle: str, signal: str) -> str:
             f'<div class="agent-card-sub">{subtitle}</div></div>')
 
 
-def _render_family(result: dict, agents_meta: list[tuple[str, str, str]]) -> None:
+def _render_family(result: dict, agents_meta: list[tuple[str, str, str]], phone: bool = False) -> None:
     from _ai_brief import FAMILIES, prose_to_html
 
     signals, briefs = result["signals"], result["briefs"]
     cards = [_signal_card(label, sub, signals.get(key, "NEUTRAL")) for key, label, sub in agents_meta]
-    cols = st.columns(len(cards))
-    for col, html_ in zip(cols, cards):
-        with col:
+    if phone:
+        for html_ in cards:                      # stacked, one per row, on a narrow screen
             st.markdown(html_, unsafe_allow_html=True)
+    else:
+        cols = st.columns(len(cards))
+        for col, html_ in zip(cols, cards):
+            with col:
+                st.markdown(html_, unsafe_allow_html=True)
 
     overall = signals.get("synthesis", "NEUTRAL")
     color = _SIG_COLOR.get(overall, INK_MUTED)
@@ -543,17 +597,22 @@ def _render_family(result: dict, agents_meta: list[tuple[str, str, str]]) -> Non
     st.caption(f"Generated {result['generated_at']} · {result['label']} family")
 
 
-def _render_ai_brief(ctx: dict, today: pd.Timestamp) -> None:
+def _render_ai_brief(ctx: dict, today: pd.Timestamp, phone: bool = False) -> None:
     """Two families of agents commenting on the reference run — power and gas."""
     from _ai_brief import FAMILIES, get_az_credentials, generate_family_brief
 
     st.markdown("##### Market read — agent families")
-    st.caption("Two families comment on the reference run's numbers and nothing else: one on the power "
-               "market (temperature → load, wind & solar → residual load, precipitation → hydro), one on gas "
-               "(temperature → LDZ heating demand, wind & solar → gas-for-power). Each specialist reads "
-               "only its own rows; a synthesis agent per family nets them into a few sentences. The gas "
-               "family is additionally given the Gas Demand section's LDZ and displaced-gas figures for "
-               "these same runs, so the words and the GWh cannot drift apart.")
+    if phone:
+        st.caption(f"Commentary on the reference run — {ctx.get('run', '')}, initialised {ctx.get('run_init', '')} — "
+                   "by the power and gas agent families.")
+    else:
+        st.caption("Two families comment on the reference run's numbers and nothing else — the latest issue of the "
+                   "reference model by default, so every new cycle gets its own read: one on the power "
+                   "market (temperature → load, wind & solar → residual load, precipitation → hydro), one on gas "
+                   "(temperature → LDZ heating demand, wind & solar → gas-for-power). Each specialist reads "
+                   "only its own rows; a synthesis agent per family nets them into a few sentences. The gas "
+                   "family is additionally given the Gas Demand section's LDZ and displaced-gas figures for "
+                   "these same runs, so the words and the GWh cannot drift apart.")
     st.markdown(BRIEF_CSS, unsafe_allow_html=True)
 
     if not ctx.get("windows"):
@@ -568,11 +627,15 @@ def _render_ai_brief(ctx: dict, today: pd.Timestamp) -> None:
                       "the secret scope for a deployed app).", "warning")
         return
 
-    c1, c2, c3 = st.columns([1.3, 1.3, 4])
-    with c1:
-        run_power = st.button("Run power brief", type="primary", key="mc_brief_power")
-    with c2:
-        run_gas = st.button("Run gas brief", type="primary", key="mc_brief_gas")
+    if phone:
+        run_power = st.button("Run power brief", type="primary", key="mc_brief_power", use_container_width=True)
+        run_gas = st.button("Run gas brief", type="primary", key="mc_brief_gas", use_container_width=True)
+    else:
+        c1, c2, c3 = st.columns([1.3, 1.3, 4])
+        with c1:
+            run_power = st.button("Run power brief", type="primary", key="mc_brief_power")
+        with c2:
+            run_gas = st.button("Run gas brief", type="primary", key="mc_brief_gas")
 
     snapshot = {}
     if run_gas:
@@ -623,64 +686,111 @@ def _render_ai_brief(ctx: dict, today: pd.Timestamp) -> None:
             status_banner("The Gas Demand section's figures were unavailable, so the gas family worked "
                           "from the Morning Call table alone.", "warning")
         meta = AI_POWER_AGENTS if family == "power" else AI_GAS_AGENTS
-        _render_family(result, meta)
+        _render_family(result, meta, phone)
         st.markdown("")
 
 
 # ─── page ──────────────────────────────────────────────────────────────────────
 
+def _layout_and_source() -> tuple[str, bool]:
+    """The two switches at the top of the page: data source and PC / Phone layout.
+    `?layout=phone` in the URL opens the phone layout (bookmark it on the phone)."""
+    if "mc_source" not in st.session_state:
+        st.session_state["mc_source"] = MORNING_DEFAULT_SOURCE if MORNING_DEFAULT_SOURCE in MORNING_SOURCES else list(MORNING_SOURCES)[0]
+    if "mc_layout" not in st.session_state:
+        try:
+            qp = str(st.query_params.get("layout", "")).lower()
+        except Exception:
+            qp = ""
+        st.session_state["mc_layout"] = "Phone" if qp == "phone" else "PC"
+    t1, t2, t3 = st.columns([1.4, 1.4, 4.2])
+    with t1:
+        source = st.radio("Source", list(MORNING_SOURCES), horizontal=True, key="mc_source",
+                          help="\n".join(f"{k}: {v['desc']}" for k, v in MORNING_SOURCES.items()))
+    with t2:
+        layout = st.radio("Layout", ["PC", "Phone"], horizontal=True, key="mc_layout",
+                          help="Phone: one window at a time, one compare column, big type, stacked cards. "
+                               "Open the app with ?layout=phone to start in it.")
+    return source, layout == "Phone"
+
+
 def render_morning_call():
     st.markdown("#### MORNING CALL")
-    st.caption("The Morning Report table, live from the sandbox (morning_daily): EC-ENS 00z 'Avg' curves, "
-               "daily CET means, Volue 30-year normal — same rows, windows and deltas as "
-               "import_00z_add_solar_np_tot.py. The other models' runs sit next to it in the same grid, "
-               "each with its own change vs its previous run and its difference to the reference.")
+    source, phone = _layout_and_source()
+    src = MORNING_SOURCES[source]
+    if phone:
+        st.markdown(PHONE_CSS, unsafe_allow_html=True)
+    else:
+        st.caption(f"The Morning Report table, live — {src['desc']}. Same rows, windows and deltas as "
+                   "import_00z_add_solar_np_tot.py; the grid opens on the latest issue of the reference model, and "
+                   "the other models' runs sit next to it in the same grid, each with its own change vs its "
+                   "previous run and its difference to the reference.")
     try:
-        df = load_morning_daily()
+        df = load_morning_daily(source)
     except Exception as e:
-        st.error(f"Cannot read from the sandbox tables (morning_daily): {e}")
+        st.error(f"Cannot read from the sandbox table {src['table']}: {e}")
         return
     if df.empty:
-        status_banner("No data found in morning_daily.", "warning")
+        if source == "EQ":
+            status_banner(f"No rows in {src['table']} yet — it is written by Power_dashboard/pipeline/run_morning.bat "
+                          "(Energy Quantified). Switch Source to Volue for the notebook's table.", "warning")
+        else:
+            status_banner(f"No data found in {src['table']}.", "warning")
         return
     df = _drop_partial_days(df)
 
     runs = _list_runs(df)
     if not runs:
-        status_banner("morning_daily has rows but no run could be identified.", "critical")
+        status_banner(f"{src['table']} has rows but no run could be identified.", "critical")
         return
     run_map = {_run_label(p, t): (p, t) for p, t in runs}
     keys = list(run_map)
     latest_by_pattern: dict[str, str] = {}
     for k in keys:
         latest_by_pattern.setdefault(run_map[k][0], k)
-    ref_default = latest_by_pattern.get(MORNING_DEFAULT_REFERENCE_PATTERN, keys[0])
+    ref_default = latest_by_pattern.get(src["reference"], keys[0])
+    if st.session_state.get("mc_source_last") != source:
+        # a new source has other run keys: forget the previous selections
+        for k in ("mcg_ref", "mcg_cols", "mcp_ref", "mcp_cmp"):
+            st.session_state.pop(k, None)
+        st.session_state["mc_source_last"] = source
 
     # --- controls: reference run · compare columns · Δ pairing · what the cells show ---
-    c1, c2, c3, c4 = st.columns([1.9, 3.1, 1.9, 3.1])
-    with c1:
-        ref_key = st.selectbox("Reference run", keys, index=keys.index(ref_default), key="mcg_ref",
-                               help="The report's run. Its init day sets the two windows (weekday rule) and "
-                                    "the Δ pairing; the commentary and the CSV are built on it. EC-ENS 00z "
-                                    "is the Morning Report's.")
-    ref_pat, ref_init = run_map[ref_key]
-    cmp_default = [latest_by_pattern[p] for p in MORNING_DEFAULT_COMPARE_PATTERNS
-                   if p in latest_by_pattern and p != ref_pat]
-    with c2:
-        cmp_keys = st.multiselect("Compare columns", keys, default=cmp_default, key="mcg_cols",
-                                  help="Any runs — other models' latest, or earlier runs of the same model. "
-                                       "Each gets the same three numbers as the reference, plus its Δ vs the "
-                                       "reference. Meteomatics rows carry temperature only.")
-    with c3:
-        rule_key = st.selectbox("Δ run vs", list(MORNING_PREV_RULES), key="mcg_prev",
-                                help="The earlier run every column's Δ run is taken against — the same "
-                                     "interval for all of them, so the models' moves are comparable.")
-    with c4:
-        view = st.radio("Cells show", list(VIEWS), horizontal=True, key="mcg_view",
-                        help="Detail: abs. value with Δ run · Δ norm underneath, in every cell. The other "
-                             "views put one quantity per cell and shade it, for a one-glance read across runs.")
+    if phone:
+        with st.expander("Settings", expanded=False):
+            ref_key = st.selectbox("Reference run", keys, index=keys.index(ref_default), key="mcp_ref")
+            ref_pat, ref_init = run_map[ref_key]
+            cmp_default = [latest_by_pattern[p] for p in src["compare"]
+                           if p in latest_by_pattern and p != ref_pat][:MORNING_PHONE_MAX_COMPARE]
+            cmp_keys = st.multiselect(f"Compare (max {MORNING_PHONE_MAX_COMPARE})", keys, default=cmp_default,
+                                      key="mcp_cmp", max_selections=MORNING_PHONE_MAX_COMPARE)
+            rule_key = st.selectbox("Δ run vs", list(MORNING_PREV_RULES), key="mcg_prev")
+        view_key = None
+    else:
+        c1, c2, c3, c4 = st.columns([1.9, 3.1, 1.9, 3.1])
+        with c1:
+            ref_key = st.selectbox("Reference run", keys, index=keys.index(ref_default), key="mcg_ref",
+                                   help="The report's run. Its init day sets the two windows (weekday rule) and "
+                                        "the Δ pairing; the commentary and the CSV are built on it. Defaults to "
+                                        "the latest issue of the reference model.")
+        ref_pat, ref_init = run_map[ref_key]
+        cmp_default = [latest_by_pattern[p] for p in src["compare"] if p in latest_by_pattern and p != ref_pat]
+        with c2:
+            cmp_keys = st.multiselect("Compare columns", keys, default=cmp_default, key="mcg_cols",
+                                      help="Any runs — other models' latest, or earlier cycles of the same model. "
+                                           "Each gets the same three numbers as the reference, plus its Δ vs the "
+                                           "reference. Meteomatics rows carry temperature only.")
+        with c3:
+            rule_key = st.selectbox("Δ run vs", list(MORNING_PREV_RULES), key="mcg_prev",
+                                    help="The earlier run every column's Δ run is taken against — the same "
+                                         "interval for all of them, so the models' moves are comparable. "
+                                         "'Previous run of the same model' is the previous cycle (6 or 12 h).")
+        with c4:
+            view = st.radio("Cells show", list(VIEWS), horizontal=True, key="mcg_view",
+                            help="Detail: abs. value with Δ run · Δ norm underneath, in every cell. The other "
+                                 "views put one quantity per cell and shade it, for a one-glance read across runs.")
+        view_key = VIEWS[view]
     rule = MORNING_PREV_RULES[rule_key]
-    view_key = VIEWS[view]
 
     today = ref_init.normalize()
     win = morning_windows(today)
@@ -708,25 +818,37 @@ def render_morning_call():
         status_banner(f"{ref.prev_wanted:%a %d %b %H}z is not in the table — the reference's Δ run is taken "
                       f"against {ref.prev_label} instead.", "warning")
 
-    span1 = "weekend" if win["kind1"] == "weekend" else "weekly"
-    st.markdown(f'<div class="mc-sub">Windows follow the reference run\'s init day ({today:%A %d %b}): '
-                f'<b>{win["t1"]}</b> {win["w1"][0]:%d %b} – {win["w1"][1]:%d %b} ({span1} average) · '
-                f'<b>{win["t2"]}</b> {win["w2"][0]:%d %b} – {win["w2"][1]:%d %b} (weekly average) · '
-                f'precipitation = sum of the first {MORNING_PRECIP_SUM_DAYS} forecast days · '
-                f'{delta_label} = change vs each model\'s own earlier run · superscript = days of the window '
-                f'the run covers, when not all · hover a cell for every number.</div>', unsafe_allow_html=True)
-
-    # --- the grid ---
     cells = compute_grid(cols, win)
-    for name, block in MORNING_BLOCKS.items():
-        st.markdown(_grid_block_html(cells[cells["block"] == name], name, block, cols, win, view_key, delta_label),
-                    unsafe_allow_html=True)
-    st.markdown(_grid_footer(cols, delta_label, view_key), unsafe_allow_html=True)
+
+    if phone:
+        # --- phone: the reference run's issue up front, one window at a time ---
+        st.markdown(f"<div class='mc-sub'><b>{ref.model}</b> {ref.init:%a %d %b} · {delta_label} vs {ref.prev_label}"
+                    f"{'' if ref.prev_exact else ' (nearest earlier run)'}</div>", unsafe_allow_html=True)
+        wkey = st.radio("Window", ["w1", "w2"], horizontal=True, key="mcp_win", label_visibility="collapsed",
+                        format_func=lambda k: f"{win['t1']} · {win['w1'][0]:%d %b}–{win['w1'][1]:%d %b}" if k == "w1"
+                        else f"{win['t2']} · {win['w2'][0]:%d %b}–{win['w2'][1]:%d %b}")
+        for name, block in MORNING_BLOCKS.items():
+            st.markdown(_grid_block_html_phone(cells[cells["block"] == name], name, block, cols, win, wkey, delta_label),
+                        unsafe_allow_html=True)
+        st.caption(f"{source} · green / red = above / below · Δ norm = vs the {source} normal · "
+                   f"{len(runs)} runs in the table, latest {runs[0][1]:%a %d %b %H}z ({MORNING_MODEL_LABELS.get(runs[0][0], runs[0][0])}).")
+    else:
+        span1 = "weekend" if win["kind1"] == "weekend" else "weekly"
+        st.markdown(f'<div class="mc-sub">Windows follow the reference run\'s init day ({today:%A %d %b}): '
+                    f'<b>{win["t1"]}</b> {win["w1"][0]:%d %b} – {win["w1"][1]:%d %b} ({span1} average) · '
+                    f'<b>{win["t2"]}</b> {win["w2"][0]:%d %b} – {win["w2"][1]:%d %b} (weekly average) · '
+                    f'precipitation = sum of the first {MORNING_PRECIP_SUM_DAYS} forecast days · '
+                    f'{delta_label} = change vs each model\'s own earlier run · superscript = days of the window '
+                    f'the run covers, when not all · hover a cell for every number.</div>', unsafe_allow_html=True)
+        for name, block in MORNING_BLOCKS.items():
+            st.markdown(_grid_block_html(cells[cells["block"] == name], name, block, cols, win, view_key, delta_label),
+                        unsafe_allow_html=True)
+        st.markdown(_grid_footer(cols, delta_label, view_key), unsafe_allow_html=True)
     st.download_button("Download grid (CSV)", _grid_csv(cells, delta_label),
-                       f"morning_call_{today:%Y%m%d}.csv", "text/csv", key="mcg_dl",
+                       f"morning_call_{source.lower()}_{today:%Y%m%d}.csv", "text/csv", key="mcg_dl",
                        help="Every cell of every column: value, Δ run, Δ norm, Δ vs reference, spread.")
 
-    # --- commentary on the reference run ---
+    # --- commentary on the reference run (its latest issue by default) ---
     st.divider()
     ctx = build_brief_context(ref.rows, ref.prev_rows, win, ref.model, ref.init, ref.prev_init, delta_label, today)
-    _render_ai_brief(ctx, today)
+    _render_ai_brief(ctx, today, phone)

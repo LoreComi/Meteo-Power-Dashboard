@@ -286,9 +286,32 @@ MORNING_DEFAULT_MODEL = "EC-ENS 00z"
 # windows). Short model names per pattern for the column headers; the init
 # hour is appended, so "ec00ens" and "ec12ens" both read "EC-ENS" + "00z"/"12z".
 MORNING_MODEL_LABELS: dict[str, str] = {
+    # Volue patterns (morning_daily) and Meteomatics models
     "ec00ens": "EC-ENS", "ec12ens": "EC-ENS", "gfs00ens": "GFS-ENS", "ecmonthly": "EC-Extended",
     "ecmwf-ens": "MM EC-ENS", "ecmwf-aifs-ens": "MM AIFS-ENS",
+    # Energy Quantified tags (morning_daily_eq) — the cycle hour is appended from the issue time
+    "ec-ens": "EC-ENS", "ec": "EC Op", "gfs-ens": "GFS-ENS", "gfs": "GFS Op", "aifs-ens": "AIFS-ENS",
+    "aifs": "AIFS Op", "icon": "ICON", "ecsr": "EC short-range", "ec-ext": "EC-Extended", "gfs-ext": "GFS-Extended",
 }
+
+# Where the Morning Call reads its runs from. EQ (default) is the local pipeline's
+# morning_daily_eq — every model EQ has, every cycle (00/06/12/18), refreshed every
+# couple of hours by pipeline/run_morning.bat, so the latest issue of the reference
+# model is what the grid opens on and what the agent families brief about. Volue
+# is the notebook's morning_daily (00z/12z 'Avg' curves, 6-hourly refresh).
+MORNING_SOURCES: dict[str, dict] = {
+    "EQ":    {"table": "morning_daily_eq", "reference": "ec-ens",
+              "compare": ["gfs-ens", "aifs-ens", "ec", "gfs"], "lookback_days": 10,
+              "desc": "Energy Quantified — every model and cycle, EQ normals; loaded by Power_dashboard/pipeline "
+                      "(run_morning.bat) every couple of hours"},
+    "Volue": {"table": "morning_daily", "reference": "ec00ens",
+              "compare": ["gfs00ens", "ec12ens", "ecmwf-ens", "ecmwf-aifs-ens"], "lookback_days": 10,
+              "desc": "Volue 'Avg' curves (00z / 12z) with the Volue normal, plus Meteomatics means; "
+                      "refreshed by the notebook every 6 h"},
+}
+MORNING_DEFAULT_SOURCE = os.environ.get("MORNING_SOURCE", "EQ")
+# Phone layout: one window at a time, the reference run plus at most this many compare columns
+MORNING_PHONE_MAX_COMPARE = 1
 # The reference run is the report's: its init day sets the windows and the Δ
 # pairing, and it is what the agent families comment on.
 MORNING_DEFAULT_REFERENCE_PATTERN = "ec00ens"
@@ -752,6 +775,9 @@ LIVE_HISTORY_DAYS = 14
 EXPECTED_HORIZON: dict[str, int] = {
     "ec00ens": 15, "ec12ens": 15, "gfs00ens": 16, "ecmonthly": 46,
     "ec00": 10, "gfs00": 16,
+    # EQ tags (daily values after the partial last day is dropped)
+    "ec-ens": 15, "ec": 15, "gfs-ens": 15, "gfs": 16, "aifs-ens": 15, "aifs": 15, "icon": 4, "ecsr": 5,
+    "ec-ext": 46, "gfs-ext": 35,
 }
 
 

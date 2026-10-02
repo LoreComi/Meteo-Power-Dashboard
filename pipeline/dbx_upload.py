@@ -203,6 +203,14 @@ class DatabricksWriter:
             log.info("%s: chunk %d — %d rows merged (%d so far)", table, i, len(part), n)
         return n
 
+    def prune(self, table: str, where: str) -> None:
+        """DELETE rows matching `where` (Delta supports it) — keeps fast-growing tables bounded."""
+        try:
+            self.execute(f"DELETE FROM {table} WHERE {where}")
+            log.info("%s: pruned rows WHERE %s", table, where)
+        except Exception as e:
+            log.warning("%s: prune failed (%s)", table, str(e)[:160])
+
     def table_max(self, table: str, column: str, group_by: str | None = None, where: str = "") -> pd.DataFrame | None:
         """MAX(column) [per group_by] or None when the table does not exist yet."""
         try:
@@ -247,6 +255,9 @@ class DryRunWriter:
 
     def table_max(self, *a, **k):
         return None
+
+    def prune(self, table, where):
+        log.info("[dry-run] DELETE FROM %s WHERE %s", table, where)
 
     def close(self):
         pass

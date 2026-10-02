@@ -3,13 +3,15 @@
 Steps, each isolated so one failure does not stop the others:
   1. swe-model   run Hydro_Report/SWE_Exolabs/Scripts/SWE_main.py (what 102_SWE_lorenzo.bat does)
   2. swe         upload the model's CSVs to {schema}.swe_daily
-  3. rivers      Energy Quantified river temperatures to {schema}.river_temp_eq / river_stations_eq
+  3. rivers      Energy Quantified river temperatures and flows to {schema}.river_temp_eq / river_flow_eq
+  4. morning     Energy Quantified Morning Call input (every model, every cycle) to {schema}.morning_daily_eq
 
     python run_daily.py                      everything, incremental
     python run_daily.py --skip-swe-model     upload only (the model already ran today)
     python run_daily.py --backfill           full history for both tables (first run)
     python run_daily.py --dry-run            no Databricks: frames to pipeline/out/, SQL logged
     python run_daily.py --only rivers
+    python run_daily.py --only morning       what run_morning.bat runs every couple of hours
 
 Exit code 0 when every requested step succeeded, 1 otherwise. Logs in pipeline/logs/.
 """
@@ -29,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_config import load_settings, setup_logging  # noqa: E402
 
 log = logging.getLogger("pipeline")
-STEPS = ["swe-model", "swe", "rivers"]
+STEPS = ["swe-model", "swe", "rivers", "morning"]
 
 
 def run_swe_model(settings) -> None:
@@ -68,6 +70,7 @@ def main(argv=None) -> int:
     ap.add_argument("--skip-swe-model", action="store_true")
     ap.add_argument("--skip-swe", action="store_true")
     ap.add_argument("--skip-rivers", action="store_true")
+    ap.add_argument("--skip-morning", action="store_true")
     ap.add_argument("--backfill", action="store_true", help="full history instead of the incremental window")
     ap.add_argument("--dry-run", action="store_true", help="do not touch Databricks; write frames to pipeline/out/")
     ap.add_argument("--no-heightbands", action="store_true", help="skip the per-catchment height-band rows")
@@ -79,7 +82,8 @@ def main(argv=None) -> int:
     log_path = setup_logging(settings.log_dir)
     log.info("hydro pipeline start — schema %s, log %s", settings.schema, log_path)
 
-    steps = [a.only] if a.only else [s for s, skip in zip(STEPS, [a.skip_swe_model, a.skip_swe, a.skip_rivers]) if not skip]
+    steps = [a.only] if a.only else [s for s, skip in zip(STEPS, [a.skip_swe_model, a.skip_swe, a.skip_rivers, a.skip_morning])
+                                    if not skip]
     results: dict[str, str] = {}
     writer = None
     try:
@@ -90,7 +94,7 @@ def main(argv=None) -> int:
             except Exception as e:
                 log.exception("swe-model failed")
                 results["swe-model"] = f"FAILED: {str(e)[:200]}"
-        if "swe" in steps or "rivers" in steps:
+        if "swe" in steps or "rivers" in steps or "morning" in steps:
             writer = make_writer(settings, a.dry_run)
         if "swe" in steps:
             try:
@@ -106,6 +110,13 @@ def main(argv=None) -> int:
             except Exception as e:
                 log.exception("rivers failed")
                 results["rivers"] = f"FAILED: {str(e)[:200]}"
+        if "morning" in steps:
+            try:
+                import eq_morning
+                results["morning"] = f"ok {eq_morning.run(settings, writer, backfill=a.backfill)}"
+            except Exception as e:
+                log.exception("morning failed")
+                results["morning"] = f"FAILED: {str(e)[:200]}"
     finally:
         if writer is not None:
             writer.close()

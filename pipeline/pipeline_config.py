@@ -107,6 +107,11 @@ class Settings:
     river_station_table: str
     swe_table: str
     merge_chunk_rows: int
+    # ── Morning Call (EQ) ───────────────────────────────────────────────────
+    morning_table: str
+    morning_models: list[str]            # EQ tags loaded; 'ec-ext' / 'gfs-ext' come from the Medium-term curves
+    morning_lookback_hours: int          # issues loaded per run (×6 on --backfill)
+    morning_retention_days: int          # older issues are pruned from the table
     # ── SWE model ───────────────────────────────────────────────────────────
     swe_csv_dir: Path
     swe_main_py: Path
@@ -133,6 +138,10 @@ class Settings:
     @property
     def swe_table_fq(self) -> str:
         return f"{self.schema}.{self.swe_table}"
+
+    @property
+    def morning_table_fq(self) -> str:
+        return f"{self.schema}.{self.morning_table}"
 
     def databricks_ready(self) -> bool:
         return bool(self.dbx_host and self.dbx_http_path and (self.dbx_token or self.dbx_auth_type))
@@ -174,6 +183,11 @@ def load_settings() -> Settings:
         river_station_table=os.environ.get("RIVER_STATION_TABLE", "river_stations_eq"),
         swe_table=os.environ.get("SWE_TABLE", "swe_daily"),
         merge_chunk_rows=_int("MERGE_CHUNK_ROWS", 2000),
+        morning_table=os.environ.get("MORNING_TABLE", "morning_daily_eq"),
+        # icon (4 days) and ecsr (5 days) exist on EQ but cannot fill a weekly window — add them here if wanted
+        morning_models=_list("MORNING_MODELS", ["ec-ens", "ec", "gfs-ens", "gfs", "aifs-ens", "aifs", "ec-ext", "gfs-ext"]),
+        morning_lookback_hours=_int("MORNING_LOOKBACK_HOURS", 30),
+        morning_retention_days=_int("MORNING_RETENTION_DAYS", 30),
         swe_csv_dir=Path(os.environ.get("SWE_CSV_DIR", str(swe_root / "Output_files" / "CSVs"))),
         swe_main_py=Path(os.environ.get("SWE_MAIN_PY", str(swe_root / "Scripts" / "SWE_main.py"))),
         swe_refresh_days=_int("SWE_REFRESH_DAYS", 30),
