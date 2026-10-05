@@ -386,16 +386,18 @@ def gas_demand_snapshot(source: str = GAS_DEFAULT_SOURCE,
     else:
         wanted = default_runs(gas_df, source)
 
+    legs = cfg.get("legs", ["ldz", "rdl"])
     out: dict[str, dict] = {}
     for init, pattern in wanted:
         try:
             ldz = compute_ldz(gas_df, actual_df, GAS_LDZ_DEFAULT_AREAS, pattern, init)
-            rdl = compute_rdl(gas_df, cfg["rdl_regions"], GAS_RDL_DEFAULT_REGIONS, pattern, init)
+            rdl = (compute_rdl(gas_df, cfg["rdl_regions"], GAS_RDL_DEFAULT_REGIONS, pattern, init)
+                   if "rdl" in legs else None)
         except Exception:
             continue
-        if ldz["cur_init"] is None and rdl["cur_init"] is None:
+        if ldz["cur_init"] is None and (rdl is None or rdl["cur_init"] is None):
             continue
-        out[format_run_label(init, pattern)] = {"ldz": _strip(ldz), "rdl": _strip(rdl)}
+        out[format_run_label(init, pattern)] = {"ldz": _strip(ldz), "rdl": _strip(rdl) if rdl else None}
     return out
 
 
@@ -701,10 +703,16 @@ def render_gas_demand():
             cmp_sel = st.selectbox("Compare with", run_keys, index=default_cmp, key="gas_cmp_sel")
             manual_cmp_init, _cmp_pat = run_map[cmp_sel]
 
+    legs = cfg.get("legs", ["ldz", "rdl"])
     with c3:
         areas = st.multiselect("LDZ countries", list(GAS_LDZ_AREAS), GAS_LDZ_DEFAULT_AREAS, key="gas_areas")
-        regions = st.multiselect("Wind & solar regions", list(cfg["rdl_regions"]), GAS_RDL_DEFAULT_REGIONS,
-                                 key="gas_regions")
+        if "rdl" in legs:
+            regions = st.multiselect("Wind & solar regions", list(cfg["rdl_regions"]), GAS_RDL_DEFAULT_REGIONS,
+                                     key="gas_regions")
+        else:
+            regions = []
+    if cfg.get("note"):
+        st.caption(cfg["note"])
 
     if not sel_runs:
         status_banner("Pick at least one run.", "warning")
@@ -745,6 +753,18 @@ def render_gas_demand():
                    "a small level offset is possible — the run-over-run delta, which is what is traded "
                    "here, is unaffected because both runs come from the same source.")
 
+    if "rdl" not in legs:
+        if areas:
+            _render_ldz(ldz_res, areas)
+        else:
+            status_banner("No LDZ country selected.", "warning")
+        st.divider()
+        if ldz_res:
+            st.download_button("Download deltas (CSV)", _leg_csv({f"LDZ {k}": v for k, v in ldz_res.items()}),
+                               f"gas_demand_{source.lower().replace(' ', '_')}_{max(i for i, _ in sel_runs):%Y%m%d_%H}z.csv",
+                               "text/csv", key="gas_dl")
+        return
+
     tabs = st.tabs(["LDZ — heating demand", "Wind & Solar — displaced gas", "Both legs"])
     with tabs[0]:
         if areas:
@@ -767,4 +787,4 @@ def render_gas_demand():
     if dl:
         newest = max(init for init, _ in sel_runs)
         st.download_button("Download deltas (CSV)", _leg_csv(dl),
-                           f"gas_demand_{source.lower()}_{newest:%Y%m%d_%H}z.csv", "text/csv", key="gas_dl")
+                           f"gas_demand_{source.lower().replace(' ', '_')}_{newest:%Y%m%d_%H}z.csv", "text/csv", key="gas_dl")

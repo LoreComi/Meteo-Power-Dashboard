@@ -79,7 +79,7 @@ MAP_EUROPE_BBOX = {"lat_min": 35, "lat_max": 72, "lon_min": -12, "lon_max": 35}
 SECTIONS: dict[str, dict] = {
     "Morning Call": {
         "num": "00",
-        "desc": "The Morning Report, live from Volue (Energy Quantified to come back later): "
+        "desc": "The Morning Report, live from Volue or from the AI models on the Meteomatics method: "
                 "what moved since the previous run and what is away from normal, up front — the biggest "
                 "moves and anomalies as chips, an arrow chart per block, then the grid with the other "
                 "models' runs as columns, each with its own change and its difference to the reference.",
@@ -107,7 +107,7 @@ SECTIONS: dict[str, dict] = {
     },
     "Gas Demand": {
         "num": "04",
-        "desc": "EU gas demand from the weather, on the Morning Call's Volue runs: "
+        "desc": "EU gas demand from the weather, on the Morning Call's Volue runs, or the AI models' temperature: "
                 "LDZ heating demand from the fitted temperature-response curves, and wind + solar as "
                 "gas-for-power displacement — run-over-run deltas and the trade signal per country.",
         "color": CATEGORICAL[5], "locked": False,
@@ -289,7 +289,7 @@ MORNING_MODEL_LABELS: dict[str, str] = {
     # Volue patterns (morning_daily, gas_demand_daily) and Meteomatics models
     "ec00ens": "EC-ENS", "ec12ens": "EC-ENS", "gfs00ens": "GFS-ENS", "gfs12ens": "GFS-ENS", "ecmonthly": "EC-Extended",
     "ec00": "EC Op", "gfs00": "GFS Op",
-    "ecmwf-ens": "MM EC-ENS", "ecmwf-aifs-ens": "MM AIFS-ENS",
+    "ecmwf-ens": "MM EC-ENS", "ecmwf-aifs-ens": "MM AIFS-ENS", "ncep-gfs-ens": "MM GFS-ENS",
     # Energy Quantified tags (morning_daily_eq) — the cycle hour is appended from the issue time
     "ec-ens": "EC-ENS", "ec": "EC Op", "gfs-ens": "GFS-ENS", "gfs": "GFS Op", "aifs-ens": "AIFS-ENS",
     "aifs": "AIFS Op", "icon": "ICON", "ecsr": "EC short-range", "ec-ext": "EC-Extended", "gfs-ext": "GFS-Extended",
@@ -301,14 +301,21 @@ MORNING_MODEL_LABELS: dict[str, str] = {
 # model is what the grid opens on and what the agent families brief about. Volue
 # is the notebook's morning_daily (00z/12z 'Avg' curves, 6-hourly refresh).
 MORNING_SOURCES: dict[str, dict] = {
-    "EQ":    {"table": "morning_daily_eq", "reference": "ec-ens", "enabled": False,     # hidden for now: set True to bring it back
-              "compare": ["gfs-ens", "aifs-ens", "ec", "gfs"], "lookback_days": 10,
-              "desc": "Energy Quantified: every model and cycle, EQ normals; loaded by Power_dashboard/pipeline "
-                      "(--only morning) every couple of hours"},
     "Volue": {"table": "morning_daily_volue", "reference": "ec00ens", "enabled": True,
               "compare": ["gfs00ens", "ec12ens", "gfs12ens"], "lookback_days": 10,
               "desc": "Volue 'Avg' ensemble means (00z / 12z) with the Volue normal, the Morning Report's own curves, "
                       "loaded by Power_dashboard/pipeline (--only volue, run_morning.bat)"},
+    "AI models": {"table": "morning_daily", "provider": "Meteomatics", "reference": "ecmwf-aifs-ens", "enabled": True,
+                  "compare": ["ecmwf-ens", "ncep-gfs-ens"], "lookback_days": 10, "families": ["tt"],
+                  "note": "Temperature only: Meteomatics carries no wind, solar or precipitation-energy production, "
+                          "so the other blocks are not shown for this source.",
+                  "desc": "AI weather models through the Meteomatics method: the ECMWF AIFS-ENS ensemble mean on the "
+                          "Meteomatics grid, reduced to population-weighted means on the report's regions (notebook cell 7) "
+                          "with the Volue normal; Meteomatics EC-ENS and GFS-ENS next to it, on the same method"},
+    "EQ":    {"table": "morning_daily_eq", "reference": "ec-ens", "enabled": False,     # switched off: set True to bring it back
+              "compare": ["gfs-ens", "aifs-ens", "ec", "gfs"], "lookback_days": 10,
+              "desc": "Energy Quantified: every model and cycle, EQ normals; loaded by Power_dashboard/pipeline "
+                      "(--only morning) every couple of hours"},
 }
 
 
@@ -506,17 +513,6 @@ GAS_ALL_PATTERNS: list[str] = ["ec00ens", "ec12ens", "gfs00ens", "ec00", "gfs00"
 # are MWh/h in that table and GW in gas_demand_daily, hence `prod_scale`.
 # Volue: the notebook's gas_demand_daily (00z / 12z ensemble means per country).
 GAS_SOURCES: dict[str, dict] = {
-    "EQ": {
-        "table": "morning_daily_eq", "lookback_days": 10, "enabled": False,                 # hidden for now
-        "time_mode": "eq",
-        "patterns": ["ec-ens", "gfs-ens", "ec", "gfs", "aifs-ens", "aifs"],
-        "default_patterns": ["ec-ens", "gfs-ens"],              # the latest run of each is selected
-        "region_to_area": {"de": "DE", "uk": "UK", "fr": "FR", "be": "BE", "nl": "NL", "it": "IT", "ib": "IB"},
-        "prod_scale": 0.001,                                     # MWh/h -> GW
-        "rdl_regions": {"DE": ["DE"], "UK": ["UK"], "FR": ["FR"], "BE": ["BE"], "NL": ["NL"],
-                        "IT": ["IT"], "Iberia": ["IB"]},
-        "desc": "Energy Quantified: the Morning Call's runs (every model and cycle), EQ normals",
-    },
     "Volue": {
         "table": "morning_daily_volue", "lookback_days": 10, "enabled": True,
         "time_mode": "volue",                                    # reference_date = issue day (CET midnight); cycle from the pattern
@@ -526,8 +522,33 @@ GAS_SOURCES: dict[str, dict] = {
         "prod_scale": 0.001,                                     # MWh/h -> GW
         "rdl_regions": {"DE": ["DE"], "UK": ["UK"], "FR": ["FR"], "BE": ["BE"], "NL": ["NL"],
                         "IT": ["IT"], "Iberia": ["IB"]},         # Volue's own 'ib' aggregate, as rdl_forecast.py
+        "legs": ["ldz", "rdl"],
         "desc": "Volue ensemble means (00z / 12z) per country, Volue normals, the scripts' own curves, "
                 "loaded by Power_dashboard/pipeline (--only volue)",
+    },
+    "AI models": {
+        "table": "morning_daily", "provider": "Meteomatics", "lookback_days": 10, "enabled": True,
+        "time_mode": "volue",                                    # Meteomatics created_at snaps to the 00z / 12z cycle
+        "patterns": ["ecmwf-aifs-ens", "ecmwf-ens", "ncep-gfs-ens"],
+        "default_patterns": ["ecmwf-aifs-ens", "ecmwf-ens"],
+        "region_to_area": {"de": "DE", "uk": "UK", "fr": "FR", "be": "BE", "nl": "NL", "it": "IT", "ib": "IB"},
+        "prod_scale": 1.0, "rdl_regions": {}, "legs": ["ldz"],  # temperature only -> the LDZ leg only
+        "note": "Temperature only: Meteomatics carries no wind or solar production, so this source has the LDZ leg "
+                "alone. BE and NL appear once the notebook has run with cell 7's be / nl regions.",
+        "desc": "AI weather models through the Meteomatics method: AIFS-ENS population-weighted temperature per country "
+                "(notebook cell 7), Meteomatics EC-ENS / GFS-ENS for comparison; LDZ leg only",
+    },
+    "EQ": {
+        "table": "morning_daily_eq", "lookback_days": 10, "enabled": False,                 # switched off
+        "time_mode": "eq",
+        "patterns": ["ec-ens", "gfs-ens", "ec", "gfs", "aifs-ens", "aifs"],
+        "default_patterns": ["ec-ens", "gfs-ens"],              # the latest run of each is selected
+        "region_to_area": {"de": "DE", "uk": "UK", "fr": "FR", "be": "BE", "nl": "NL", "it": "IT", "ib": "IB"},
+        "prod_scale": 0.001,                                     # MWh/h -> GW
+        "rdl_regions": {"DE": ["DE"], "UK": ["UK"], "FR": ["FR"], "BE": ["BE"], "NL": ["NL"],
+                        "IT": ["IT"], "Iberia": ["IB"]},
+        "legs": ["ldz", "rdl"],
+        "desc": "Energy Quantified: the Morning Call's runs (every model and cycle), EQ normals",
     },
 }
 GAS_DEFAULT_SOURCE = os.environ.get("GAS_SOURCE", MORNING_DEFAULT_SOURCE)
@@ -819,6 +840,8 @@ EXPECTED_HORIZON: dict[str, int] = {
     "ec00": 10, "gfs00": 16,
     # EQ tags (daily values after the partial last day is dropped)
     "ec-ens": 15, "ec": 15, "gfs-ens": 15, "gfs": 16, "aifs-ens": 15, "aifs": 15, "icon": 4, "ecsr": 5,
+    # Meteomatics models (morning_daily, provider 'Meteomatics'): daily means over the ensemble range
+    "ecmwf-ens": 15, "ecmwf-aifs-ens": 15, "ncep-gfs-ens": 16,
     "ec-ext": 46, "gfs-ext": 35,
 }
 

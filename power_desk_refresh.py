@@ -370,7 +370,13 @@ normals AS (
     AND delivery_start BETWEEN current_date() - INTERVAL 2 DAYS AND current_date() + INTERVAL 50 DAYS
   GROUP BY area, {CET_DAY}
 )
-SELECT m.provider, m.model_family, m.pattern, 0 AS init_hour, m.reference_date, m.run_rank, m.run_label,
+SELECT m.provider, m.model_family, m.pattern,
+       -- the cycle this load belongs to: the latest 00z / 12z at least 5 h before created_at. The silver
+       -- layer is loaded about 07:45 and 19:45 UTC and both loads of a day cover the same days with
+       -- different values: the morning load is the 00z, the evening one the 12z (the app, _data.snap_to_init_time,
+       -- applies the same rule to morning_daily's Meteomatics rows)
+       CASE WHEN HOUR(m.reference_date) >= 17 THEN 12 WHEN HOUR(m.reference_date) >= 5 THEN 0 ELSE 12 END AS init_hour,
+       m.reference_date, m.run_rank, m.run_label,
        m.metric, m.area, m.day, DATEDIFF(m.day, DATE(m.reference_date)) AS lead_day,
        m.ens_mean, NULL AS p10, NULL AS p25, NULL AS p50, NULL AS p75, NULL AS p90,
        NULL AS spread_std, NULL AS ens_min, NULL AS ens_max, 0 AS n_members,
@@ -933,10 +939,15 @@ count("morning_daily")
 # means. Hungary belongs to both 'hu' and 'see', which is why the mapping is a
 # join and not a CASE (a CASE stops at the first match and left SEE without HU).
 MM_REGION_GROUPS = {"fr": ["FR"], "de": ["DE"], "uk": ["UK"], "it": ["IT"], "hu": ["HU"],
-                    "np": ["NO", "SE", "FI", "DK"], "ib": ["ES", "PT"], "see": ["SI", "HR", "SK", "HU"]}
+                    "np": ["NO", "SE", "FI", "DK"], "ib": ["ES", "PT"], "see": ["SI", "HR", "SK", "HU"],
+                    "be": ["BE"], "nl": ["NL"]}          # be / nl: the Gas Demand section's LDZ countries
+# The app's "AI models" source reads these rows (provider 'Meteomatics'): the AIFS-ENS
+# AI model is the reference, the physics ensembles on the same method sit next to it.
+MORNING_MM_MODELS = {**METEOMATICS_MODELS,
+                     "Meteomatics GFS-ENS": ("ncep-gfs-ens", "t_mean_2m_24h_c_ncep_gfs_ens_p1d")}
 mm_region_values = ", ".join(f"('{r}', '{c}')" for r, cs in MM_REGION_GROUPS.items() for c in cs)
 mm_blocks = []
-for label, (model, curve) in METEOMATICS_MODELS.items():
+for label, (model, curve) in MORNING_MM_MODELS.items():
     mm_blocks.append(f"""
     SELECT 'tt' AS family, r.region, '{model}' AS pattern, c.reference_date, c.day,
            SUM(c.value * c.weight) / SUM(c.weight) AS value

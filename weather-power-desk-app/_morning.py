@@ -274,7 +274,7 @@ def _make_col(df: pd.DataFrame, pattern: str, init: pd.Timestamp, rule: str | in
                   _run_rows(df, pattern, prev_init), is_ref)
 
 
-def compute_grid(cols: list[RunCol], win: dict) -> pd.DataFrame:
+def compute_grid(cols: list[RunCol], win: dict, blocks: dict | None = None) -> pd.DataFrame:
     """The whole page as one tidy frame: a row per (window, block, region, column).
 
     value / d_run / d_norm are the report's triple for that run; d_ref is the
@@ -285,7 +285,7 @@ def compute_grid(cols: list[RunCol], win: dict) -> pd.DataFrame:
     recs = []
     for wkey, tkey in (("w1", "t1"), ("w2", "t2")):
         window = win[wkey]
-        for name, block in MORNING_BLOCKS.items():
+        for name, block in (blocks or MORNING_BLOCKS).items():
             if block["agg"] == "sum" and wkey == "w2":
                 continue
             per_col = [
@@ -616,7 +616,8 @@ def _grid_csv(cells: pd.DataFrame, delta_label: str) -> bytes:
 # ─── AI commentary — two agent families ────────────────────────────────────────
 
 def build_brief_context(cur: pd.DataFrame, prev: pd.DataFrame, win: dict, model: str,
-                        cur_init, prev_init, delta_label: str, today: pd.Timestamp) -> dict:
+                        cur_init, prev_init, delta_label: str, today: pd.Timestamp,
+                        blocks: dict | None = None) -> dict:
     """The on-screen numbers, as a structure the agents' context documents are
     rendered from — so what the commentary reads is exactly what the tables show.
 
@@ -631,8 +632,8 @@ def build_brief_context(cur: pd.DataFrame, prev: pd.DataFrame, win: dict, model:
     for wkey, tkey, include_precip in specs:
         window = win[wkey]
         span = (window[1] - window[0]).days + 1
-        blocks, has_data, covered = {}, False, 0
-        for name, block in MORNING_BLOCKS.items():
+        blocks_out, has_data, covered = {}, False, 0
+        for name, block in (blocks or MORNING_BLOCKS).items():
             if block["agg"] == "sum" and not include_precip:
                 continue
             rows = block_values(cur, prev, block, None if block["agg"] == "sum" else window)
@@ -640,15 +641,15 @@ def build_brief_context(cur: pd.DataFrame, prev: pd.DataFrame, win: dict, model:
                 has_data = True
             if block["agg"] == "mean":
                 covered = max(covered, max((r["n_days"] for r in rows), default=0))
-            blocks[name] = {"unit": block["unit"], "rows": rows}
-        if not blocks or not has_data:
+            blocks_out[name] = {"unit": block["unit"], "rows": rows}
+        if not blocks_out or not has_data:
             continue
         if wkey == "w3" and covered < SCENARIO_MIN_WEEK_DAYS:
             continue
         rng = f"{window[0]:%a %d %b} – {window[1]:%a %d %b}"
         if 0 < covered < span:
             rng += f"; the run covers only {covered} of these {span} days"
-        windows.append({"title": win[tkey], "range": rng, "blocks": blocks})
+        windows.append({"title": win[tkey], "range": rng, "blocks": blocks_out})
     return {"run": model, "today": today, "delta_label": delta_label,
             "run_init": f"{cur_init:%a %d %b}" if cur_init is not None else "n/a",
             "prev_init": f"{prev_init:%a %d %b}" if prev_init is not None else "n/a",
@@ -836,6 +837,8 @@ def render_morning_call():
     st.markdown("#### MORNING CALL")
     source, phone = _layout_and_source()
     src = MORNING_SOURCES[source]
+    # the blocks this source can fill (the AI models carry temperature only)
+    blocks = {n: b for n, b in MORNING_BLOCKS.items() if not src.get("families") or b["family"] in src["families"]}
     if phone:
         st.markdown(PHONE_CSS, unsafe_allow_html=True)
     else:
@@ -854,6 +857,8 @@ def render_morning_call():
                       "(run_morning.bat, run_daily.py --only volue).", "warning")
         return
     df = _drop_partial_days(df)
+    if src.get("note"):
+        st.caption(src["note"])
 
     runs = _list_runs(df)
     if not runs:
@@ -881,7 +886,7 @@ def render_morning_call():
             cmp_keys = st.multiselect(f"Compare (max {MORNING_PHONE_MAX_COMPARE})", keys, default=cmp_default,
                                       key="mcp_cmp", max_selections=MORNING_PHONE_MAX_COMPARE)
             rule_key = st.selectbox("Δ run vs", list(MORNING_PREV_RULES), key="mcg_prev")
-            show_chart = st.toggle("Arrow chart", value=True, key="mcp_chart")
+            show_chart = st.toggle("Arrow chart", value=False, key="mcp_chart")
         view_key = "pair"
     else:
         c1, c2, c3, c4, c5 = st.columns([1.9, 2.9, 1.8, 2.9, 0.9])
@@ -908,7 +913,7 @@ def render_morning_call():
                             help="Change · anomaly: the two deltas as shaded pills, the value small beneath. "
                                  "Detail: the report's triple. The other views put one shaded quantity per cell.")
         with c5:
-            show_chart = st.toggle("Chart", value=True, key="mcg_chart", help="The arrow chart above the grid.")
+            show_chart = st.toggle("Chart", value=False, key="mcg_chart", help="The arrow chart above the grid — off by default.")
         view_key = VIEWS[view]
     rule = MORNING_PREV_RULES[rule_key]
 
@@ -939,7 +944,7 @@ def render_morning_call():
         status_banner(f"{ref.prev_wanted:%a %d %b %H}z is not in the table — the reference's Δ run is taken "
                       f"against {ref.prev_label} instead.", "warning")
 
-    cells = compute_grid(cols, win)
+    cells = compute_grid(cols, win, blocks)
 
     if phone:
         # --- phone: the reference run's issue up front, one window at a time ---
@@ -949,10 +954,10 @@ def render_morning_call():
                         format_func=lambda k: _window_title(win, k))
         st.markdown(_glance_html(cells, ref, win, delta_label, (wkey,), len(cols)), unsafe_allow_html=True)
         if show_chart:
-            st.plotly_chart(make_morning_anomaly_chart(cells, MORNING_BLOCKS, [(wkey, _window_title(win, wkey))],
+            st.plotly_chart(make_morning_anomaly_chart(cells, blocks, [(wkey, _window_title(win, wkey))],
                                                        col_labels, compact=True),
                             use_container_width=True, config={"displayModeBar": False})
-        for name, block in MORNING_BLOCKS.items():
+        for name, block in blocks.items():
             st.markdown(_grid_block_html_phone(cells[cells["block"] == name], name, block, cols, win, wkey, delta_label),
                         unsafe_allow_html=True)
         st.caption(f"{source} · shaded cells: red = warmer / less wind, solar, precipitation, blue = colder / more · "
@@ -968,11 +973,11 @@ def render_morning_call():
                     f'the run covers, when not all · hover a cell or a chip for every number.</div>', unsafe_allow_html=True)
         st.markdown(_glance_html(cells, ref, win, delta_label, ("w1", "w2"), len(cols)), unsafe_allow_html=True)
         if show_chart:
-            st.plotly_chart(make_morning_anomaly_chart(cells, MORNING_BLOCKS,
+            st.plotly_chart(make_morning_anomaly_chart(cells, blocks,
                                                        [("w1", _window_title(win, "w1")), ("w2", _window_title(win, "w2"))],
                                                        col_labels),
                             use_container_width=True, config={"displayModeBar": False})
-        for name, block in MORNING_BLOCKS.items():
+        for name, block in blocks.items():
             st.markdown(_grid_block_html(cells[cells["block"] == name], name, block, cols, win, view_key, delta_label),
                         unsafe_allow_html=True)
         st.markdown(_grid_footer(cols, delta_label, view_key), unsafe_allow_html=True)
@@ -982,6 +987,6 @@ def render_morning_call():
 
     # --- commentary on the reference run (its latest issue by default) ---
     st.divider()
-    ctx = build_brief_context(ref.rows, ref.prev_rows, win, ref.model, ref.init, ref.prev_init, delta_label, today)
+    ctx = build_brief_context(ref.rows, ref.prev_rows, win, ref.model, ref.init, ref.prev_init, delta_label, today, blocks)
     gas_runs = tuple((c.pattern, c.init.isoformat()) for c in cols)
     _render_ai_brief(ctx, today, phone, source, gas_runs)

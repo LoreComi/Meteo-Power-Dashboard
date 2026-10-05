@@ -122,12 +122,21 @@ def _sql_list(values) -> str:
     return ",".join(f"'{v}'" for v in values)
 
 
+MM_MIN_AVAILABILITY_H = 5     # a cycle cannot be in the silver layer less than this many hours after its init
+
+
 def snap_to_init_time(ref_dt: pd.Timestamp, init_hours: list[int]) -> pd.Timestamp:
-    """Nearest 00z / 12z cycle to a genuine creation timestamp — Meteomatics'
-    created_at, which lands an hour or two after the init. Not for Volue: see
-    volue_init_time."""
-    cands = [ref_dt.normalize() + pd.Timedelta(days=d, hours=h) for d in (-1, 0, 1) for h in init_hours]
-    return min(cands, key=lambda c: abs((ref_dt - c).total_seconds()))
+    """The cycle a Meteomatics created_at belongs to: the latest 00z / 12z at
+    least MM_MIN_AVAILABILITY_H hours before it. The silver layer is ingested
+    twice a day, about 07:45 and 19:45 UTC, and both loads of a day cover the
+    same forecast days with different values — the morning one is that day's
+    00z, the evening one its 12z (checked 2026-10-05). Snapping to the *nearest*
+    cycle put the evening load on the next day's 00z, 12 hours early. Not for
+    Volue: see volue_init_time."""
+    latest_ok = ref_dt - pd.Timedelta(hours=MM_MIN_AVAILABILITY_H)
+    cands = [ref_dt.normalize() + pd.Timedelta(days=d, hours=h) for d in (-1, 0) for h in init_hours]
+    cands = [c for c in cands if c <= latest_ok]
+    return max(cands)
 
 
 def volue_init_time(ref_dt: pd.Timestamp, init_hour: int) -> pd.Timestamp:
@@ -374,6 +383,7 @@ def load_morning_daily(source: str = "EQ") -> pd.DataFrame:
                value, n_points, normal
         FROM {SBX_SCHEMA}.{cfg['table']}
         WHERE reference_date >= current_timestamp() - INTERVAL {int(cfg.get('lookback_days', 10))} DAYS
+          {f"AND provider = '{cfg['provider']}'" if cfg.get('provider') else ""}
         ORDER BY family, region, pattern, day
     """)
     if df.empty:
@@ -468,6 +478,7 @@ def load_gas_demand_daily(source: str = "Volue") -> pd.DataFrame:
             FROM {SBX_SCHEMA}.{cfg['table']}
             WHERE family IN ('tt', 'wnd', 'spv') AND region IN ({_sql_list(r2a)})
               AND reference_date >= current_timestamp() - INTERVAL {lookback} DAYS
+              {f"AND provider = '{cfg['provider']}'" if cfg.get('provider') else ""}
             ORDER BY family, pattern, region, day
         """)
         if df.empty:
