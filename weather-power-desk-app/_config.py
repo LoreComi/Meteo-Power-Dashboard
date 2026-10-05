@@ -79,10 +79,10 @@ MAP_EUROPE_BBOX = {"lat_min": 35, "lat_max": 72, "lon_min": -12, "lon_max": 35}
 SECTIONS: dict[str, dict] = {
     "Morning Call": {
         "num": "00",
-        "desc": "The Morning Report table, live: weekly means per region for temperature, wind, solar "
-                "and 2-week precipitation — absolute value, change vs the previous run, deviation from "
-                "normal — with the other models' runs as columns of the same grid, each with its own "
-                "run-over-run change and its difference to the reference.",
+        "desc": "The Morning Report, live from Volue (Energy Quantified to come back later): "
+                "what moved since the previous run and what is away from normal, up front — the biggest "
+                "moves and anomalies as chips, an arrow chart per block, then the grid with the other "
+                "models' runs as columns, each with its own change and its difference to the reference.",
         "color": CATEGORICAL[3], "locked": False, "wide": True,
     },
     "Forecast": {
@@ -107,9 +107,9 @@ SECTIONS: dict[str, dict] = {
     },
     "Gas Demand": {
         "num": "04",
-        "desc": "EU gas demand from the weather: LDZ heating demand from the fitted "
-                "temperature-response curves, and wind + solar as gas-for-power "
-                "displacement — run-over-run deltas and the trade signal per country.",
+        "desc": "EU gas demand from the weather, on the Morning Call's Volue runs: "
+                "LDZ heating demand from the fitted temperature-response curves, and wind + solar as "
+                "gas-for-power displacement — run-over-run deltas and the trade signal per country.",
         "color": CATEGORICAL[5], "locked": False,
     },
     "Strategy": {
@@ -286,8 +286,9 @@ MORNING_DEFAULT_MODEL = "EC-ENS 00z"
 # windows). Short model names per pattern for the column headers; the init
 # hour is appended, so "ec00ens" and "ec12ens" both read "EC-ENS" + "00z"/"12z".
 MORNING_MODEL_LABELS: dict[str, str] = {
-    # Volue patterns (morning_daily) and Meteomatics models
-    "ec00ens": "EC-ENS", "ec12ens": "EC-ENS", "gfs00ens": "GFS-ENS", "ecmonthly": "EC-Extended",
+    # Volue patterns (morning_daily, gas_demand_daily) and Meteomatics models
+    "ec00ens": "EC-ENS", "ec12ens": "EC-ENS", "gfs00ens": "GFS-ENS", "gfs12ens": "GFS-ENS", "ecmonthly": "EC-Extended",
+    "ec00": "EC Op", "gfs00": "GFS Op",
     "ecmwf-ens": "MM EC-ENS", "ecmwf-aifs-ens": "MM AIFS-ENS",
     # Energy Quantified tags (morning_daily_eq) — the cycle hour is appended from the issue time
     "ec-ens": "EC-ENS", "ec": "EC Op", "gfs-ens": "GFS-ENS", "gfs": "GFS Op", "aifs-ens": "AIFS-ENS",
@@ -300,16 +301,23 @@ MORNING_MODEL_LABELS: dict[str, str] = {
 # model is what the grid opens on and what the agent families brief about. Volue
 # is the notebook's morning_daily (00z/12z 'Avg' curves, 6-hourly refresh).
 MORNING_SOURCES: dict[str, dict] = {
-    "EQ":    {"table": "morning_daily_eq", "reference": "ec-ens",
+    "EQ":    {"table": "morning_daily_eq", "reference": "ec-ens", "enabled": False,     # hidden for now: set True to bring it back
               "compare": ["gfs-ens", "aifs-ens", "ec", "gfs"], "lookback_days": 10,
-              "desc": "Energy Quantified — every model and cycle, EQ normals; loaded by Power_dashboard/pipeline "
-                      "(run_morning.bat) every couple of hours"},
-    "Volue": {"table": "morning_daily", "reference": "ec00ens",
-              "compare": ["gfs00ens", "ec12ens", "ecmwf-ens", "ecmwf-aifs-ens"], "lookback_days": 10,
-              "desc": "Volue 'Avg' curves (00z / 12z) with the Volue normal, plus Meteomatics means; "
-                      "refreshed by the notebook every 6 h"},
+              "desc": "Energy Quantified: every model and cycle, EQ normals; loaded by Power_dashboard/pipeline "
+                      "(--only morning) every couple of hours"},
+    "Volue": {"table": "morning_daily_volue", "reference": "ec00ens", "enabled": True,
+              "compare": ["gfs00ens", "ec12ens", "gfs12ens"], "lookback_days": 10,
+              "desc": "Volue 'Avg' ensemble means (00z / 12z) with the Volue normal, the Morning Report's own curves, "
+                      "loaded by Power_dashboard/pipeline (--only volue, run_morning.bat)"},
 }
-MORNING_DEFAULT_SOURCE = os.environ.get("MORNING_SOURCE", "EQ")
+
+
+def enabled_sources(sources: dict) -> list[str]:
+    """Source names shown in the switches (the ones not switched off)."""
+    return [k for k, v in sources.items() if v.get("enabled", True)]
+
+
+MORNING_DEFAULT_SOURCE = os.environ.get("MORNING_SOURCE", "Volue")
 # Phone layout: one window at a time, the reference run plus at most this many compare columns
 MORNING_PHONE_MAX_COMPARE = 1
 # The reference run is the report's: its init day sets the windows and the Δ
@@ -489,6 +497,40 @@ GAS_DEFAULT_FAMILY = "EC-ENS"
 # Flat list of every gas-demand pattern — used by the UI which always shows
 # EC and GFS side by side without a family selector.
 GAS_ALL_PATTERNS: list[str] = ["ec00ens", "ec12ens", "gfs00ens", "ec00", "gfs00"]
+
+# Where the Gas Demand section reads its runs from — the same two tables as the
+# Morning Call (MORNING_SOURCES), so the GWh and the grid are built on the same
+# numbers. EQ (default): morning_daily_eq, every model and cycle; the pipeline
+# loads BE and NL for tt / wnd / spv on top of the report's regions so every LDZ
+# country is there, and Iberia is EQ's ES + PT sum (region 'ib'). Wind and solar
+# are MWh/h in that table and GW in gas_demand_daily, hence `prod_scale`.
+# Volue: the notebook's gas_demand_daily (00z / 12z ensemble means per country).
+GAS_SOURCES: dict[str, dict] = {
+    "EQ": {
+        "table": "morning_daily_eq", "lookback_days": 10, "enabled": False,                 # hidden for now
+        "time_mode": "eq",
+        "patterns": ["ec-ens", "gfs-ens", "ec", "gfs", "aifs-ens", "aifs"],
+        "default_patterns": ["ec-ens", "gfs-ens"],              # the latest run of each is selected
+        "region_to_area": {"de": "DE", "uk": "UK", "fr": "FR", "be": "BE", "nl": "NL", "it": "IT", "ib": "IB"},
+        "prod_scale": 0.001,                                     # MWh/h -> GW
+        "rdl_regions": {"DE": ["DE"], "UK": ["UK"], "FR": ["FR"], "BE": ["BE"], "NL": ["NL"],
+                        "IT": ["IT"], "Iberia": ["IB"]},
+        "desc": "Energy Quantified: the Morning Call's runs (every model and cycle), EQ normals",
+    },
+    "Volue": {
+        "table": "morning_daily_volue", "lookback_days": 10, "enabled": True,
+        "time_mode": "volue",                                    # reference_date = issue day (CET midnight); cycle from the pattern
+        "patterns": ["ec00ens", "ec12ens", "gfs00ens", "gfs12ens"],
+        "default_patterns": ["ec00ens", "gfs00ens"],
+        "region_to_area": {"de": "DE", "uk": "UK", "fr": "FR", "be": "BE", "nl": "NL", "it": "IT", "ib": "IB"},
+        "prod_scale": 0.001,                                     # MWh/h -> GW
+        "rdl_regions": {"DE": ["DE"], "UK": ["UK"], "FR": ["FR"], "BE": ["BE"], "NL": ["NL"],
+                        "IT": ["IT"], "Iberia": ["IB"]},         # Volue's own 'ib' aggregate, as rdl_forecast.py
+        "desc": "Volue ensemble means (00z / 12z) per country, Volue normals, the scripts' own curves, "
+                "loaded by Power_dashboard/pipeline (--only volue)",
+    },
+}
+GAS_DEFAULT_SOURCE = os.environ.get("GAS_SOURCE", MORNING_DEFAULT_SOURCE)
 
 GAS_FORECAST_DAYS = 14               # horizon pulled per run, as in dwld_fct
 GAS_HIST_LOOKBACK_DAYS = 10          # trailing actual days: MAX_LAG_DAYS (6) + 4

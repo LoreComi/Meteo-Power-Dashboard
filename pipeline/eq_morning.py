@@ -3,10 +3,15 @@
 The Morning Call grid (weather-power-desk-app/_morning.py) reads, per run, the
 daily values of four families on the Morning Report's regions, with the normal:
 
-  tt   consumption temperature  °C      daily mean          rows: fr de uk it hu np ib
-  wnd  wind power production    MWh/h   daily mean          rows: de uk fr it see np ib
-  spv  solar PV production      MWh/h   daily mean          rows: de fr it see np ib
+  tt   consumption temperature  °C      daily mean          rows: fr de uk it hu np ib  (+ be nl)
+  wnd  wind power production    MWh/h   daily mean          rows: de uk fr it see np ib  (+ be nl)
+  spv  solar PV production      MWh/h   daily mean          rows: de fr it see np ib  (+ be nl)
   rre  hydro precipitation energy GWh   daily sum           rows: cwe + it-nord (Alps), np, see, ib
+
+The Gas Demand section reads the same table (its LDZ countries are DE UK FR BE NL
+IT, its wind & solar regions those plus Iberia), which is why be and nl are
+loaded for the three weather families although the Morning Call grid has no row
+for them.
 
 Volue delivered these as one 'Avg' curve per region and run pattern (notebook
 cell 7, table morning_daily). This module delivers the same table shape from EQ
@@ -75,15 +80,17 @@ MORNING_FAMILIES = {
 # region code (as the app's MORNING_BLOCKS rows) -> EQ areas
 MORNING_REGIONS = {
     "fr": ["FR"], "de": ["DE"], "uk": ["GB"], "it": ["IT"], "hu": ["HU"], "np": ["NP"], "ib": ["ES", "PT"],
+    "be": ["BE"], "nl": ["NL"],                           # Gas Demand countries without a Morning Call row
     "see": ["RO", "BG", "GR", "HR", "SI", "RS"],          # our reading of Volue's SEE aggregate
     "cwe": ["FR", "DE", "AT", "CH"],                      # Volue's CWE; + it-nord = the report's "Alps" precipitation
     "it-nord": ["IT-NORD"],
 }
-# which regions each family needs (the report's rows), so nothing superfluous is downloaded
+# which regions each family needs (the report's rows + the Gas Demand countries),
+# so nothing superfluous is downloaded
 FAMILY_REGIONS = {
-    "tt": ["fr", "de", "uk", "it", "hu", "np", "ib"],
-    "wnd": ["de", "uk", "fr", "it", "see", "np", "ib"],
-    "spv": ["de", "fr", "it", "see", "np", "ib"],
+    "tt": ["fr", "de", "uk", "it", "hu", "np", "ib", "be", "nl"],
+    "wnd": ["de", "uk", "fr", "it", "see", "np", "ib", "be", "nl"],
+    "spv": ["de", "fr", "it", "see", "np", "ib", "be", "nl"],
     "rre": ["cwe", "it-nord", "np", "see", "ib"],
 }
 # per-family member lists where EQ lacks a curve for one member: no Serbian solar

@@ -415,6 +415,33 @@ sup.mcg-n {{
     font-size: 0.56rem; color: var(--text-muted); font-weight: 500; margin-left: 2px;
     font-family: 'Inter', sans-serif;
 }}
+/* "Change · anomaly" cells: the two deltas as shaded pills (Δ run | Δ norm), the
+   absolute value small beneath — the move and the anomaly are what the eye lands on. */
+.mcg-pair {{ display: flex; gap: 3px; justify-content: center; align-items: center; }}
+.mcg-pill {{
+    display: inline-block; min-width: 46px; padding: 2px 5px; border-radius: 5px;
+    font-weight: 600; font-size: 0.8rem; line-height: 1.25; color: var(--text-primary);
+}}
+.mcg-pill-na {{ color: var(--text-muted) !important; font-weight: 500; }}
+.mcg-abs {{ font-size: 0.66rem; color: var(--text-muted); margin-top: 2px; line-height: 1.1; }}
+
+/* At a glance — the reference run's biggest moves and anomalies as chips, ranked
+   across blocks on each block's own scale, shaded on the same diverging pair. */
+.mc-glance {{ display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: 0 0 8px; }}
+.mc-glance-label {{
+    font-size: 0.64rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text-muted); min-width: 158px; line-height: 1.3;
+}}
+.mc-chip {{
+    display: inline-flex; align-items: baseline; gap: 6px; padding: 5px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg-surface); font-size: 0.8rem; line-height: 1.2;
+    color: var(--text-primary);
+}}
+.mc-chip b {{ font-weight: 700; }}
+.mc-chip .mc-chip-q {{ font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 0.88rem; font-variant-numeric: tabular-nums; }}
+.mc-chip .mc-chip-w {{ color: var(--text-secondary); font-size: 0.68rem; }}
+.mc-chip-empty {{ color: var(--text-muted); font-size: 0.78rem; }}
+
 .mcg-legend {{
     display: flex; flex-wrap: wrap; gap: 18px; align-items: center; font-size: 0.76rem;
     color: var(--text-muted); margin: -4px 0 8px 2px;
@@ -536,8 +563,13 @@ h4 {{ font-size: 0.8rem !important; }}
 .mcp-table td.mc-region {{ font-family: 'Inter', sans-serif; font-weight: 600; font-size: 0.95rem; }}
 .mcp-table tr:last-child td {{ border-bottom: none; }}
 .mcp-table td .mcp-sub {{ display: block; font-size: 0.74rem; color: var(--text-muted); }}
+.mcp-table td.mcp-heat {{ font-weight: 600; }}
 .mcp-title {{ font-size: 0.78rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-secondary); margin: 2px 0 4px; }}
 .mcp-title span {{ font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text-muted); margin-left: 6px; }}
+.mc-glance {{ gap: 6px; }}
+.mc-glance-label {{ min-width: 100%; }}
+.mc-chip {{ font-size: 0.9rem; padding: 7px 11px; }}
+.mc-chip .mc-chip-q {{ font-size: 1.0rem; }}
 .agent-card {{ margin-bottom: 8px; }}
 .stButton > button {{ width: 100%; }}
 </style>

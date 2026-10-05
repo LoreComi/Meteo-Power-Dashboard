@@ -1,10 +1,23 @@
-"""Morning Call — the Morning Report table, live from the Volue tables.
+"""Morning Call — the Morning Report table, live, built around what changed.
 
 Port of P:/QFA/TonyWeather/Lorenzo_Trainee/Morning_Report/import_00z_add_solar_np_tot.py
 (which wrote table_00z_add_solar_np_tot.xlsx through wapi). Same arithmetic, laid
-out as one grid, so that the run-over-run change and the agreement between the
-models are read on the same rows:
+out so that the two things the desk looks for — the run-over-run change and the
+departure from normal — are read first, and the absolute values second:
 
+  At a glance         the reference run's biggest moves since its previous run and its
+                      largest anomalies, as chips ranked across the blocks on each block's
+                      own scale (a 1 °C move counts like a 1 GW wind move or 0.5 GW of
+                      solar), plus where the models shown disagree most.
+  Arrow chart         per block and window, every region's anomaly on one axis: the
+                      filled dot is the reference run (red = warmer / less wind, solar,
+                      precipitation; blue = colder / more), the hollow dot where its
+                      previous run stood, the bar between them the change; the other
+                      runs as small diamonds.
+  Grid                rows = the report's regions per block, columns = window → run. By
+                      default every cell shows the two deltas as shaded pills (Δ run |
+                      Δ norm) with the absolute value small beneath; the other views
+                      put the report's triple, or a single shaded quantity, in the cell.
   Windows             weekday-dependent, taken from the reference run's init day
         Mon, Tue      this week (Mon–Sun)              | next week
         Wed, Thu      weekend (Sat–Sun)                | next week
@@ -13,29 +26,28 @@ models are read on the same rows:
                       Wind [GW]          DE UK FRA ITA SEE Nordic Iberia
                       Solar PV [GW]      DE FRA ITA SEE Nordic Iberia
                       Precip [TWh]       Alps(cwe+it-nord) Nordic SEE Iberia   (15-day sum, first group only)
-  Columns             window → run. The reference run first (EC-ENS 00z, the report's
-                      run), then any other runs: the latest GFS 00z, EC 12z, Meteomatics
-                      EC-ENS / AIFS-ENS, or an earlier run of the same model. Every run
-                      carries the report's three numbers — abs. value, Δ vs its own
-                      previous run (Δ -24h; Δ -72h on a Monday), Δ norm — plus Δ vs the
-                      reference and, per window, the spread between the runs shown.
-  Cells show          "Detail" puts the Excel triple in every cell; the other views put
-                      one quantity per cell and shade it on the diverging pair, for a
-                      one-glance read across runs.
+  Columns             the reference run first (the latest issue of EC-ENS by default),
+                      then any other runs — the latest GFS-ENS, AIFS-ENS, the operational
+                      models, or an earlier cycle of the same model. Every run carries
+                      the report's three numbers — abs. value, Δ vs its own previous run
+                      (Δ -24h; Δ -72h on a Monday), Δ norm — plus Δ vs the reference and,
+                      per window, the spread between the runs shown.
 
 The Excel's free-text boxes — Pattern and Comment per window, and the Week 3
 commentary block — are gone. In their place two agent families read the
-reference run's numbers and write the commentary (see _ai_brief.py). Week 3 is
-still reached: it is handed to the agents whenever the reference run has enough
-days in it, which is normal for EC-Extended and rare for EC-ENS.
+reference run's numbers and write the commentary (see _ai_brief.py); the gas
+family is also handed the Gas Demand section's GWh for the very runs the grid
+shows. Week 3 is still reached: it is handed to the agents whenever the
+reference run has enough days in it, which is normal for EC-Extended and rare
+for EC-ENS.
 
 Data (MORNING_SOURCES): by default {SBX_SCHEMA}.morning_daily_eq — Energy
 Quantified, every model EQ has and every cycle (00/06/12/18), with the EQ
 normal, refreshed every couple of hours by Power_dashboard/pipeline/run_morning.bat,
 so the grid opens on the latest issue and the agents brief about it; or
 {SBX_SCHEMA}.morning_daily — the notebook's Volue 'Avg' curves (00z/12z) with
-the Volue normal plus Meteomatics means. Layout: PC (the full grid) or Phone
-(one window, the reference run plus one compare column, big type).
+the Volue normal plus Meteomatics means. Layout: PC (everything) or Phone (one
+window, the reference run plus one compare column, big type).
 """
 from __future__ import annotations
 
@@ -48,19 +60,25 @@ import streamlit as st
 
 from _config import (
     MORNING_BLOCKS, MORNING_MIN_DAY_COVERAGE, MORNING_MODEL_LABELS, MORNING_PREV_RULES, MORNING_PRECIP_SUM_DAYS,
-    EXPECTED_HORIZON, MORNING_SOURCES, MORNING_DEFAULT_SOURCE, MORNING_PHONE_MAX_COMPARE,
+    EXPECTED_HORIZON, MORNING_SOURCES, enabled_sources, MORNING_DEFAULT_SOURCE, MORNING_PHONE_MAX_COMPARE,
     AI_BRIEF_MODEL, AI_BRIEF_MAX_TOKENS, AI_BRIEF_SYNTHESIS_MAX_TOKENS, AI_POWER_AGENTS, AI_GAS_AGENTS,
     SCENARIO_MIN_WEEK_DAYS,
 )
+from _charts import make_morning_anomaly_chart
 from _data import load_morning_daily
 from _style import BRIEF_CSS, PHONE_CSS, INK_MUTED, CAT_BLUE, STATUS_CRITICAL, DIV_NEG, DIV_MID, DIV_POS
 from _ui import status_banner
 
-# What a cell shows. None = the report's triple; otherwise the grid column to put in the cell.
+# What a cell shows. "pair" = the two deltas as shaded pills with the value beneath (default);
+# None = the report's triple; otherwise the grid column to put in the cell, shaded.
 VIEWS: dict[str, str | None] = {
-    "Detail": None, "Δ norm": "d_norm", "Δ prev run": "d_run", "Δ vs ref": "d_ref", "Value": "value",
+    "Change · anomaly": "pair", "Detail": None, "Δ norm": "d_norm", "Δ prev run": "d_run",
+    "Δ vs ref": "d_ref", "Value": "value",
 }
 _HEAT_VIEWS = ("d_norm", "d_run", "d_ref")
+_SHADED_VIEWS = _HEAT_VIEWS + ("pair",)
+GLANCE_CHIPS = 5                 # chips per "at a glance" line
+GLANCE_MIN_SCORE = 0.15          # |Δ| / heat_scale below this is not worth a chip
 
 
 # ─── weekday logic (verbatim from the report) ──────────────────────────────────
@@ -100,6 +118,11 @@ def morning_windows(time_ref: pd.Timestamp) -> dict:
     w3s, w3e = w2e + pd.Timedelta(days=1), w2e + pd.Timedelta(days=7)
     return {"w1": (w1s, w1e), "w2": (w2s, w2e), "w3": (w3s, w3e), "t1": t1, "t2": t2, "t3": t3,
             "delta_label": delta_label, "prev_days": prev_days, "kind1": kind1}
+
+
+def _short_title(title: str) -> str:
+    """'Week 41 (next week)' → 'Week 41'; 'Weekend (40)' → 'Weekend 40'."""
+    return title.replace(" (next week)", "").replace("(", "").replace(")", "")
 
 
 # ─── the report's arithmetic ────────────────────────────────────────────────────
@@ -288,7 +311,7 @@ def compute_grid(cols: list[RunCol], win: dict) -> pd.DataFrame:
     return pd.DataFrame(recs)
 
 
-# ─── rendering ─────────────────────────────────────────────────────────────────
+# ─── rendering helpers ─────────────────────────────────────────────────────────
 
 def _signed(v: float, fmt: str) -> str:
     r = round(v, 1)
@@ -313,13 +336,21 @@ def _blend(a_hex: str, b_hex: str, t: float) -> str:
     return "#" + "".join(f"{round(x + (y - x) * t):02x}" for x, y in zip(a, b))
 
 
-def _heat_bg(v: float, scale: float, warm_is_positive: bool) -> str:
+def _heat_bg(v: float, scale: float, warm_is_positive: bool, strength: float = 0.8) -> str:
     """Cell shade on the diverging pair: neutral at 0, saturating at ±scale, ink stays readable."""
-    if scale <= 0 or np.isnan(v) or round(v, 1) == 0:
+    if scale <= 0 or v is None or np.isnan(v) or round(v, 1) == 0:
         return ""
-    t = min(abs(v) / scale, 1.0) ** 0.7 * 0.8
+    t = min(abs(v) / scale, 1.0) ** 0.7 * strength
     pole = DIV_POS if (v > 0) == warm_is_positive else DIV_NEG
     return f"background:{_blend(DIV_MID, pole, t)};"
+
+
+def _pill(v: float, block: dict) -> str:
+    """One shaded pill for a delta — the building block of the default cell."""
+    if v is None or np.isnan(v):
+        return '<span class="mcg-pill mcg-pill-na">n/a</span>'
+    bg = _heat_bg(v, block["heat_scale"], block["warm_is_positive"])
+    return f'<span class="mcg-pill" style="{bg}">{_signed(v, block["fmt"])}</span>'
 
 
 def _tip(lines: list[str]) -> str:
@@ -350,6 +381,69 @@ def _col_tip(c: RunCol, delta_label: str) -> str:
     return _tip(lines)
 
 
+# ─── at a glance ───────────────────────────────────────────────────────────────
+
+def _glance_rows(cells: pd.DataFrame, windows: tuple[str, ...]) -> pd.DataFrame:
+    """The reference run's cells with each delta scored on its block's scale."""
+    ref = cells[(cells["col"] == 0) & (cells["window"].isin(windows))].copy()
+    if ref.empty:
+        return ref
+    ref["heat_scale"] = [MORNING_BLOCKS[b]["heat_scale"] for b in ref["block"]]
+    ref["score_run"] = ref["d_run"].abs() / ref["heat_scale"]
+    ref["score_norm"] = ref["d_norm"].abs() / ref["heat_scale"]
+    ref["score_spread"] = ref["spread"].abs() / ref["heat_scale"]
+    return ref
+
+
+def _chip(row: pd.Series, quantity: str, win: dict, n_windows: int) -> str:
+    block = MORNING_BLOCKS[row["block"]]
+    v = float(row[quantity])
+    short = row["block"].split(" (")[0]
+    if block["agg"] == "sum":
+        wtxt = f"{MORNING_PRECIP_SUM_DAYS}-day sum"
+    else:
+        wtxt = _short_title(win["t1"] if row["window"] == "w1" else win["t2"])
+    if quantity == "spread":
+        bg = _heat_bg(v, block["heat_scale"], True, strength=0.0)
+        q = f"{block['fmt'].format(v)} {block['unit']} apart"
+    else:
+        bg = _heat_bg(v, block["heat_scale"], block["warm_is_positive"], strength=0.85)
+        q = f"{_signed(v, block['fmt'])} {block['unit']}"
+    where = f'<span class="mc-chip-w">{wtxt}</span>' if (n_windows > 1 or block["agg"] == "sum") else ""
+    tip = _tip([f"{row['region']} · {short} · {wtxt}", f"value {block['fmt'].format(float(row['value']))} {block['unit']}",
+                f"Δ vs previous run {_signed(float(row['d_run']), block['fmt']) if not np.isnan(row['d_run']) else 'n/a'}",
+                f"Δ norm {_signed(float(row['d_norm']), block['fmt']) if not np.isnan(row['d_norm']) else 'n/a'}"])
+    return (f'<span class="mc-chip" style="{bg}" title="{tip}"><b>{row["region"]}</b> {short.lower()} '
+            f'<span class="mc-chip-q">{q}</span>{where}</span>')
+
+
+def _glance_html(cells: pd.DataFrame, ref: RunCol, win: dict, delta_label: str, windows: tuple[str, ...],
+                 n_cols: int) -> str:
+    """Three lines of chips: biggest moves since the previous run, largest anomalies,
+    and — with two or more runs shown — where the models disagree most."""
+    rows = _glance_rows(cells, windows)
+    if rows.empty:
+        return ""
+    n_w = len(windows)
+    lines = []
+
+    def line(label: str, score: str, quantity: str) -> str:
+        sel = rows[rows[score].notna() & (rows[score] >= GLANCE_MIN_SCORE)].sort_values(score, ascending=False)
+        sel = sel.head(GLANCE_CHIPS)
+        chips = "".join(_chip(r, quantity, win, n_w) for _, r in sel.iterrows()) if not sel.empty else \
+            '<span class="mc-chip-empty">nothing notable</span>'
+        return f'<div class="mc-glance"><span class="mc-glance-label">{label}</span>{chips}</div>'
+
+    lines.append(line(f"Biggest moves · {delta_label} vs {ref.prev_label}" if ref.prev_init is not None
+                      else "Biggest moves · no earlier run", "score_run", "d_run"))
+    lines.append(line("Furthest from normal", "score_norm", "d_norm"))
+    if n_cols >= 2:
+        lines.append(line("Models disagree most", "score_spread", "spread"))
+    return "".join(lines)
+
+
+# ─── grid ──────────────────────────────────────────────────────────────────────
+
 def _cell_html(r: pd.Series, c: RunCol, region: str, wtitle: str, block: dict, span: int | None,
                view_key: str | None, cls: str) -> str:
     fmt = block["fmt"]
@@ -359,6 +453,9 @@ def _cell_html(r: pd.Series, c: RunCol, region: str, wtitle: str, block: dict, s
     n_days = int(r["n_days"])
     sup = f'<sup class="mcg-n">{n_days}d</sup>' if span and 0 < n_days < span else ""
     tip = _cell_tip(c, region, wtitle, r, block, span)
+    if view_key == "pair":
+        return (f'<td class="{cls}" title="{tip}"><div class="mcg-pair">{_pill(float(r["d_run"]), block)}'
+                f'{_pill(float(r["d_norm"]), block)}</div><div class="mcg-abs">{fmt.format(v)}{sup}</div></td>')
     if view_key is None:
         return (f'<td class="{cls}" title="{tip}"><div class="mcg-v">{fmt.format(v)}{sup}</div>'
                 f'<div class="mcg-d">{_fmt_delta(r["d_run"], fmt)}<span class="mcg-sep">·</span>'
@@ -385,8 +482,8 @@ def _grid_block_html(cells: pd.DataFrame, name: str, block: dict, cols: list[Run
     windows = [("w1", win["t1"], win["w1"]), ("w2", win["t2"], win["w2"])]
 
     colgroup = '<colgroup><col class="mcg-c0">' + "<col>" * (2 * per_win) + "</colgroup>"
-    corner_sub = {None: f"abs · {delta_label} · Δ norm", "d_norm": "Δ norm", "d_run": delta_label,
-                  "d_ref": "Δ vs reference run", "value": "abs. value"}[view_key]
+    corner_sub = {"pair": f"{delta_label} | Δ norm · abs", None: f"abs · {delta_label} · Δ norm", "d_norm": "Δ norm",
+                  "d_run": delta_label, "d_ref": "Δ vs reference run", "value": "abs. value"}[view_key]
     short = name.split(" (")[0]          # "Precip (sum of coming 2 weeks)" → "Precip"; the group header says the rest
     head1 = (f'<tr><th class="mcg-corner" rowspan="2"><div><span class="mcg-corner-name">{short}</span> '
              f'<span class="mcg-corner-unit">[{block["unit"]}]</span></div>'
@@ -416,7 +513,7 @@ def _grid_block_html(cells: pd.DataFrame, name: str, block: dict, cols: list[Run
 
     # The reference column is tinted only where cells are not shaded themselves —
     # in the shaded views a faint blue tint would read as a small cold anomaly.
-    tint_ref = view_key not in _HEAT_VIEWS
+    tint_ref = view_key not in _SHADED_VIEWS
     body = ""
     for region, _ in block["rows"]:
         body += f'<tr><td class="mc-region">{region}</td>'
@@ -441,8 +538,8 @@ def _grid_block_html(cells: pd.DataFrame, name: str, block: dict, cols: list[Run
 def _grid_block_html_phone(cells: pd.DataFrame, name: str, block: dict, cols: list[RunCol], win: dict,
                            wkey: str, delta_label: str) -> str:
     """One block for a phone: one window, regions as rows, the reference run's
-    triple spread over three columns (value · Δ run · Δ norm) and, for each compare
-    run, its value with its Δ vs the reference underneath."""
+    triple spread over three columns (Δ run · Δ norm shaded, then the value) and,
+    for each compare run, its value with its Δ vs the reference underneath."""
     fmt, unit = block["fmt"], block["unit"]
     is_sum = block["agg"] == "sum"
     use = "w1" if is_sum else wkey                 # precipitation is the 15-day sum, whatever the window
@@ -451,8 +548,8 @@ def _grid_block_html_phone(cells: pd.DataFrame, name: str, block: dict, cols: li
     short = name.split(" (")[0]
     sub = (f"sum of the first {MORNING_PRECIP_SUM_DAYS} forecast days" if is_sum
            else f"{win['t1'] if use == 'w1' else win['t2']} · {s:%d %b} – {e:%d %b}")
-    head = (f"<tr><th>[{unit}]</th><th>{ref.model}<span class='mcg-date'>{ref.init:%a %d %b}</span></th>"
-            f"<th>{delta_label}<span class='mcg-date'>vs {ref.prev_label}</span></th><th>Δ norm</th>")
+    head = (f"<tr><th>[{unit}]</th><th>{delta_label}<span class='mcg-date'>vs {ref.prev_label}</span></th>"
+            f"<th>Δ norm</th><th>{ref.model}<span class='mcg-date'>{ref.init:%a %d %b} · value</span></th>")
     for c in cols[1:]:
         head += f"<th>{c.model}<span class='mcg-date'>{c.init:%a %d %b}<br>value · Δ vs ref</span></th>"
     head += "</tr>"
@@ -462,13 +559,17 @@ def _grid_block_html_phone(cells: pd.DataFrame, name: str, block: dict, cols: li
         sel = cells[(cells["window"] == use) & (cells["region"] == region)].set_index("col")
         body += f"<tr><td class='mc-region'>{region}</td>"
         if 0 not in sel.index or np.isnan(float(sel.loc[0, "value"])):
-            body += "<td><span class='mc-muted'>·</span></td><td></td><td></td>" + "<td></td>" * (len(cols) - 1) + "</tr>"
+            body += "<td></td><td></td><td><span class='mc-muted'>·</span></td>" + "<td></td>" * (len(cols) - 1) + "</tr>"
             continue
         r0 = sel.loc[0]
         n_days = int(r0["n_days"])
         sup = f"<span class='mcp-sub'>{n_days}/{span} days</span>" if span and 0 < n_days < span else ""
-        body += (f"<td>{fmt.format(float(r0['value']))}{sup}</td><td>{_fmt_delta(r0['d_run'], fmt)}</td>"
-                 f"<td>{_fmt_delta(r0['d_norm'], fmt)}</td>")
+        d_run, d_norm = float(r0["d_run"]), float(r0["d_norm"])
+        body += (f"<td class='mcp-heat' style='{_heat_bg(d_run, block['heat_scale'], block['warm_is_positive'])}'>"
+                 f"{_signed(d_run, fmt) if not np.isnan(d_run) else '<span class=mc-muted>n/a</span>'}</td>"
+                 f"<td class='mcp-heat' style='{_heat_bg(d_norm, block['heat_scale'], block['warm_is_positive'])}'>"
+                 f"{_signed(d_norm, fmt) if not np.isnan(d_norm) else '<span class=mc-muted>n/a</span>'}</td>"
+                 f"<td>{fmt.format(float(r0['value']))}{sup}</td>")
         for i, c in enumerate(cols[1:], start=1):
             if i not in sel.index or np.isnan(float(sel.loc[i, "value"])):
                 body += "<td><span class='mc-muted'>·</span></td>"
@@ -480,15 +581,20 @@ def _grid_block_html_phone(cells: pd.DataFrame, name: str, block: dict, cols: li
             f"<table class='mcp-table'>{head}{body}</table></div>")
 
 
+def _legend_html(delta_label: str, view_key: str | None) -> str:
+    scales = " · ".join(f"±{b['heat_scale']:g} {b['unit']} {n.split(' ')[0].lower()}"
+                        for n, b in MORNING_BLOCKS.items())
+    what = {"pair": f"left pill = {delta_label} (change vs the model's earlier run) · right pill = Δ norm · "
+                    "abs. value beneath",
+            "d_norm": "Δ norm", "d_run": f"{delta_label}", "d_ref": "Δ vs the reference run"}.get(view_key, "")
+    return (f'<div class="mcg-legend"><span>{what}</span><span>colder · more wind, solar, precipitation'
+            f'<span class="mcg-swatch" style="background:linear-gradient(90deg,{DIV_NEG},{DIV_MID},{DIV_POS});"></span>'
+            f'warmer · less</span><span>shade saturates at {scales}</span></div>')
+
+
 def _grid_footer(cols: list[RunCol], delta_label: str, view_key: str | None) -> str:
     """Legend for the shaded views, then one line per column: which run, paired with which."""
-    out = ""
-    if view_key in _HEAT_VIEWS:
-        scales = " · ".join(f"±{b['heat_scale']:g} {b['unit']} {n.split(' ')[0].lower()}"
-                            for n, b in MORNING_BLOCKS.items())
-        out += (f'<div class="mcg-legend"><span>colder · more wind, solar, precipitation'
-                f'<span class="mcg-swatch" style="background:linear-gradient(90deg,{DIV_NEG},{DIV_MID},{DIV_POS});"></span>'
-                f'warmer · less</span><span>shade saturates at {scales}</span></div>')
+    out = _legend_html(delta_label, view_key) if view_key in _SHADED_VIEWS else ""
     lines = []
     for c in cols:
         n_days, expected = c.coverage()
@@ -597,8 +703,11 @@ def _render_family(result: dict, agents_meta: list[tuple[str, str, str]], phone:
     st.caption(f"Generated {result['generated_at']} · {result['label']} family")
 
 
-def _render_ai_brief(ctx: dict, today: pd.Timestamp, phone: bool = False) -> None:
-    """Two families of agents commenting on the reference run — power and gas."""
+def _render_ai_brief(ctx: dict, today: pd.Timestamp, phone: bool = False, source: str = MORNING_DEFAULT_SOURCE,
+                     gas_runs: tuple[tuple[str, str], ...] = ()) -> None:
+    """Two families of agents commenting on the reference run — power and gas. The
+    gas family is also given the Gas Demand section's figures for `gas_runs`, the
+    (pattern, init) pairs of the grid's columns, read from the same source."""
     from _ai_brief import FAMILIES, get_az_credentials, generate_family_brief
 
     st.markdown("##### Market read — agent families")
@@ -612,7 +721,7 @@ def _render_ai_brief(ctx: dict, today: pd.Timestamp, phone: bool = False) -> Non
                    "(temperature → LDZ heating demand, wind & solar → gas-for-power). Each specialist reads "
                    "only its own rows; a synthesis agent per family nets them into a few sentences. The gas "
                    "family is additionally given the Gas Demand section's LDZ and displaced-gas figures for "
-                   "these same runs, so the words and the GWh cannot drift apart.")
+                   "the runs in this grid, from the same source, so the words and the GWh cannot drift apart.")
     st.markdown(BRIEF_CSS, unsafe_allow_html=True)
 
     if not ctx.get("windows"):
@@ -641,7 +750,7 @@ def _render_ai_brief(ctx: dict, today: pd.Timestamp, phone: bool = False) -> Non
     if run_gas:
         try:
             from _gas import gas_demand_snapshot
-            snapshot = gas_demand_snapshot(today.date())
+            snapshot = gas_demand_snapshot(source, gas_runs or None)
         except Exception:
             snapshot = {}
 
@@ -695,8 +804,9 @@ def _render_ai_brief(ctx: dict, today: pd.Timestamp, phone: bool = False) -> Non
 def _layout_and_source() -> tuple[str, bool]:
     """The two switches at the top of the page: data source and PC / Phone layout.
     `?layout=phone` in the URL opens the phone layout (bookmark it on the phone)."""
-    if "mc_source" not in st.session_state:
-        st.session_state["mc_source"] = MORNING_DEFAULT_SOURCE if MORNING_DEFAULT_SOURCE in MORNING_SOURCES else list(MORNING_SOURCES)[0]
+    names = enabled_sources(MORNING_SOURCES)
+    if st.session_state.get("mc_source") not in names:
+        st.session_state["mc_source"] = MORNING_DEFAULT_SOURCE if MORNING_DEFAULT_SOURCE in names else names[0]
     if "mc_layout" not in st.session_state:
         try:
             qp = str(st.query_params.get("layout", "")).lower()
@@ -705,13 +815,21 @@ def _layout_and_source() -> tuple[str, bool]:
         st.session_state["mc_layout"] = "Phone" if qp == "phone" else "PC"
     t1, t2, t3 = st.columns([1.4, 1.4, 4.2])
     with t1:
-        source = st.radio("Source", list(MORNING_SOURCES), horizontal=True, key="mc_source",
-                          help="\n".join(f"{k}: {v['desc']}" for k, v in MORNING_SOURCES.items()))
+        if len(names) == 1:
+            source = names[0]
+        else:
+            source = st.radio("Source", names, horizontal=True, key="mc_source",
+                              help="\n".join(f"{k}: {MORNING_SOURCES[k]['desc']}" for k in names))
     with t2:
         layout = st.radio("Layout", ["PC", "Phone"], horizontal=True, key="mc_layout",
                           help="Phone: one window at a time, one compare column, big type, stacked cards. "
                                "Open the app with ?layout=phone to start in it.")
     return source, layout == "Phone"
+
+
+def _window_title(win: dict, wkey: str) -> str:
+    s, e = win[wkey]
+    return f"{_short_title(win['t1'] if wkey == 'w1' else win['t2'])} · {s:%d %b} – {e:%d %b}"
 
 
 def render_morning_call():
@@ -721,21 +839,19 @@ def render_morning_call():
     if phone:
         st.markdown(PHONE_CSS, unsafe_allow_html=True)
     else:
-        st.caption(f"The Morning Report table, live — {src['desc']}. Same rows, windows and deltas as "
-                   "import_00z_add_solar_np_tot.py; the grid opens on the latest issue of the reference model, and "
-                   "the other models' runs sit next to it in the same grid, each with its own change vs its "
-                   "previous run and its difference to the reference.")
+        st.caption(f"The Morning Report, live — {src['desc']}. Same rows, windows and deltas as "
+                   "import_00z_add_solar_np_tot.py, read change-first: the biggest moves and anomalies of the "
+                   "reference run up front, the arrow chart per block, then the grid with the other models' runs "
+                   "as columns — each with its own change vs its previous run and its difference to the reference. "
+                   "The grid opens on the latest issue of the reference model.")
     try:
         df = load_morning_daily(source)
     except Exception as e:
         st.error(f"Cannot read from the sandbox table {src['table']}: {e}")
         return
     if df.empty:
-        if source == "EQ":
-            status_banner(f"No rows in {src['table']} yet — it is written by Power_dashboard/pipeline/run_morning.bat "
-                          "(Energy Quantified). Switch Source to Volue for the notebook's table.", "warning")
-        else:
-            status_banner(f"No data found in {src['table']}.", "warning")
+        status_banner(f"No rows in {src['table']} yet — it is written by Power_dashboard/pipeline "
+                      "(run_morning.bat, run_daily.py --only volue).", "warning")
         return
     df = _drop_partial_days(df)
 
@@ -755,7 +871,7 @@ def render_morning_call():
             st.session_state.pop(k, None)
         st.session_state["mc_source_last"] = source
 
-    # --- controls: reference run · compare columns · Δ pairing · what the cells show ---
+    # --- controls: reference run · compare columns · Δ pairing · what the cells show · chart ---
     if phone:
         with st.expander("Settings", expanded=False):
             ref_key = st.selectbox("Reference run", keys, index=keys.index(ref_default), key="mcp_ref")
@@ -765,21 +881,23 @@ def render_morning_call():
             cmp_keys = st.multiselect(f"Compare (max {MORNING_PHONE_MAX_COMPARE})", keys, default=cmp_default,
                                       key="mcp_cmp", max_selections=MORNING_PHONE_MAX_COMPARE)
             rule_key = st.selectbox("Δ run vs", list(MORNING_PREV_RULES), key="mcg_prev")
-        view_key = None
+            show_chart = st.toggle("Arrow chart", value=True, key="mcp_chart")
+        view_key = "pair"
     else:
-        c1, c2, c3, c4 = st.columns([1.9, 3.1, 1.9, 3.1])
+        c1, c2, c3, c4, c5 = st.columns([1.9, 2.9, 1.8, 2.9, 0.9])
         with c1:
             ref_key = st.selectbox("Reference run", keys, index=keys.index(ref_default), key="mcg_ref",
                                    help="The report's run. Its init day sets the two windows (weekday rule) and "
-                                        "the Δ pairing; the commentary and the CSV are built on it. Defaults to "
-                                        "the latest issue of the reference model.")
+                                        "the Δ pairing; the chips, the chart, the commentary and the CSV are built "
+                                        "on it. Defaults to the latest issue of the reference model.")
         ref_pat, ref_init = run_map[ref_key]
         cmp_default = [latest_by_pattern[p] for p in src["compare"] if p in latest_by_pattern and p != ref_pat]
         with c2:
             cmp_keys = st.multiselect("Compare columns", keys, default=cmp_default, key="mcg_cols",
                                       help="Any runs — other models' latest, or earlier cycles of the same model. "
                                            "Each gets the same three numbers as the reference, plus its Δ vs the "
-                                           "reference. Meteomatics rows carry temperature only.")
+                                           "reference; in the chart they are the diamonds. Meteomatics rows carry "
+                                           "temperature only.")
         with c3:
             rule_key = st.selectbox("Δ run vs", list(MORNING_PREV_RULES), key="mcg_prev",
                                     help="The earlier run every column's Δ run is taken against — the same "
@@ -787,8 +905,10 @@ def render_morning_call():
                                          "'Previous run of the same model' is the previous cycle (6 or 12 h).")
         with c4:
             view = st.radio("Cells show", list(VIEWS), horizontal=True, key="mcg_view",
-                            help="Detail: abs. value with Δ run · Δ norm underneath, in every cell. The other "
-                                 "views put one quantity per cell and shade it, for a one-glance read across runs.")
+                            help="Change · anomaly: the two deltas as shaded pills, the value small beneath. "
+                                 "Detail: the report's triple. The other views put one shaded quantity per cell.")
+        with c5:
+            show_chart = st.toggle("Chart", value=True, key="mcg_chart", help="The arrow chart above the grid.")
         view_key = VIEWS[view]
     rule = MORNING_PREV_RULES[rule_key]
 
@@ -807,6 +927,7 @@ def render_morning_call():
         if (p, t) != (ref_pat, ref_init):
             cols.append(_make_col(df, p, t, rule, win, is_ref=False))
     ref = cols[0]
+    col_labels = [c.label for c in cols]
 
     # --- what the reader must know before the numbers ---
     n_days, expected = ref.coverage()
@@ -825,13 +946,18 @@ def render_morning_call():
         st.markdown(f"<div class='mc-sub'><b>{ref.model}</b> {ref.init:%a %d %b} · {delta_label} vs {ref.prev_label}"
                     f"{'' if ref.prev_exact else ' (nearest earlier run)'}</div>", unsafe_allow_html=True)
         wkey = st.radio("Window", ["w1", "w2"], horizontal=True, key="mcp_win", label_visibility="collapsed",
-                        format_func=lambda k: f"{win['t1']} · {win['w1'][0]:%d %b}–{win['w1'][1]:%d %b}" if k == "w1"
-                        else f"{win['t2']} · {win['w2'][0]:%d %b}–{win['w2'][1]:%d %b}")
+                        format_func=lambda k: _window_title(win, k))
+        st.markdown(_glance_html(cells, ref, win, delta_label, (wkey,), len(cols)), unsafe_allow_html=True)
+        if show_chart:
+            st.plotly_chart(make_morning_anomaly_chart(cells, MORNING_BLOCKS, [(wkey, _window_title(win, wkey))],
+                                                       col_labels, compact=True),
+                            use_container_width=True, config={"displayModeBar": False})
         for name, block in MORNING_BLOCKS.items():
             st.markdown(_grid_block_html_phone(cells[cells["block"] == name], name, block, cols, win, wkey, delta_label),
                         unsafe_allow_html=True)
-        st.caption(f"{source} · green / red = above / below · Δ norm = vs the {source} normal · "
-                   f"{len(runs)} runs in the table, latest {runs[0][1]:%a %d %b %H}z ({MORNING_MODEL_LABELS.get(runs[0][0], runs[0][0])}).")
+        st.caption(f"{source} · shaded cells: red = warmer / less wind, solar, precipitation, blue = colder / more · "
+                   f"Δ norm = vs the {source} normal · {len(runs)} runs in the table, latest "
+                   f"{runs[0][1]:%a %d %b %H}z ({MORNING_MODEL_LABELS.get(runs[0][0], runs[0][0])}).")
     else:
         span1 = "weekend" if win["kind1"] == "weekend" else "weekly"
         st.markdown(f'<div class="mc-sub">Windows follow the reference run\'s init day ({today:%A %d %b}): '
@@ -839,7 +965,13 @@ def render_morning_call():
                     f'<b>{win["t2"]}</b> {win["w2"][0]:%d %b} – {win["w2"][1]:%d %b} (weekly average) · '
                     f'precipitation = sum of the first {MORNING_PRECIP_SUM_DAYS} forecast days · '
                     f'{delta_label} = change vs each model\'s own earlier run · superscript = days of the window '
-                    f'the run covers, when not all · hover a cell for every number.</div>', unsafe_allow_html=True)
+                    f'the run covers, when not all · hover a cell or a chip for every number.</div>', unsafe_allow_html=True)
+        st.markdown(_glance_html(cells, ref, win, delta_label, ("w1", "w2"), len(cols)), unsafe_allow_html=True)
+        if show_chart:
+            st.plotly_chart(make_morning_anomaly_chart(cells, MORNING_BLOCKS,
+                                                       [("w1", _window_title(win, "w1")), ("w2", _window_title(win, "w2"))],
+                                                       col_labels),
+                            use_container_width=True, config={"displayModeBar": False})
         for name, block in MORNING_BLOCKS.items():
             st.markdown(_grid_block_html(cells[cells["block"] == name], name, block, cols, win, view_key, delta_label),
                         unsafe_allow_html=True)
@@ -851,4 +983,5 @@ def render_morning_call():
     # --- commentary on the reference run (its latest issue by default) ---
     st.divider()
     ctx = build_brief_context(ref.rows, ref.prev_rows, win, ref.model, ref.init, ref.prev_init, delta_label, today)
-    _render_ai_brief(ctx, today, phone)
+    gas_runs = tuple((c.pattern, c.init.isoformat()) for c in cols)
+    _render_ai_brief(ctx, today, phone, source, gas_runs)

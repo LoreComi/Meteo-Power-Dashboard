@@ -445,27 +445,75 @@ def load_wr_reanalysis() -> pd.DataFrame:
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_gas_demand_daily() -> pd.DataFrame:
-    """Daily ens-mean temperature / wind / solar per run from the sandbox.
+def load_gas_demand_daily(source: str = "Volue") -> pd.DataFrame:
+    """Daily ens-mean temperature / wind / solar per run, from the chosen source
+    (GAS_SOURCES): 'Volue' = the notebook's gas_demand_daily (per country, GW);
+    'EQ' = the Morning Call's morning_daily_eq — the pipeline's Energy Quantified
+    feed, every model and cycle — with its regions mapped onto the gas areas
+    (de → DE … ib → IB) and wind / solar scaled MWh/h → GW, so the two sources
+    come out in one layout.
 
-    Written by power_desk_refresh.py from Volue ensemble curves.
-    Columns: provider, family (tt/wnd/spv), pattern, area, reference_date,
-    day, value, n_points, normal.
+    Columns: provider, family (tt/wnd/spv), pattern, area, reference_date, day,
+    value, n_points, normal, init_time (the real cycle for EQ, the CET issue
+    day + cycle for Volue), init_date.
     """
-    df = run_query(f"""
-        SELECT provider, family, pattern, area, reference_date, day,
-               value, n_points, normal
-        FROM {SBX_SCHEMA}.gas_demand_daily
-        ORDER BY family, pattern, area, day
-    """)
-    if df.empty:
-        return df
+    from _config import GAS_SOURCES
+    cfg = GAS_SOURCES[source]
+    if cfg.get("region_to_area"):
+        r2a = cfg["region_to_area"]
+        lookback = int(cfg.get("lookback_days") or 10)
+        df = run_query(f"""
+            SELECT provider, family, pattern, region, reference_date, day,
+                   value, n_points, normal
+            FROM {SBX_SCHEMA}.{cfg['table']}
+            WHERE family IN ('tt', 'wnd', 'spv') AND region IN ({_sql_list(r2a)})
+              AND reference_date >= current_timestamp() - INTERVAL {lookback} DAYS
+            ORDER BY family, pattern, region, day
+        """)
+        if df.empty:
+            return df
+        df["area"] = df["region"].map(r2a)
+        df = df.drop(columns=["region"])
+    else:
+        df = run_query(f"""
+            SELECT provider, family, pattern, area, reference_date, day,
+                   value, n_points, normal
+            FROM {SBX_SCHEMA}.{cfg['table']}
+            ORDER BY family, pattern, area, day
+        """)
+        if df.empty:
+            return df
     df = _dt(df, ["reference_date"], utc=True)
     df = _dt(df, ["day"])
     df = _num(df, ["value", "n_points", "normal"])
-    df["init_time"] = [init_time_for(p, r) for r, p in zip(df["reference_date"], df["pattern"])]
+    scale = float(cfg.get("prod_scale") or 1.0)
+    if scale != 1.0:
+        prod = df["family"].isin(["wnd", "spv"])
+        df.loc[prod, ["value", "normal"]] = df.loc[prod, ["value", "normal"]] * scale
+    if cfg.get("time_mode") == "eq":
+        df["init_time"] = df["reference_date"].dt.floor("h")           # EQ: the issue time is the cycle
+    else:
+        df["init_time"] = [init_time_for(p, r) for r, p in zip(df["reference_date"], df["pattern"])]
     df["init_date"] = df["init_time"].dt.normalize()
     return df
+
+
+def pick_run_at(df: pd.DataFrame, pattern: str, target_init: pd.Timestamp
+                ) -> tuple[pd.DataFrame, pd.Timestamp | None]:
+    """Rows of `pattern`'s run initialised at target_init (a full cycle time);
+    else its latest run before it. Like pick_run, but on init_time, so a table
+    with several cycles a day (the EQ feed) never mixes two runs of one day."""
+    p = df[df["pattern"] == pattern]
+    if p.empty or "init_time" not in p.columns:
+        return p.iloc[0:0], None
+    exact = p[p["init_time"] == target_init]
+    if not exact.empty:
+        return exact, pd.Timestamp(target_init)
+    earlier = p[p["init_time"] < target_init]
+    if earlier.empty:
+        return earlier, None
+    latest = earlier["init_time"].max()
+    return p[p["init_time"] == latest], pd.Timestamp(latest)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -552,6 +600,27 @@ def list_family_runs(df: pd.DataFrame, patterns: list[str]) -> list[tuple[pd.Tim
     pairs = [(pd.Timestamp(dt), pat) for dt, pat in zip(sub["init_date"], sub["pattern"])]
     pairs.sort(key=lambda x: x[0], reverse=True)
     return pairs
+
+
+def list_runs_full(df: pd.DataFrame, patterns: list[str]) -> list[tuple[pd.Timestamp, str]]:
+    """All (init_time, pattern) pairs for the patterns, newest first — the cycle
+    included, so a 06z and a 12z of the same model and day are two runs."""
+    if df.empty or "pattern" not in df.columns or "init_time" not in df.columns:
+        return []
+    mask = df["pattern"].isin(patterns) & df["init_time"].notna()
+    sub = df.loc[mask, ["init_time", "pattern"]].drop_duplicates()
+    order = {p: i for i, p in enumerate(patterns)}
+    pairs = [(pd.Timestamp(t), str(p)) for t, p in zip(sub["init_time"], sub["pattern"])]
+    pairs.sort(key=lambda x: (-x[0].value, order.get(x[1], 99)))
+    return pairs
+
+
+def format_run_label(init_dt: pd.Timestamp, pattern: str) -> str:
+    """'EC-ENS 12z · Thu 02 Oct' — the Morning Call's label, from the model name
+    per pattern and the cycle hour of the init time (works for Volue patterns,
+    whose init_time already carries the cycle, and for EQ tags)."""
+    from _config import MORNING_MODEL_LABELS
+    return f"{MORNING_MODEL_LABELS.get(pattern, pattern)} {init_dt:%H}z · {init_dt:%a %d %b}"
 
 
 def format_family_run(init_dt: pd.Timestamp, pattern: str) -> str:

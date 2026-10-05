@@ -15,7 +15,7 @@ both answer it the same way:
 
     1. pull the ensemble-MEAN daily series of today's run and of the run it is
        paired with (the same pattern's previous 00z, Friday's on a Monday; for
-       a 12z run, the same day's 00z),
+       a later cycle of the day, that day's 00z),
     2. convert weather to gas demand (fitted curve for LDZ, efficiency
        arithmetic for wind/solar),
     3. sum the difference over a fixed window that starts one day after the run
@@ -27,10 +27,15 @@ The sign conventions are opposite and both are kept as the scripts have them:
 a colder run lifts LDZ demand (positive delta = bullish gas), a windier/sunnier
 run displaces more gas burn (positive delta = bearish gas).
 
-Data: {SBX_SCHEMA}.gas_demand_daily for the per-run forecasts and the normal,
-{SBX_SCHEMA}.hist_daily for the trailing actual temperature that seeds the
-curves' multi-day effective temperature. Curves: curve_models.json, fitted
-offline by EU-gas-demand/fit_demand_curves.py.
+Data (GAS_SOURCES): by default the Morning Call's Energy Quantified table,
+{SBX_SCHEMA}.morning_daily_eq — every model EQ has and every cycle, refreshed
+every couple of hours by Power_dashboard/pipeline/run_morning.bat, with BE and
+NL loaded on purpose for this section — so the GWh here and the grid there are
+built on the same runs; or the notebook's Volue {SBX_SCHEMA}.gas_demand_daily.
+{SBX_SCHEMA}.hist_daily gives the trailing actual temperature that seeds the
+curves' multi-day effective temperature (Volue actuals, the series the curves
+were fitted on). Curves: curve_models.json, fitted offline by
+EU-gas-demand/fit_demand_curves.py.
 """
 from __future__ import annotations
 
@@ -43,16 +48,13 @@ import streamlit as st
 
 import _gas_demand_model as gdm
 from _config import (
-    GAS_CURVE_MODELS_FILE, GAS_LDZ_AREAS, GAS_LDZ_DEFAULT_AREAS, GAS_RDL_REGIONS,
-    GAS_RDL_DEFAULT_REGIONS, GAS_EFFICIENCY, GAS_LOWER_LOAD, GAS_RUNS, GAS_DEFAULT_RUNS,
-    GAS_ALL_PATTERNS,
-    GAS_FORECAST_DAYS, GAS_HIST_LOOKBACK_DAYS, GAS_TOTAL_SIGNAL_GWH, SBX_SCHEMA,
+    GAS_CURVE_MODELS_FILE, GAS_LDZ_AREAS, GAS_LDZ_DEFAULT_AREAS,
+    GAS_RDL_DEFAULT_REGIONS, GAS_EFFICIENCY, GAS_LOWER_LOAD, GAS_SOURCES, GAS_DEFAULT_SOURCE, enabled_sources,
+    GAS_FORECAST_DAYS, GAS_HIST_LOOKBACK_DAYS, GAS_TOTAL_SIGNAL_GWH, EXPECTED_HORIZON,
 )
 from _charts import make_ldz_panel, make_rdl_chart, make_gas_delta_bars
 from _data import (
-    load_gas_demand_daily, load_recent_actual_temp, pick_run,
-    list_available_runs, list_family_runs, format_family_run,
-    run_completeness, format_run,
+    load_gas_demand_daily, load_recent_actual_temp, pick_run_at, list_runs_full, format_run_label,
 )
 from _ui import kpi_card, kpi_row, status_banner
 
@@ -63,54 +65,61 @@ def _models() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# RUN PAIRING AND DELTA WINDOW (verbatim from the scripts)
+# RUN PAIRING AND DELTA WINDOW (the scripts' rule, generalised to any cycle)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def gas_run_pair(pattern: str, run_day: pd.Timestamp) -> dict:
-    """Which two runs get compared, and over which days. `run_day` is the init
-    day of the run being scored — what the run selector shows.
+def gas_run_pair(pattern: str, run_init: pd.Timestamp) -> dict:
+    """Which two runs get compared, and over which days. `run_init` is the init
+    TIME of the run being scored — day and cycle, what the run selector shows.
 
     From rdl_fcst_change() in both scripts, where `date` is the morning the
     report is made: a 00z run is that day's run (`date_min = date`), a 12z run
     is the previous evening's (`date_min = date - 1`). In both cases date_min
     is the run's own init day, so it is taken as given here and the weekday
-    rule uses the report morning: run_day for a 00z run, the day after for a
-    12z run. Then
-      - a 00z run is compared with the same pattern's previous 00z: one day
+    rule uses the report morning: the init day for a 00z or 06z run, the day
+    after for a 12z or 18z run. Then
+      - a 00z run is compared with the same model's previous 00z: one day
         back, three on a Monday (Friday's run),
-      - a 12z run is compared with the 00z of the same date_min, two days back
-        on a Monday,
+      - any later cycle is compared with the 00z of its own day — or, when it
+        was issued on the eve of a Monday report (a Sunday 12z / 18z), with
+        Friday's 00z, which is the script's `date_min - 2` on a Monday,
       - the delta window opens the day after date_min and closes 13 days after
         it; on a Monday it opens on date_min itself and closes after 11 days.
         Either way it ends exactly on the last day of the older run's
         15-day horizon, which is why the Monday window is shorter.
+    Volue's 12z pattern is a different pattern name (ec12ens) from its 00z
+    (ec00ens); EQ's cycles share one tag. Both are handled.
     """
-    is_00z = not pattern.endswith("12ens")
-    date_min = pd.Timestamp(run_day).normalize()
-    report_date = date_min if is_00z else date_min + pd.Timedelta(days=1)
+    run_init = pd.Timestamp(run_init)
+    date_min = run_init.normalize()
+    hour = int(run_init.hour) if run_init.hour else (12 if pattern.endswith("12ens") else 0)
+    is_00z = hour == 0
+    report_date = date_min if hour < 12 else date_min + pd.Timedelta(days=1)
     wd = int(report_date.weekday())
 
     if is_00z:
         prev_pattern = pattern
-        prev_date = date_min - pd.Timedelta(days=3 if wd == 0 else 1)
+        prev_init = date_min - pd.Timedelta(days=3 if wd == 0 else 1)
     else:
-        prev_pattern = pattern.replace("12ens", "00ens")
-        prev_date = date_min - pd.Timedelta(days=2 if wd == 0 else 0)
+        prev_pattern = pattern.replace("12ens", "00ens") if pattern.endswith("12ens") else pattern
+        eve_of_monday = wd == 0 and report_date != date_min
+        prev_init = date_min - pd.Timedelta(days=2 if eve_of_monday else 0)
 
     if wd == 0:
         d_in, d_out = date_min, date_min + pd.Timedelta(days=11)
     else:
         d_in, d_out = date_min + pd.Timedelta(days=1), date_min + pd.Timedelta(days=13)
 
-    return {"pattern": pattern, "date_min": date_min, "prev_pattern": prev_pattern,
-            "prev_date": prev_date, "d_in": d_in, "d_out": d_out, "is_monday": wd == 0}
+    return {"pattern": pattern, "run_init": run_init, "date_min": date_min, "prev_pattern": prev_pattern,
+            "prev_init": prev_init, "d_in": d_in, "d_out": d_out, "is_monday": wd == 0}
 
 
 def _horizon(s: pd.Series, run_init: pd.Timestamp) -> pd.Series:
-    """The script's `wailer[init_date : init_date + 14 days]` — 15 days inclusive."""
+    """The script's `wailer[init_date : init_date + 14 days]` — 15 days inclusive, from the init day."""
     if s.empty:
         return s
-    return s.loc[run_init:run_init + pd.Timedelta(days=GAS_FORECAST_DAYS)]
+    day0 = pd.Timestamp(run_init).normalize()
+    return s.loc[day0:day0 + pd.Timedelta(days=GAS_FORECAST_DAYS)]
 
 
 def _window_delta(cur: pd.Series, prev: pd.Series, d_in, d_out) -> tuple[float, float, int]:
@@ -132,10 +141,10 @@ def _family_series(run_df: pd.DataFrame, family: str, areas: list[str]
     """(value, normal, areas that contributed) daily series for one family.
 
     Temperature is read per country, so `areas` is a single code. Wind and solar
-    are summed across the codes making up a region (Iberia = ES + PT). A code
-    with no rows is left out rather than blanking the region — the caller shows
-    which ones contributed, because a missing grid changes the level but barely
-    the run-over-run delta this page is about.
+    are summed across the codes making up a region (Volue's Iberia = ES + PT;
+    EQ's is one code, IB). A code with no rows is left out rather than blanking
+    the region — the caller shows which ones contributed, because a missing
+    grid changes the level but barely the run-over-run delta this page is about.
     """
     empty = (pd.Series(dtype=float), pd.Series(dtype=float), [])
     if run_df is None or run_df.empty or "family" not in run_df.columns:
@@ -144,7 +153,7 @@ def _family_series(run_df: pd.DataFrame, family: str, areas: list[str]
     if r.empty:
         return empty
     # One row per area and day: two reference_dates can snap to the same run
-    # date (a re-issued cycle), and summing a region would then double-count.
+    # time (a re-issued cycle), and summing a region would then double-count.
     r = r.sort_values("reference_date").drop_duplicates(subset=["area", "day"], keep="last")
     present = sorted(set(r["area"]))
     agg = "mean" if len(areas) == 1 else "sum"
@@ -207,25 +216,35 @@ def _signal(delta: float, bullish_positive: bool, threshold: float = 0.0) -> tup
     return ("LONG", "Bullish") if bullish else ("SHORT", "Bearish")
 
 
+def _pair_runs(gas_df: pd.DataFrame, pattern: str, run_init: pd.Timestamp,
+               prev_override: pd.Timestamp | None) -> tuple[dict, pd.DataFrame, pd.Timestamp | None,
+                                                            pd.DataFrame, pd.Timestamp | None]:
+    """The pairing plus the rows of both runs. `prev_override` replaces the
+    script's automatic pairing — the comparison run is the same pattern
+    initialised at that time."""
+    pair = gas_run_pair(pattern, run_init)
+    if prev_override is not None:
+        pair["prev_init"] = pd.Timestamp(prev_override)
+        pair["prev_pattern"] = pattern
+    cur_df, cur_init = pick_run_at(gas_df, pair["pattern"], pair["run_init"])
+    prev_df, prev_init = pick_run_at(gas_df, pair["prev_pattern"], pair["prev_init"])
+    if prev_init is None and cur_init is not None and prev_override is None:
+        # Nothing on or before the wanted cycle (a thin table — the EQ feed keeps 30 days,
+        # but on its first day it only holds yesterday's later cycles): compare with the
+        # latest earlier run of the model instead, and let the notice say which one.
+        prev_df, prev_init = pick_run_at(gas_df, pair["prev_pattern"], cur_init - pd.Timedelta(seconds=1))
+    return pair, cur_df, cur_init, prev_df, prev_init
+
+
 def compute_ldz(gas_df: pd.DataFrame, actual_df: pd.DataFrame, areas: list[str],
-                pattern: str, run_day: pd.Timestamp,
+                pattern: str, run_init: pd.Timestamp,
                 prev_override: pd.Timestamp | None = None) -> dict:
     """One run's LDZ leg: per-country deltas, curves and the cumulative signal.
-    `run_day` is the init day of the run being scored (see gas_run_pair).
-
-    If `prev_override` is given it replaces the script's automatic pairing
-    — the comparison run is the same pattern initialised on that date.
-    """
-    pair = gas_run_pair(pattern, run_day)
-    if prev_override is not None:
-        pair["prev_date"] = prev_override
-        pair["prev_pattern"] = pattern
-    cur_df, cur_init = pick_run(gas_df, pair["pattern"], pair["date_min"])
-    prev_df, prev_init = pick_run(gas_df, pair["prev_pattern"], pair["prev_date"])
+    `run_init` is the init time of the run being scored (see gas_run_pair)."""
+    pair, cur_df, cur_init, prev_df, prev_init = _pair_runs(gas_df, pattern, run_init, prev_override)
 
     rows, curves, filled = [], {}, 0
     for area in areas:
-        code = GAS_LDZ_AREAS[area]
         f_cur, n_cur, _ = _family_series(cur_df, "tt", [area])
         f_prev, _, _ = _family_series(prev_df, "tt", [area])
         f_cur = _horizon(f_cur, cur_init) if cur_init is not None else f_cur
@@ -235,7 +254,7 @@ def compute_ldz(gas_df: pd.DataFrame, actual_df: pd.DataFrame, areas: list[str],
         if actual_df is not None and not actual_df.empty and "area" in actual_df.columns:
             hist = actual_df[actual_df["area"] == area].set_index("day")["actual"].dropna().sort_index()
             if cur_init is not None:
-                hist = hist.loc[:cur_init - pd.Timedelta(days=1)].tail(GAS_HIST_LOOKBACK_DAYS)
+                hist = hist.loc[:cur_init.normalize() - pd.Timedelta(days=1)].tail(GAS_HIST_LOOKBACK_DAYS)
 
         eff_cur = ldz_cur = eff_prev = ldz_prev = pd.Series(dtype=float)
         if not f_cur.empty and not hist.empty:
@@ -273,7 +292,8 @@ def wind_solar_to_gas(wnd: pd.Series, spv: pd.Series) -> pd.Series:
     day's electricity, dividing by the CCGT efficiency turns electricity into
     the gas that would have produced it, and `lower_load` keeps only the share
     of the renewable swing that actually displaces gas rather than coal, hydro
-    or exports. The sandbox table is already in GW, so the /1000 is done.
+    or exports. Both source tables arrive here in GW (the loader scales EQ's
+    MWh/h), so the /1000 is done.
     """
     if wnd.empty and spv.empty:
         return pd.Series(dtype=float)
@@ -289,21 +309,16 @@ def _rdl_series(run_df: pd.DataFrame, areas: list[str]) -> tuple[pd.Series, pd.S
             sorted(set(a1) | set(a2)))
 
 
-def compute_rdl(gas_df: pd.DataFrame, regions: list[str], pattern: str,
-                run_day: pd.Timestamp,
-                prev_override: pd.Timestamp | None = None) -> dict:
+def compute_rdl(gas_df: pd.DataFrame, rdl_regions: dict[str, list[str]], regions: list[str], pattern: str,
+                run_init: pd.Timestamp, prev_override: pd.Timestamp | None = None) -> dict:
     """One run's wind + solar leg: per-region deltas, curves and the cumulative signal.
-    `run_day` is the init day of the run being scored (see gas_run_pair)."""
-    pair = gas_run_pair(pattern, run_day)
-    if prev_override is not None:
-        pair["prev_date"] = prev_override
-        pair["prev_pattern"] = pattern
-    cur_df, cur_init = pick_run(gas_df, pair["pattern"], pair["date_min"])
-    prev_df, prev_init = pick_run(gas_df, pair["prev_pattern"], pair["prev_date"])
+    `rdl_regions` maps a region label to the area codes summed for it (per source);
+    `run_init` is the init time of the run being scored (see gas_run_pair)."""
+    pair, cur_df, cur_init, prev_df, prev_init = _pair_runs(gas_df, pattern, run_init, prev_override)
 
     rows, curves = [], {}
     for region in regions:
-        areas = GAS_RDL_REGIONS[region]
+        areas = rdl_regions[region]
         g_cur, g_norm, present = _rdl_series(cur_df, areas)
         g_prev, _, _ = _rdl_series(prev_df, areas)
         g_cur = _horizon(g_cur, cur_init) if cur_init is not None else g_cur
@@ -328,41 +343,59 @@ def compute_rdl(gas_df: pd.DataFrame, regions: list[str], pattern: str,
 # HEADLESS SNAPSHOT (consumed by the Morning Call gas agents)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def default_runs(gas_df: pd.DataFrame, source: str) -> list[tuple[pd.Timestamp, str]]:
+    """The latest run of each of the source's default patterns (EC-ENS and GFS-ENS)."""
+    cfg = GAS_SOURCES[source]
+    out = []
+    for pat in cfg["default_patterns"]:
+        for init, p in list_runs_full(gas_df, [pat]):
+            out.append((init, p))
+            break
+    return out
+
+
 @st.cache_data(ttl=900, show_spinner=False)
-def gas_demand_snapshot(report_date: dt.date, run_labels: tuple[str, ...] = tuple(GAS_DEFAULT_RUNS)) -> dict:
+def gas_demand_snapshot(source: str = GAS_DEFAULT_SOURCE,
+                        runs: tuple[tuple[str, str], ...] | None = None) -> dict:
     """Both legs for the given runs, without rendering anything.
 
-    The Morning Call's gas agent family calls this so its commentary is backed
-    by the same numbers this section shows, whether or not the user has opened
-    the section. Returns {} when the table is missing or empty rather than
-    raising — the brief then falls back to the Morning Call table alone.
+    The Morning Call's gas agent family calls this with the runs its grid shows
+    — `runs` = ((pattern, init time ISO), …) — so its commentary is backed by the
+    same numbers this section shows for the same runs, whether or not the user
+    has opened the section. Without `runs`, the latest EC-ENS and GFS-ENS of the
+    source. Returns {} when the table is missing or empty rather than raising —
+    the brief then falls back to the Morning Call table alone.
     """
+    if source not in GAS_SOURCES:
+        return {}
     try:
-        gas_df = load_gas_demand_daily()
+        gas_df = load_gas_demand_daily(source)
     except Exception:
         return {}
     if gas_df.empty:
         return {}
-    ref = pd.Timestamp(report_date)
+    cfg = GAS_SOURCES[source]
     try:
         actual_df = load_recent_actual_temp(tuple(GAS_LDZ_DEFAULT_AREAS), days=40)
     except Exception:
         actual_df = pd.DataFrame(columns=["area", "day", "actual", "normal"])
 
+    wanted: list[tuple[pd.Timestamp, str]]
+    if runs:
+        wanted = [(pd.Timestamp(t), p) for p, t in runs if p in cfg["patterns"]]
+    else:
+        wanted = default_runs(gas_df, source)
+
     out: dict[str, dict] = {}
-    for label in run_labels:
-        pattern = GAS_RUNS.get(label)
-        if not pattern:
-            continue
-        # the script's `date` is the report morning: its 00z run is that day's,
-        # its 12z run is the previous evening's
-        run_day = ref if not pattern.endswith("12ens") else ref - pd.Timedelta(days=1)
+    for init, pattern in wanted:
         try:
-            ldz = compute_ldz(gas_df, actual_df, GAS_LDZ_DEFAULT_AREAS, pattern, run_day)
-            rdl = compute_rdl(gas_df, GAS_RDL_DEFAULT_REGIONS, pattern, run_day)
+            ldz = compute_ldz(gas_df, actual_df, GAS_LDZ_DEFAULT_AREAS, pattern, init)
+            rdl = compute_rdl(gas_df, cfg["rdl_regions"], GAS_RDL_DEFAULT_REGIONS, pattern, init)
         except Exception:
             continue
-        out[label] = {"ldz": _strip(ldz), "rdl": _strip(rdl)}
+        if ldz["cur_init"] is None and rdl["cur_init"] is None:
+            continue
+        out[format_run_label(init, pattern)] = {"ldz": _strip(ldz), "rdl": _strip(rdl)}
     return out
 
 
@@ -375,8 +408,8 @@ def _strip(res: dict) -> dict:
         "total_trade": res["total_trade"],
         "total_read": res["total_read"],
         "window": (pair["d_in"].strftime("%d %b"), pair["d_out"].strftime("%d %b")),
-        "cur_init": None if res["cur_init"] is None else res["cur_init"].strftime("%d %b"),
-        "prev_init": None if res["prev_init"] is None else res["prev_init"].strftime("%d %b"),
+        "cur_init": None if res["cur_init"] is None else res["cur_init"].strftime("%d %b %Hz"),
+        "prev_init": None if res["prev_init"] is None else res["prev_init"].strftime("%d %b %Hz"),
         "bullish_positive": res["bullish_positive"],
     }
 
@@ -454,16 +487,16 @@ def _run_notices(results: dict[str, dict]) -> None:
     for label, res in results.items():
         pair, cur, prev = res["pair"], res["cur_init"], res["prev_init"]
         if cur is None:
-            status_banner(f"{label}: no run found on or before {pair['date_min']:%d %b} — leg skipped.", "critical")
+            status_banner(f"{label}: no run found on or before {pair['run_init']:%d %b %H}z — leg skipped.", "critical")
             continue
-        if cur != pair["date_min"]:
-            status_banner(f"{label}: the run of {pair['date_min']:%d %b} has not landed yet — "
-                          f"using the run initialised {cur:%a %d %b}.", "warning")
+        if cur != pair["run_init"]:
+            status_banner(f"{label}: the run of {pair['run_init']:%d %b %H}z has not landed yet — "
+                          f"using the run initialised {cur:%a %d %b %H}z.", "warning")
         if prev is None:
-            status_banner(f"{label}: no comparison run near {pair['prev_date']:%d %b} — deltas show n/a.", "warning")
-        elif prev != pair["prev_date"]:
-            status_banner(f"{label}: comparing against the run of {prev:%a %d %b}, not "
-                          f"{pair['prev_date']:%a %d %b} — that run is not in the table.", "warning")
+            status_banner(f"{label}: no comparison run near {pair['prev_init']:%d %b %H}z — deltas show n/a.", "warning")
+        elif prev != pair["prev_init"]:
+            status_banner(f"{label}: comparing against the run of {prev:%a %d %b %H}z, not "
+                          f"{pair['prev_init']:%a %d %b %H}z — that run is not in the table.", "warning")
 
 
 def _leg_csv(results: dict[str, dict]) -> bytes:
@@ -474,20 +507,18 @@ def _leg_csv(results: dict[str, dict]) -> bytes:
                          "delta_gwh": row["delta"], "window_total_gwh": row["total"],
                          "days_in_window": row["n_days"], "trade": row["trade"], "read": row["read"],
                          "window_from": res["pair"]["d_in"].date(), "window_to": res["pair"]["d_out"].date(),
-                         "run_init": None if res["cur_init"] is None else res["cur_init"].date(),
-                         "prev_init": None if res["prev_init"] is None else res["prev_init"].date()})
+                         "run_init": res["cur_init"], "prev_init": res["prev_init"]})
         recs.append({"run": label, "leg": res["leg"], "area": "TOTAL",
                      "delta_gwh": res["total_delta"], "window_total_gwh": None, "days_in_window": None,
                      "trade": res["total_trade"], "read": res["total_read"],
                      "window_from": res["pair"]["d_in"].date(), "window_to": res["pair"]["d_out"].date(),
-                     "run_init": None if res["cur_init"] is None else res["cur_init"].date(),
-                     "prev_init": None if res["prev_init"] is None else res["prev_init"].date()})
+                     "run_init": res["cur_init"], "prev_init": res["prev_init"]})
     return pd.DataFrame(recs).to_csv(index=False).encode()
 
 
 def _run_labels(res: dict) -> tuple[str, str]:
-    prev = "previous run" if res["prev_init"] is None else f"{res['prev_init']:%a %d %b}"
-    cur = "this run" if res["cur_init"] is None else f"{res['cur_init']:%a %d %b}"
+    prev = "previous run" if res["prev_init"] is None else f"{res['prev_init']:%a %d %b %H}z"
+    cur = "this run" if res["cur_init"] is None else f"{res['cur_init']:%a %d %b %H}z"
     return prev, cur
 
 
@@ -554,7 +585,7 @@ def _render_rdl(results: dict[str, dict], regions: list[str]) -> None:
     first = next(iter(results.values()))
     partial = {r["area"]: r["partial"] for r in first["rows"] if r["partial"]}
     if partial:
-        status_banner("Missing grids in the sandbox table, so these regions are a partial sum: "
+        status_banner("Missing grids in the source table, so these regions are a partial sum: "
                       + " · ".join(f"{k} without {', '.join(v)}" for k, v in partial.items())
                       + ". Levels are understated; the run-over-run delta is not, both runs use the "
                         "same grids.", "warning")
@@ -602,34 +633,58 @@ def _render_combined(ldz: dict[str, dict], rdl: dict[str, dict]) -> None:
                "scripts' cumulative trade threshold.")
 
 
+def _source_switch() -> str:
+    """Data source for the section — follows the Morning Call's choice by default,
+    so the gas GWh and the grid are read off the same runs."""
+    if "gas_source" not in st.session_state:
+        mc = st.session_state.get("mc_source")
+        names = enabled_sources(GAS_SOURCES)
+        st.session_state["gas_source"] = mc if mc in names else (GAS_DEFAULT_SOURCE if GAS_DEFAULT_SOURCE in names else names[0])
+    names = enabled_sources(GAS_SOURCES)
+    if st.session_state.get("gas_source") not in names:
+        st.session_state["gas_source"] = names[0]
+    if len(names) == 1:
+        return names[0]
+    return st.radio("Source", names, horizontal=True, key="gas_source",
+                    help="\n".join(f"{k}: {GAS_SOURCES[k]['desc']}" for k in names))
+
+
 def render_gas_demand():
     st.markdown("#### GAS DEMAND")
-    st.caption("EU gas demand from the weather, from the **sandbox** tables — "
-               "the same fitted curves as ldz_forecast.py and rdl_forecast.py. "
-               "EC and GFS runs are shown side by side; pick runs below.")
+    source = _source_switch()
+    cfg = GAS_SOURCES[source]
+    st.caption(f"EU gas demand from the weather — {cfg['desc']} — through the same fitted curves as "
+               "ldz_forecast.py and rdl_forecast.py. EC and GFS runs are shown side by side; pick runs below. "
+               "Every run is scored against the run the scripts pair it with: a 00z against the same model's "
+               "previous 00z (Friday's on a Monday), a later cycle against that day's 00z.")
 
     try:
-        gas_df = load_gas_demand_daily()
+        gas_df = load_gas_demand_daily(source)
     except Exception as e:
-        st.error(f"Cannot read from the sandbox tables (gas_demand_daily): {e}")
+        st.error(f"Cannot read from the sandbox table {cfg['table']}: {e}")
         return
     if gas_df.empty:
-        status_banner("No data found in gas_demand_daily.", "warning")
+        status_banner(f"No rows in {cfg['table']} yet — it is written by Power_dashboard/pipeline "
+                      "(run_morning.bat, run_daily.py --only volue).", "warning")
         return
+    if st.session_state.get("gas_source_last") != source:
+        for k in ("gas_sel_runs", "gas_cmp_sel", "gas_ldz_chart_run", "gas_rdl_chart_run"):
+            st.session_state.pop(k, None)
+        st.session_state["gas_source_last"] = source
 
-    # --- EC + GFS side by side (no family selector) ---
-    avail = list_family_runs(gas_df, GAS_ALL_PATTERNS)
-    run_map = {format_family_run(init_dt, pat): (init_dt, pat)
-               for init_dt, pat in avail}
-    run_keys = list(run_map.keys())
+    # --- runs: every cycle of every model in the table, newest first ---
+    avail = list_runs_full(gas_df, cfg["patterns"])
+    run_map = {format_run_label(init, pat): (init, pat) for init, pat in avail}
+    run_keys = list(run_map)
+    defaults = [format_run_label(init, pat) for init, pat in default_runs(gas_df, source)]
+    defaults = [k for k in defaults if k in run_map] or run_keys[:2]
 
     c1, c2, c3 = st.columns([2.6, 2.0, 3.4])
     with c1:
         if run_keys:
-            sel = st.multiselect("Run(s)", run_keys, default=run_keys[:2],
-                                 key="gas_sel_runs",
-                                 help="Select one or more runs to compare "
-                                      "(EC, GFS and Op runs are all available).")
+            sel = st.multiselect("Run(s)", run_keys, default=defaults, key="gas_sel_runs",
+                                 help="Select one or more runs to compare — the latest EC-ENS and GFS-ENS "
+                                      "by default; every model and cycle in the table is offered.")
             sel_runs = [run_map[k] for k in sel]
         else:
             sel_runs = []
@@ -638,32 +693,30 @@ def render_gas_demand():
     with c2:
         cmp_mode = st.radio("Comparison", ["Auto (script logic)", "Manual"],
                             key="gas_cmp_mode", horizontal=True,
-                            help="Auto follows the original script pairing (e.g. 00z vs previous 00z); "
-                                 "Manual lets you pick any run as the comparison.")
+                            help="Auto follows the original script pairing (00z vs the previous 00z, a later "
+                                 "cycle vs that day's 00z); Manual lets you pick any run as the comparison.")
         manual_cmp_init = None
         if cmp_mode == "Manual" and run_keys:
             default_cmp = min(1, len(run_keys) - 1)
-            cmp_sel = st.selectbox("Compare with", run_keys, index=default_cmp,
-                                   key="gas_cmp_sel")
-            cmp_dt, _cmp_pat = run_map[cmp_sel]
-            manual_cmp_init = cmp_dt
+            cmp_sel = st.selectbox("Compare with", run_keys, index=default_cmp, key="gas_cmp_sel")
+            manual_cmp_init, _cmp_pat = run_map[cmp_sel]
 
     with c3:
         areas = st.multiselect("LDZ countries", list(GAS_LDZ_AREAS), GAS_LDZ_DEFAULT_AREAS, key="gas_areas")
-        regions = st.multiselect("Wind & solar regions", list(GAS_RDL_REGIONS), GAS_RDL_DEFAULT_REGIONS,
+        regions = st.multiselect("Wind & solar regions", list(cfg["rdl_regions"]), GAS_RDL_DEFAULT_REGIONS,
                                  key="gas_regions")
 
     if not sel_runs:
         status_banner("Pick at least one run.", "warning")
         return
 
-    # Completeness banners
+    # Completeness banners — on the run's own rows (its cycle), not its day
     for init_dt, pattern in sel_runs:
-        label = format_family_run(init_dt, pattern)
-        comp = run_completeness(gas_df, pattern, init_dt)
-        if not comp["complete"]:
-            status_banner(f"Run loading — {label} has {comp['n_days']}/{comp['expected']} forecast days "
-                          f"({comp['pct']:.0f}%). Shown data is partial.", "warning")
+        rows = gas_df[(gas_df["pattern"] == pattern) & (gas_df["init_time"] == init_dt)]
+        n_days, expected = int(rows["day"].nunique()), EXPECTED_HORIZON.get(pattern, 15)
+        if n_days < 0.9 * expected:
+            status_banner(f"Run loading — {format_run_label(init_dt, pattern)} has {n_days}/{expected} forecast "
+                          f"days. Shown data is partial.", "warning")
 
     try:
         actual_df = load_recent_actual_temp(tuple(areas) or tuple(GAS_LDZ_DEFAULT_AREAS), days=40)
@@ -677,17 +730,20 @@ def render_gas_demand():
     ldz_res, rdl_res = {}, {}
     with st.spinner("Building the demand curves…"):
         for init_dt, pattern in sel_runs:
-            label = format_family_run(init_dt, pattern)
-            report_date = init_dt.normalize()
+            label = format_run_label(init_dt, pattern)
             prev_ov = manual_cmp_init if (cmp_mode == "Manual" and manual_cmp_init is not None) else None
             if areas:
-                ldz_res[label] = compute_ldz(gas_df, actual_df, areas, pattern, report_date,
-                                             prev_override=prev_ov)
+                ldz_res[label] = compute_ldz(gas_df, actual_df, areas, pattern, init_dt, prev_override=prev_ov)
             if regions:
-                rdl_res[label] = compute_rdl(gas_df, regions, pattern, report_date,
+                rdl_res[label] = compute_rdl(gas_df, cfg["rdl_regions"], regions, pattern, init_dt,
                                              prev_override=prev_ov)
 
     _run_notices(ldz_res or rdl_res)
+    if source == "EQ" and areas:
+        st.caption("The LDZ curves were fitted on Volue consumption temperatures and are seeded with Volue "
+                   "actuals; EQ's consumption temperature is the same kind of population-weighted mean, so "
+                   "a small level offset is possible — the run-over-run delta, which is what is traded "
+                   "here, is unaffected because both runs come from the same source.")
 
     tabs = st.tabs(["LDZ — heating demand", "Wind & Solar — displaced gas", "Both legs"])
     with tabs[0]:
@@ -709,5 +765,6 @@ def render_gas_demand():
     st.divider()
     dl = {**{f"LDZ {k}": v for k, v in ldz_res.items()}, **{f"W&S {k}": v for k, v in rdl_res.items()}}
     if dl:
+        newest = max(init for init, _ in sel_runs)
         st.download_button("Download deltas (CSV)", _leg_csv(dl),
-                           f"gas_demand_{report_date:%Y%m%d}.csv", "text/csv", key="gas_dl")
+                           f"gas_demand_{source.lower()}_{newest:%Y%m%d_%H}z.csv", "text/csv", key="gas_dl")

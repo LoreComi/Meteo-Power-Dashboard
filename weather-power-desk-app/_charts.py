@@ -883,6 +883,156 @@ def make_wr_transition_heatmap(matrix: pd.DataFrame, title: str, unit: str = "%"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MORNING CALL — anomaly and change, as arrows
+# ══════════════════════════════════════════════════════════════════════════════
+# Compare-run markers are identity colours that stay clear of the diverging
+# red / blue the reference run's anomaly is painted in.
+MORNING_COMPARE_COLORS = [CATEGORICAL[1], CATEGORICAL[5], CATEGORICAL[6], CATEGORICAL[2], CATEGORICAL[4], CATEGORICAL[3]]
+
+
+def make_morning_anomaly_chart(cells: pd.DataFrame, blocks: dict, windows: list[tuple[str, str]],
+                               col_labels: list[str], height: int | None = None, px_per_row: int = 18,
+                               compact: bool = False) -> go.Figure:
+    """The Morning Call grid as one picture: per block (rows) and window (columns),
+    every region's departure from normal on the x axis. The reference run is the
+    filled dot (red = warmer / less wind, solar, precipitation; blue = colder /
+    more), the hollow dot is where its previous run stood, the bar between them
+    is the change since then — so direction and size of the move and the anomaly
+    itself are read in one glance. The other runs shown in the grid are small
+    diamonds at their own anomaly.
+
+    `cells` is _morning.compute_grid's frame; `windows` = [(wkey, title), …];
+    `col_labels[i]` names grid column i (0 = reference). The precipitation
+    block is the 15-day sum and is drawn once, in the first column.
+    """
+    from plotly.subplots import make_subplots
+
+    names = [n for n in blocks if not cells[cells["block"] == n].empty] or list(blocks)
+    n_rows, n_cols = len(names), max(len(windows), 1)
+    row_units = [max(len(blocks[n]["rows"]), 3) + 1.8 for n in names]
+    if height is None:
+        height = int(sum(row_units) * px_per_row + 120)
+    fig = make_subplots(rows=n_rows, cols=n_cols, row_heights=row_units,
+                        horizontal_spacing=0.07, vertical_spacing=min(0.12, 44 / height))
+    layout = {k: v for k, v in PLOTLY_LAYOUT.items() if k not in ("xaxis", "yaxis", "hovermode", "legend", "margin")}
+    fig.update_layout(**layout, height=height, hovermode="closest", showlegend=True,
+                      margin=dict(l=56 if compact else 66, r=16, t=30, b=64),
+                      legend=dict(orientation="h", yanchor="top", y=-0.012, xanchor="left", x=0,
+                                  bgcolor="rgba(0,0,0,0)", font=dict(size=10.5, color=INK_SECONDARY)))
+    # one left-aligned title per subplot: block [unit] · window
+    for r, name in enumerate(names, start=1):
+        b = blocks[name]
+        short = name.split(" (")[0]
+        for c, (wkey, wtitle) in enumerate(windows, start=1):
+            if b["agg"] == "sum" and c > 1:
+                continue
+            txt = (f"<b>{short}</b> [{b['unit']}] · sum of the first 15 forecast days" if b["agg"] == "sum"
+                   else f"<b>{short}</b> [{b['unit']}] · {wtitle}")
+            sp = fig.get_subplot(r, c)
+            fig.add_annotation(text=txt, showarrow=False, xref="paper", yref="paper",
+                               x=sp.xaxis.domain[0], y=sp.yaxis.domain[1], xanchor="left", yanchor="bottom",
+                               yshift=4, font=dict(size=11, color=INK_SECONDARY))
+
+    shown: set[str] = set()
+
+    def _legend(group: str) -> bool:
+        if group in shown:
+            return False
+        shown.add(group)
+        return True
+
+    def _sgn(v: float, fmt: str) -> str:
+        r = round(v, 1)
+        return ("+" if r > 0 else "") + fmt.format(0.0 if r == 0 else v)
+
+    for r, name in enumerate(names, start=1):
+        b = blocks[name]
+        unit, fmt, hs, wip = b["unit"], b["fmt"], float(b["heat_scale"]), bool(b["warm_is_positive"])
+        regions = [lbl for lbl, _ in b["rows"]]
+        blk = cells[cells["block"] == name]
+        is_sum = b["agg"] == "sum"
+        both = pd.concat([blk["d_norm"], blk["d_norm"] - blk["d_run"]]).abs()
+        m = max(hs * 1.3, float(both.max()) * 1.25 if both.notna().any() else 0.0)
+        for c, (wkey, wtitle) in enumerate(windows, start=1):
+            if is_sum and c > 1:
+                sp = fig.get_subplot(r, c)
+                fig.add_annotation(text="15-day sum — drawn once, in the first column", showarrow=False,
+                                   xref="paper", yref="paper", x=float(np.mean(sp.xaxis.domain)),
+                                   y=float(np.mean(sp.yaxis.domain)), font=dict(size=11, color=INK_MUTED))
+                fig.update_xaxes(visible=False, row=r, col=c)
+                fig.update_yaxes(visible=False, row=r, col=c)
+                continue
+            sel = blk[blk["window"] == ("w1" if is_sum else wkey)]
+            ref = sel[sel["col"] == 0].drop_duplicates("region").set_index("region")
+            seg_x, seg_y = [], []
+            prev_x, prev_y, prev_h = [], [], []
+            cur_x, cur_y, cur_c, cur_t, cur_p, cur_h = [], [], [], [], [], []
+            for reg in regions:
+                if reg not in ref.index:
+                    continue
+                row = ref.loc[reg]
+                dn, dr, val = float(row["d_norm"]), float(row["d_run"]), float(row["value"])
+                if np.isnan(dn):
+                    continue
+                if not np.isnan(dr):
+                    px = dn - dr
+                    seg_x += [px, dn, None]
+                    seg_y += [reg, reg, None]
+                    prev_x.append(px)
+                    prev_y.append(reg)
+                    prev_h.append(f"{reg} · previous run<br>{_sgn(px, fmt)} {unit} vs normal")
+                cur_x.append(dn)
+                cur_y.append(reg)
+                zero = round(dn, 1) == 0
+                cur_c.append(INK_MUTED if zero else (DIV_POS if (dn > 0) == wip else DIV_NEG))
+                cur_t.append(_sgn(dn, fmt))
+                cur_p.append("middle right" if dn >= 0 else "middle left")
+                cur_h.append(f"{reg} · {col_labels[0]}<br>vs normal {_sgn(dn, fmt)} {unit}<br>"
+                             f"change vs previous run {'n/a' if np.isnan(dr) else _sgn(dr, fmt) + ' ' + unit}<br>"
+                             f"value {fmt.format(val)} {unit}")
+            if seg_x:
+                fig.add_trace(go.Scatter(x=seg_x, y=seg_y, mode="lines", line=dict(color=BASELINE, width=4),
+                                         hoverinfo="skip", showlegend=False), row=r, col=c)
+            if prev_x:
+                fig.add_trace(go.Scatter(x=prev_x, y=prev_y, mode="markers", name="where the previous run stood",
+                                         marker=dict(symbol="circle-open", size=10, color=INK_MUTED, line=dict(width=1.8)),
+                                         legendgroup="prev", showlegend=_legend("prev"),
+                                         hovertext=prev_h, hoverinfo="text"), row=r, col=c)
+            if cur_x:
+                fig.add_trace(go.Scatter(x=cur_x, y=cur_y, mode="markers+text", name=f"{col_labels[0]} — vs normal",
+                                         marker=dict(size=13, color=cur_c, line=dict(width=1.2, color="#ffffff")),
+                                         text=cur_t, textposition=cur_p,
+                                         textfont=dict(size=10.5, color=INK_SECONDARY, family="JetBrains Mono, monospace"),
+                                         legendgroup="ref", showlegend=_legend("ref"),
+                                         hovertext=cur_h, hoverinfo="text"), row=r, col=c)
+            for ci in sorted(int(i) for i in sel["col"].unique() if int(i) > 0):
+                sub = sel[sel["col"] == ci].drop_duplicates("region").set_index("region")
+                xs, ys, hs_ = [], [], []
+                for reg in regions:
+                    if reg in sub.index and not np.isnan(float(sub.loc[reg, "d_norm"])):
+                        dn = float(sub.loc[reg, "d_norm"])
+                        dref = float(sub.loc[reg, "d_ref"])
+                        xs.append(dn)
+                        ys.append(reg)
+                        hs_.append(f"{reg} · {col_labels[ci] if ci < len(col_labels) else ci}<br>vs normal {_sgn(dn, fmt)} {unit}"
+                                   f"<br>vs reference {'n/a' if np.isnan(dref) else _sgn(dref, fmt) + ' ' + unit}")
+                if xs:
+                    colour = MORNING_COMPARE_COLORS[(ci - 1) % len(MORNING_COMPARE_COLORS)]
+                    fig.add_trace(go.Scatter(x=xs, y=ys, mode="markers", name=col_labels[ci] if ci < len(col_labels) else str(ci),
+                                             marker=dict(symbol="diamond", size=8, color=colour, line=dict(width=0.8, color="#ffffff")),
+                                             legendgroup=f"c{ci}", showlegend=_legend(f"c{ci}"),
+                                             hovertext=hs_, hoverinfo="text"), row=r, col=c)
+            fig.add_vline(x=0, line_color=INK_MUTED, line_width=1.1, row=r, col=c)
+            fig.update_xaxes(range=[-m, m], zeroline=False, gridcolor=GRIDLINE, linecolor=GRIDLINE,
+                             tickfont=dict(color=INK_MUTED, size=10), ticksuffix=f" {unit}" if not compact else "",
+                             row=r, col=c)
+            fig.update_yaxes(categoryorder="array", categoryarray=regions[::-1], gridcolor=GRIDLINE, linecolor=GRIDLINE,
+                             automargin=True, tickfont=dict(color=INK_PRIMARY, size=11 if not compact else 10.5),
+                             row=r, col=c)
+    return fig
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # GAS DEMAND
 # ══════════════════════════════════════════════════════════════════════════════
 # Colour job here is "which run": the previous run is the same hue at lower
