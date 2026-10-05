@@ -717,7 +717,15 @@ def make_river_chart(series: pd.DataFrame, title: str, unit: str = "°C", thresh
                       annotation_text=f"{threshold:.0f} {unit}", annotation_position="top left",
                       annotation_font=dict(size=10, color=INK_MUTED))
     fig.update_yaxes(title_text=unit, rangemode="tozero" if unit != "°C" else "normal")
-    fig.update_xaxes(tickformat="%b %y")
+    # tick labels follow the zoom: day + month when zoomed in, month + year when zoomed out
+    fig.update_xaxes(
+        tickformat="%b %y", hoverformat="%a %d %b %Y",
+        tickformatstops=[
+            dict(dtickrange=[None, 86_400_000 * 2], value="%d %b %Y"),
+            dict(dtickrange=[86_400_000 * 2, "M1"], value="%d %b"),
+            dict(dtickrange=["M1", "M12"], value="%b %Y"),
+            dict(dtickrange=["M12", None], value="%Y"),
+        ])
     fig.update_layout(hovermode="x unified", legend=dict(y=-0.25))
     return fig
 
