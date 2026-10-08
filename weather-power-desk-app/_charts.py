@@ -20,7 +20,7 @@ from _style import (
     CATEGORICAL, PROVIDER_COLORS, SCENARIO_COLORS, ENS_FAN_ALPHA, SEQ_BLUE,
     DIV_NEG, DIV_POS, DIV_MID, STATUS_WARNING, STATUS_GOOD, STATUS_CRITICAL,
     HYDRO_HIST_GREY, HYDRO_CURRENT_RED, hydro_recent_colours, hex_to_rgba,
-    CAT_BLUE, CAT_ORANGE, CAT_RED,
+    CAT_BLUE, CAT_ORANGE, CAT_RED, CAT_AQUA, CAT_VIOLET, CAT_MAGENTA, CAT_YELLOW,
 )
 
 from _config import MAP_EUROPE_BBOX, HYDRO_MAP_EXTENT
@@ -1143,4 +1143,89 @@ def make_gas_delta_bars(labels: list[str], values: list[float], title: str,
     fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
     fig.update_layout(hovermode="closest", bargap=0.35)
     fig.update_yaxes(title_text="Δ GWh over the window")
+    return fig
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HYDRO — production vs precipitation energy (the Production tab)
+# ══════════════════════════════════════════════════════════════════════════════
+
+HYDRO_ROR_COLOR = CAT_BLUE          # the hues analysis_ror_reservoir_italy.py uses
+HYDRO_RES_COLOR = CAT_ORANGE
+HYDRO_RRE_COLOR = CAT_AQUA
+HYDRO_RRE_OTHER_COLORS = [CAT_VIOLET, CAT_MAGENTA, CAT_YELLOW]
+_DAY_TICKS = [
+    dict(dtickrange=[None, 86_400_000 * 2], value="%d %b %Y"),
+    dict(dtickrange=[86_400_000 * 2, "M1"], value="%d %b"),
+    dict(dtickrange=["M1", "M12"], value="%b %Y"),
+    dict(dtickrange=["M12", None], value="%Y"),
+]
+
+
+def make_hydro_production_chart(s: dict, title: str, window: int, precip_patterns: list[str],
+                                height: int = 480) -> go.Figure:
+    """One area, two panels on one time axis: production as stacked daily bars —
+    run-of-river and reservoir observed, then hatched for the latest Volue issue —
+    with the normal dashed; below it the precipitation energy observed, its normal
+    and the latest issue of each ensemble. `s` is _hydro_quantify.production_series;
+    the x range is the observed window and the forward window of the same length."""
+    from plotly.subplots import make_subplots
+    layout = {k: v for k, v in PLOTLY_LAYOUT.items() if k not in ("xaxis", "yaxis", "hovermode", "legend")}
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.09, row_heights=[0.58, 0.42],
+                        subplot_titles=("Production · GWh/day", "Precipitation energy · GWh/day"))
+    fig.update_layout(**layout, title=dict(text=title, font=dict(size=14)), height=height, barmode="stack",
+                      bargap=0.25, hovermode="x unified",
+                      legend=dict(orientation="h", yanchor="top", y=-0.1, x=0, font=dict(size=10)))
+    for a in fig.layout.annotations:
+        a.update(font=dict(size=11, color=INK_SECONDARY), x=0, xanchor="left")
+    last = s.get("last_obs")
+    if last is None:
+        return fig
+    x0, x1 = last - pd.Timedelta(days=window - 1), last + pd.Timedelta(days=window)
+    edge = dict(color="#ffffff", width=1)        # the 2px surface gap between stacked segments
+
+    def bars(series, name, color, row, forecast=False, legendgroup=None):
+        d = series.loc[x0:x1].dropna()
+        if d.empty:
+            return
+        fig.add_trace(go.Bar(x=d.index, y=d.values, name=name, legendgroup=legendgroup or name,
+                             marker=dict(color=hex_to_rgba(color, 0.55) if forecast else color, line=edge,
+                                         pattern=dict(shape="/", fgcolor=color, solidity=0.35) if forecast else None),
+                             hovertemplate=f"{name} %{{y:,.0f}} GWh<extra></extra>"), row=row, col=1)
+
+    def line(series, name, color, row, dash="dash", width=1.6, markers=False):
+        d = series.loc[x0:x1].dropna()
+        if d.empty:
+            return
+        fig.add_trace(go.Scatter(x=d.index, y=d.values, name=name, mode="lines+markers" if markers else "lines",
+                                 line=dict(color=color, width=width, dash=dash), marker=dict(size=5),
+                                 hovertemplate=f"{name} %{{y:,.0f}} GWh<extra></extra>"), row=row, col=1)
+
+    bars(s["ror"], "Run-of-river", HYDRO_ROR_COLOR, 1)
+    bars(s["res"], "Reservoir", HYDRO_RES_COLOR, 1)
+    fc_lbl = f" · issued {s['fc_issued']:%d %b}" if s.get("fc_issued") is not None else ""
+    fwd = s["ror_f"][s["ror_f"].index > last] if len(s["ror_f"]) else s["ror_f"]
+    bars(fwd, "Run-of-river · Volue fcst" + fc_lbl, HYDRO_ROR_COLOR, 1, forecast=True)
+    fwd = s["res_f"][s["res_f"].index > last] if len(s["res_f"]) else s["res_f"]
+    bars(fwd, "Reservoir · Volue fcst" + fc_lbl, HYDRO_RES_COLOR, 1, forecast=True)
+    line(s["tot_n"], "Total · normal", INK_MUTED, 1)
+
+    bars(s["rre"], "Precip. energy", HYDRO_RRE_COLOR, 2)
+    line(s["rre_n"], "Precip. energy · normal", INK_MUTED, 2)
+    for i, p in enumerate([p for p in precip_patterns if p in s["rre_f"]]):
+        ser, iss = s["rre_f"][p]
+        ser = ser[ser.index > last]
+        lbl = p + (f" · {iss:%d %b %Hz}" if iss is not None else "")
+        line(ser, lbl, HYDRO_RRE_COLOR if i == 0 else HYDRO_RRE_OTHER_COLORS[(i - 1) % len(HYDRO_RRE_OTHER_COLORS)],
+             2, dash="solid" if i == 0 else "dot", width=2, markers=True)
+
+    split = (last + pd.Timedelta(hours=12)).isoformat()
+    fig.add_shape(type="line", x0=split, x1=split, y0=0, y1=1, xref="x", yref="paper",
+                  line=dict(color=BASELINE, width=1, dash="dot"))
+    fig.add_annotation(x=split, y=1, xref="x", yref="paper", text="forecast →", showarrow=False,
+                       xanchor="left", yanchor="bottom", font=dict(size=10, color=INK_MUTED))
+    pad = pd.Timedelta(hours=14)
+    fig.update_xaxes(range=[(x0 - pad).isoformat(), (x1 + pad).isoformat()], tickformat="%d %b", tickformatstops=_DAY_TICKS,
+                     hoverformat="%a %d %b %Y", showgrid=False)
+    fig.update_yaxes(rangemode="tozero", tickformat=",.0f", gridcolor=GRIDLINE)
     return fig

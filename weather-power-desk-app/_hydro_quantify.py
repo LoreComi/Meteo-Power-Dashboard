@@ -256,3 +256,98 @@ def stats_text(family_title: str, per_country: dict[str, dict]) -> str:
         lines.append("*** ")
     lines.append("")
     return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PRODUCTION — hydro_prod_daily (pipeline/volue_hydro_prod.py)
+# ══════════════════════════════════════════════════════════════════════════════
+# Per area and day, GWh/day: run-of-river ('ror') and total ('tot') production,
+# actual / normal / Volue's forecast, and precipitation energy ('rre') actual /
+# normal / ensemble means. Reservoir production = tot − ror, the split
+# Hydro_Report/analysis_ror_reservoir_italy.py makes (it includes pumped-storage
+# turbining; Volue's `pump` curve is the pumping load, not subtracted here).
+
+def _latest_issue(g: pd.DataFrame) -> tuple[pd.Series, pd.Timestamp | None]:
+    """The most recent issue of a forecast frame as a day-indexed series, with its init time."""
+    if g.empty:
+        return pd.Series(dtype=float), None
+    ref = g["reference_date"].max()
+    g = g[g["reference_date"] == ref]
+    issued = g["init_time"].iloc[0] if "init_time" in g.columns and pd.notna(g["init_time"].iloc[0]) else ref
+    return g.set_index("day")["value"].astype(float).sort_index(), issued
+
+
+def production_series(df: pd.DataFrame, precip_patterns: list[str]) -> dict:
+    """The daily GWh series of ONE area from the long hydro_prod_daily frame:
+    ror / res / tot observed, `_n` their normals, `_f` the latest Volue production
+    issue (fc_issued = its init time), rre / rre_n precipitation energy observed and
+    normal, rre_f = {pattern: (series, issued)} for the latest issue of each
+    ensemble, last_obs = the last observed production day."""
+    def ts(variable: str, data_type: str) -> pd.Series:
+        g = df[(df["variable"] == variable) & (df["data_type"] == data_type) & (df["pattern"] == "")]
+        return g.set_index("day")["value"].astype(float).sort_index()
+
+    out: dict = {}
+    for suffix, data_type in (("", "sa"), ("_n", "n")):
+        ror, tot = ts("ror", data_type), ts("tot", data_type)
+        out["ror" + suffix], out["tot" + suffix], out["res" + suffix] = ror, tot, (tot - ror).dropna()
+    fc = df[(df["data_type"] == "f") & (df["pattern"] == "volue")]
+    ror_f, issued = _latest_issue(fc[fc["variable"] == "ror"])
+    tot_f, _ = _latest_issue(fc[fc["variable"] == "tot"])
+    out["ror_f"], out["tot_f"], out["res_f"], out["fc_issued"] = ror_f, tot_f, (tot_f - ror_f).dropna(), issued
+    out["rre"], out["rre_n"] = ts("rre", "sa"), ts("rre", "n")
+    out["rre_f"] = {}
+    for p in precip_patterns:
+        s, iss = _latest_issue(df[(df["variable"] == "rre") & (df["data_type"] == "f") & (df["pattern"] == p)])
+        if len(s):
+            out["rre_f"][p] = (s, iss)
+    out["last_obs"] = out["tot"].index.max() if len(out["tot"]) else None
+    return out
+
+
+def _window_sum(series: pd.Series | None, w: tuple[pd.Timestamp, pd.Timestamp]) -> tuple[float | None, int]:
+    if series is None or len(series) == 0:
+        return None, 0
+    x = series.loc[w[0]:w[1]].dropna()
+    return (float(x.sum()) if len(x) else None), int(len(x))
+
+
+def _pct(a: float | None, b: float | None) -> float | None:
+    return (a / b * 100.0) if (a is not None and b not in (None, 0)) else None
+
+
+def production_summary(s: dict, window: int, precip_patterns: list[str]) -> dict:
+    """GWh sums over the observed window (the `window` days to the last observed
+    production day) and the forward window (the `window` days after it): obs_* /
+    fwd_* for ror, res, tot with their normals (`_n`) and % of normal, the
+    precipitation energy observed / expected (per pattern, `fwd_rre_ref` = the
+    first pattern), and the precipitation − production balance of each window.
+    n_* are the days found in each window, so a short series is visible."""
+    last = s.get("last_obs")
+    if last is None:
+        return {}
+    obs = (last - pd.Timedelta(days=window - 1), last)
+    fwd = (last + pd.Timedelta(days=1), last + pd.Timedelta(days=window))
+    r: dict = {"last_obs": last, "obs_from": obs[0], "fwd_to": fwd[1], "fc_issued": s.get("fc_issued")}
+    for k in ("ror", "res", "tot"):
+        r[f"obs_{k}"], _ = _window_sum(s[k], obs)
+        r[f"obs_{k}_n"], _ = _window_sum(s[k + "_n"], obs)
+        r[f"fwd_{k}"], _ = _window_sum(s[k + "_f"], fwd)
+        r[f"fwd_{k}_n"], _ = _window_sum(s[k + "_n"], fwd)
+    _, r["n_obs"] = _window_sum(s["tot"], obs)
+    _, r["n_fwd"] = _window_sum(s["tot_f"], fwd)
+    r["obs_tot_pct"], r["fwd_tot_pct"] = _pct(r["obs_tot"], r["obs_tot_n"]), _pct(r["fwd_tot"], r["fwd_tot_n"])
+    r["obs_rre"], r["n_obs_rre"] = _window_sum(s["rre"], obs)
+    r["obs_rre_n"], _ = _window_sum(s["rre_n"], obs)
+    r["obs_rre_pct"] = _pct(r["obs_rre"], r["obs_rre_n"])
+    r["fwd_rre_n"], _ = _window_sum(s["rre_n"], fwd)
+    r["fwd_rre"], r["n_fwd_rre"], r["rre_issued"] = {}, {}, {}
+    for p, (ser, iss) in s["rre_f"].items():
+        r["fwd_rre"][p], r["n_fwd_rre"][p] = _window_sum(ser, fwd)
+        r["rre_issued"][p] = iss
+    ref = precip_patterns[0] if precip_patterns else None
+    r["fwd_rre_ref"] = r["fwd_rre"].get(ref)
+    r["fwd_rre_ref_pct"] = _pct(r["fwd_rre_ref"], r["fwd_rre_n"])
+    r["obs_balance"] = (r["obs_rre"] - r["obs_tot"]) if (r["obs_rre"] is not None and r["obs_tot"] is not None) else None
+    r["fwd_balance"] = (r["fwd_rre_ref"] - r["fwd_tot"]) if (r["fwd_rre_ref"] is not None and r["fwd_tot"] is not None) else None
+    return r

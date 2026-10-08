@@ -25,6 +25,13 @@ RIVER_NORMAL_AHEAD_DAYS=400
 RIVER_FORECAST_TAGS=
 RIVER_FORECAST_RUNS=1
 
+# ── Hydro production (Volue wapi → hydro_prod_daily; credentials as the Morning Call feed) ──
+# HYDRO_PROD_AREAS=fr,ch,at,it,it-nord,cwe,de,es,pt,ib,np,no,se,fi,see
+# HYDRO_PROD_PRECIP_PATTERNS=ec00ens,ec12ens,gfs00ens
+# HYDRO_PROD_ACTUAL_DAYS=45          actual days re-read per run (HYDRO_PROD_HISTORY_START on --backfill)
+# HYDRO_PROD_FORECAST_DAYS=45        days kept of each Volue production issue
+# HYDRO_PROD_RETENTION_DAYS=21       forecast issues older than this are pruned
+
 # ── SWE model ──
 SWE_ROOT=P:\QFA\TonyWeather\Hydro_Report\SWE_Exolabs
 SWE_REFRESH_DAYS=30

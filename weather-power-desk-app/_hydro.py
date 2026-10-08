@@ -16,6 +16,12 @@ Deep dive      Click a country (or a river station) on the map — or pick it in
                alone: a KPI card per layer, its flags, the climatology chart of
                every layer, and each river station in the country with observed
                temperature, normal and the latest forecast issues.
+Production     Hydro production per Volue area over the last two weeks — run-of-
+               river and reservoir (= total − run-of-river) against the normal —
+               and the Volue production forecast for the next two, side by side
+               with the precipitation energy observed and expected over the same
+               windows: a grid with the areas as columns, then a two-panel chart
+               per area. Data: hydro_prod_daily (pipeline/volue_hydro_prod.py).
 Family tabs    Live version of P:/QFA/TonyWeather/Hydro_Report/quantify_*.py:
                for each Volue hydro family (reservoir levels, groundwater = the
                `sgw` snow + groundwater stock, hydro balance) and each country
@@ -40,17 +46,20 @@ from _config import (
     HYDRO_SWE_REGIONS, HYDRO_DEEP_DIVE_RIVER_MONTHS, HYDRO_STATION_MODES,
     RIVER_TEMP_WARM_ANOMALY_C, RIVER_TEMP_HOT_C, RIVER_TEMP_COLOUR_RANGE_C,
     RIVER_FLOW_CRITICAL_PCT, RIVER_FLOW_LOW_PCT, RIVER_FLOW_HIGH_PCT, RIVER_FLOW_COLOUR_RANGE_PCT, RIVER_STALE_DAYS,
+    HYDRO_PROD_TABLE, HYDRO_PROD_AREAS, HYDRO_PROD_DEFAULT_AREAS, HYDRO_PROD_WINDOW_DAYS, HYDRO_PROD_PRECIP_PATTERNS,
 )
 from _data import (
     load_hydro_available, load_hydro_series, load_hydro_component, load_swe_country_daily, load_river_latest,
-    load_river_series,
+    load_river_series, load_hydro_prod,
 )
 from _charts import (
     make_hydro_climatology_chart, make_hydro_anomaly_bars, make_hydro_europe_map, make_river_chart,
+    make_hydro_production_chart,
 )
 from _style import DIV_NEG, DIV_MID, DIV_POS
 from _hydro_quantify import (
     HYDRO_FAMILIES, HYDRO_DEFAULT_COUNTRIES, build_climatology, quantify_anomaly, split_recent_hist, stats_text,
+    production_series, production_summary,
 )
 from _ui import kpi_card, kpi_row, status_banner, ordinal
 
@@ -866,6 +875,144 @@ def _render_family(family: str, avail: pd.DataFrame):
                            key=f"hy_dl_{comp}")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PRODUCTION TAB — production vs precipitation energy, areas side by side
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _pct_norm_class(p: float | None) -> str:
+    """Colour a % of normal like the reservoir read-outs: red = short of normal, blue = above."""
+    if p is None:
+        return ""
+    return "hy-crit" if p <= 60 else ("hy-low" if p <= 80 else ("hy-high" if p >= 130 else ""))
+
+
+def _production_grid_html(cols: list[tuple[str, dict]], window: int, patterns: list[str]) -> str:
+    """The comparison grid: one column per area, the rows the sums of the observed
+    window and of the forward window (GWh), production above, precipitation energy
+    below, and the difference of the two at the bottom."""
+    n = len(cols)
+
+    def td(v, fmt="{:,.0f}", cls="", first=False):
+        c = ("hy-first " if first else "") + cls
+        return f"<td class='{c}'>{fmt.format(v)}</td>" if v is not None else f"<td class='{c} hy-na'>—</td>"
+
+    def row(label, cells, cls=""):
+        return f"<tr><td class='mc-region {cls}'>{label}</td>{''.join(cells)}</tr>"
+
+    def group(title):
+        return f"<tr><th colspan='{n + 1}' class='hy-sub' style='text-align:left'>{title}</th></tr>"
+
+    def num(key, fmt="{:,.0f}", cls_key=None):
+        return [td(q.get(key), fmt, _pct_norm_class(q.get(cls_key)) if cls_key else "", first=True) for _, q in cols]
+
+    head = ("<tr><th style='text-align:left'>GWh</th>"
+            + "".join(f"<th class='hy-layer hy-first'>{name}</th>" for name, _ in cols) + "</tr>")
+    ref = patterns[0] if patterns else ""
+    body = [
+        row("Last observed day", [td(q["last_obs"], "{:%d %b}", first=True) if q else td(None, first=True) for _, q in cols], "hy-agg"),
+        group(f"Production · last {window} days"),
+        row("Run-of-river", num("obs_ror")),
+        row("Reservoir", num("obs_res")),
+        row("Total", num("obs_tot")),
+        row("Normal", num("obs_tot_n")),
+        row("% of normal", num("obs_tot_pct", "{:.0f}%", "obs_tot_pct")),
+        group(f"Volue production forecast · next {window} days"),
+        row("Run-of-river", num("fwd_ror")),
+        row("Reservoir", num("fwd_res")),
+        row("Total", num("fwd_tot")),
+        row("Normal", num("fwd_tot_n")),
+        row("% of normal", num("fwd_tot_pct", "{:.0f}%", "fwd_tot_pct")),
+        group("Precipitation energy"),
+        row(f"Last {window} days", num("obs_rre")),
+        row("Normal", num("obs_rre_n")),
+        row("% of normal", num("obs_rre_pct", "{:.0f}%", "obs_rre_pct")),
+        row(f"Next {window} days · {ref}", [td((q.get("fwd_rre") or {}).get(ref), first=True) for _, q in cols]),
+    ]
+    for p in patterns[1:]:
+        body.append(row(f"Next {window} days · {p}", [td((q.get("fwd_rre") or {}).get(p), first=True) for _, q in cols], "hy-agg"))
+    body += [
+        row("Normal", num("fwd_rre_n")),
+        row("% of normal", num("fwd_rre_ref_pct", "{:.0f}%", "fwd_rre_ref_pct")),
+        group("Precipitation energy − production"),
+        row(f"Last {window} days", num("obs_balance", "{:+,.0f}")),
+        row(f"Next {window} days · {ref}", num("fwd_balance", "{:+,.0f}")),
+    ]
+    return (f"<div class='mc-block'><table class='mc-table hy-table'><thead>{head}</thead>"
+            f"<tbody>{''.join(body)}</tbody></table></div>")
+
+
+def _production_table(cols: list[tuple[str, dict]]) -> pd.DataFrame:
+    rows = []
+    for name, q in cols:
+        flat = {k: v for k, v in q.items() if not isinstance(v, dict)}
+        flat.update({f"fwd_rre_{p}": v for p, v in (q.get("fwd_rre") or {}).items()})
+        rows.append({"area": name} | flat)
+    return pd.DataFrame(rows)
+
+
+def _render_production():
+    st.caption("Hydro production per Volue area — run-of-river and reservoir (= total − run-of-river, the split of "
+               "the Hydro Report's RoR / reservoir analysis) over the last two weeks against the Volue normal, Volue's "
+               "own production forecast for the next two, and the precipitation energy observed and expected over the "
+               "same windows. Curves `pro <area> hydro ror|tot mwh/h cet h sa|n|f` and `rre <area> … sa|n` plus the "
+               "ensemble 'Avg', in GWh/day from hydro_prod_daily (pipeline/volue_hydro_prod.py).")
+    by_name = {v: k for k, v in HYDRO_PROD_AREAS.items()}
+    c1, c2 = st.columns([4, 1.4])
+    with c1:
+        names = st.multiselect("Areas", list(HYDRO_PROD_AREAS.values()),
+                               [HYDRO_PROD_AREAS[a] for a in HYDRO_PROD_DEFAULT_AREAS], key="hy_prod_areas",
+                               label_visibility="collapsed")
+    with c2:
+        window = st.slider("Window (days)", 7, 28, HYDRO_PROD_WINDOW_DAYS, key="hy_prod_window")
+    codes = [by_name[n] for n in names]
+    if not codes:
+        st.info("Select at least one area.")
+        return
+    try:
+        df = load_hydro_prod(tuple(codes))
+    except Exception as e:
+        st.error(f"Cannot read {HYDRO_PROD_TABLE} ({e}). Has pipeline/run_daily.py --only hydro-prod run?")
+        return
+    if df.empty:
+        st.info(f"No rows in {HYDRO_PROD_TABLE} yet — run `pipeline/run_daily.py --only hydro-prod`.")
+        return
+
+    series, summ = {}, {}
+    for code in codes:
+        series[code] = production_series(df[df["area"] == code], HYDRO_PROD_PRECIP_PATTERNS)
+        summ[code] = production_summary(series[code], window, HYDRO_PROD_PRECIP_PATTERNS)
+    missing = [HYDRO_PROD_AREAS[c] for c in codes if not summ[c]]
+    if missing:
+        status_banner(f"No production rows for {', '.join(missing)} in {HYDRO_PROD_TABLE}.", "warning")
+    issued = [q["fc_issued"] for q in summ.values() if q and q.get("fc_issued") is not None]
+    short = [HYDRO_PROD_AREAS[c] for c, q in summ.items() if q and (q["n_obs"] < window or q["n_fwd"] < window)]
+    st.caption((f"Volue production forecast issued {max(issued):%d %b %Y}. " if issued else "")
+               + f"Precipitation energy expected = the '{HYDRO_PROD_PRECIP_PATTERNS[0]}' ensemble mean of the latest "
+                 f"issue; the other patterns are listed under it."
+               + (f" Short windows (fewer than {window} days found): {', '.join(short)}." if short else ""))
+
+    cols = [(HYDRO_PROD_AREAS[c], summ[c]) for c in codes]
+    st.markdown(f"##### Last {window} days vs the next {window} · areas side by side")
+    st.markdown(_production_grid_html(cols, window, HYDRO_PROD_PRECIP_PATTERNS), unsafe_allow_html=True)
+    table = _production_table([x for x in cols if x[1]])
+    if not table.empty:
+        st.download_button("Download production CSV", table.to_csv(index=False).encode(),
+                           f"hydro_production_{dt.date.today():%Y%m%d}.csv", "text/csv", key="hy_prod_dl")
+
+    st.divider()
+    st.markdown("##### Production and precipitation energy by area")
+    chart_cols = st.columns(2)
+    i = 0
+    for code in codes:
+        if not summ[code]:
+            continue
+        with chart_cols[i % 2]:
+            st.plotly_chart(make_hydro_production_chart(series[code], HYDRO_PROD_AREAS[code], window,
+                                                        HYDRO_PROD_PRECIP_PATTERNS),
+                            use_container_width=True, key=f"hy_prod_chart_{code}")
+        i += 1
+
+
 def render_hydro():
     st.markdown("#### HYDRO MONITORING")
     st.caption("The hydro outlook on a map of Europe — reservoirs, snow water equivalent, groundwater, hydro balance "
@@ -882,9 +1029,11 @@ def render_hydro():
         st.caption(f"Latest hydro observation: {pd.Timestamp(last):%d %b %Y}")
     for k, v in (("hy_dd_area", None), ("hy_dd_station", None)):
         st.session_state.setdefault(k, v)
-    tabs = st.tabs(["Overview"] + list(HYDRO_FAMILIES.keys()))
+    tabs = st.tabs(["Overview", "Production"] + list(HYDRO_FAMILIES.keys()))
     with tabs[0]:
         _render_overview(avail)
-    for tab, family in zip(tabs[1:], HYDRO_FAMILIES.keys()):
+    with tabs[1]:
+        _render_production()
+    for tab, family in zip(tabs[2:], HYDRO_FAMILIES.keys()):
         with tab:
             _render_family(family, avail)

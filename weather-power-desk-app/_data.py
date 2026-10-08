@@ -832,6 +832,37 @@ def load_hydro_component(component: str) -> pd.DataFrame:
     return _num(df, ["value"])
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def load_hydro_prod(areas: tuple[str, ...]) -> pd.DataFrame:
+    """hydro_prod_daily (pipeline/volue_hydro_prod.py) for the areas: actual (sa)
+    and normal (n) rows of the last HYDRO_PROD_HISTORY_DAYS and every forecast
+    issue of the last HYDRO_PROD_LOOKBACK_DAYS. Columns: area, variable (ror /
+    tot / rre), data_type, pattern, reference_date, day, value (GWh/day),
+    init_time. Empty (never raises on an empty table) until the pipeline has run."""
+    from _config import HYDRO_PROD_TABLE, HYDRO_PROD_LOOKBACK_DAYS, HYDRO_PROD_HISTORY_DAYS
+    if not areas:
+        return pd.DataFrame()
+    area_sql = ",".join(f"'{a}'" for a in areas)
+    df = run_query(f"""
+        SELECT area, variable, data_type, pattern, reference_date, day, value
+        FROM {SBX_SCHEMA}.{HYDRO_PROD_TABLE}
+        WHERE area IN ({area_sql})
+          AND ((data_type IN ('sa', 'n') AND day >= current_date() - INTERVAL {int(HYDRO_PROD_HISTORY_DAYS)} DAYS)
+               OR (data_type = 'f' AND reference_date >= current_timestamp() - INTERVAL {int(HYDRO_PROD_LOOKBACK_DAYS)} DAYS))
+        ORDER BY area, variable, data_type, pattern, reference_date, day
+    """)
+    if df.empty:
+        return df
+    df = _dt(df, ["reference_date"], utc=True)
+    df = _dt(df, ["day"])
+    df = _num(df, ["value"])
+    df["pattern"] = df["pattern"].fillna("")
+    # the production forecast ('volue') is issued at 00:00 CET; the rre ensembles at their cycle
+    df["init_time"] = [pd.NaT if pd.isna(r) else (volue_init_time(r, 0) if p == "volue" else init_time_for(p, r))
+                       for r, p in zip(df["reference_date"], df["pattern"])]
+    return df
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_swe_country_daily() -> pd.DataFrame:
     """The internal Exolabs SWE model per Alpine country (mean mm, daily) from

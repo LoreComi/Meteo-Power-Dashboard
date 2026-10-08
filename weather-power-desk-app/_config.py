@@ -798,6 +798,25 @@ HYDRO_PCTL_LOW = 30           # at or below: low
 HYDRO_PCTL_HIGH = 85          # at or above: very high
 HYDRO_WEEK_MOVE_PTS = 5       # |Δ % of normal| in a week at or above: fast drawdown / refill
 
+# ── Production tab — hydro_prod_daily (pipeline/volue_hydro_prod.py) ─────────
+# Per Volue production area and day, GWh/day: run-of-river and total production
+# (reservoir = total − run-of-river), the Volue normal, Volue's own production
+# forecast (pattern 'volue', one issue a day) and precipitation energy — actual,
+# normal and the 'Avg' ensemble means of the patterns below. The areas are
+# Volue's production areas, which differ from HYDRO_AREA_CODES: `it-nord` and
+# `cwe` exist, the Eastern European countries only through `see`.
+HYDRO_PROD_TABLE = "hydro_prod_daily"
+HYDRO_PROD_AREAS: dict[str, str] = {
+    "fr": "France", "ch": "Switzerland", "at": "Austria", "it-nord": "Italy North", "it": "Italy",
+    "cwe": "CWE", "de": "Germany", "es": "Spain", "pt": "Portugal", "ib": "Iberia",
+    "np": "Nordics", "no": "Norway", "se": "Sweden", "fi": "Finland", "see": "SEE",
+}
+HYDRO_PROD_DEFAULT_AREAS = ["fr", "ch", "at", "it-nord", "np", "ib", "see"]
+HYDRO_PROD_WINDOW_DAYS = 14                                  # observed window, and the forward window it is compared with
+HYDRO_PROD_PRECIP_PATTERNS = ["ec00ens", "ec12ens", "gfs00ens"]   # first = the reference the grid sums
+HYDRO_PROD_LOOKBACK_DAYS = 10                                # forecast issues read from the table
+HYDRO_PROD_HISTORY_DAYS = 120                                # actual / normal days read from the table
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LIVE VOLUE ACCESS (bypass sandbox, query the delta-share tables directly)
