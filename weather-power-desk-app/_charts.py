@@ -471,10 +471,11 @@ def make_silhouette_chart(sil_by_k: dict[int, float], chosen_k: int) -> go.Figur
 # HISTORICAL
 # ══════════════════════════════════════════════════════════════════════════════
 
-def make_year_month_heatmap(monthly: pd.DataFrame, area: str, unit: str, value_col: str = "anomaly") -> go.Figure:
+def make_year_month_heatmap(monthly: pd.DataFrame, area: str, unit: str, value_col: str = "anomaly",
+                            title: str | None = None) -> go.Figure:
     """Year × month anomaly heatmap for one country."""
     m = monthly[monthly["area"] == area]
-    title = f"{_area_name(area)} — monthly anomaly vs normal"
+    title = title or f"{_area_name(area)} — monthly anomaly vs normal"
     if m.empty:
         return _base_fig(title, height=300)
     piv = m.pivot_table(index="year", columns="month", values=value_col, aggfunc="mean").reindex(columns=range(1, 13))
@@ -529,16 +530,144 @@ def make_period_lines(agg: pd.DataFrame, unit: str, title: str, x_col: str, valu
     return fig
 
 
-def make_index_chart(idx: pd.DataFrame, index_name: str, highlight_years: list[int] | None = None) -> go.Figure:
-    fig = _base_fig(f"{index_name} — history", height=300)
-    d = idx.sort_values("date")
+# ══════════════════════════════════════════════════════════════════════════════
+# TELECONNECTIONS
+# ══════════════════════════════════════════════════════════════════════════════
+# Colour: correlation / anomaly sign uses the diverging pair (blue negative, red
+# positive); the phase of an index is an identity, not a polarity, so its classes
+# get categorical hues (Low aqua, Neutral grey, High orange).
+
+PHASE_COLORS = {"Low": CAT_AQUA, "Neutral": HYDRO_HIST_GREY, "High": CAT_ORANGE,
+                "Regime": CAT_VIOLET, "Analogues": CAT_VIOLET, "Rest": HYDRO_HIST_GREY}
+
+
+def _stars(p: float) -> str:
+    return "" if not np.isfinite(p) else ("**" if p < 0.01 else "*" if p < 0.05 else "")
+
+
+def make_corr_heatmap(r: np.ndarray, p: np.ndarray, n: np.ndarray, x_labels: list[str], y_labels: list[str],
+                      title: str, height: int | None = None, xtitle: str = "") -> go.Figure:
+    """Correlation grid, −1…+1 on the diverging scale, r in each cell, * p<0.05 and ** p<0.01
+    (against zero, per cell — with this many cells a few stars are chance, the tab's caption
+    says so). Hover adds the number of years behind the cell."""
+    r = np.asarray(r, dtype=float)
+    lim = max(0.5, float(np.nanmax(np.abs(r))) if np.isfinite(r).any() else 0.5)
+    lim = min(1.0, np.ceil(lim * 10) / 10)
+    text = [[("" if not np.isfinite(v) else f"{v:+.2f}{_stars(pv)}") for v, pv in zip(rv, pr)] for rv, pr in zip(r, p)]
+    fig = go.Figure(go.Heatmap(
+        z=r, x=x_labels, y=y_labels, colorscale=DIVERGING_SCALE, zmid=0, zmin=-lim, zmax=lim,
+        text=text, texttemplate="%{text}", textfont=dict(size=10, color=INK_PRIMARY),
+        customdata=np.asarray(n), xgap=2, ygap=2, colorbar=dict(title="r", thickness=12),
+        hovertemplate="%{y} · %{x}<br>r = %{z:+.2f} over %{customdata} years<extra></extra>",
+    ))
+    fig.update_layout(**PLOTLY_LAYOUT, title=dict(text=title, font=dict(size=14)),
+                      height=height or max(260, 110 + 30 * len(y_labels)))
+    fig.update_layout(hovermode="closest")
+    fig.update_yaxes(autorange="reversed")
+    fig.update_xaxes(side="top", title_text=xtitle)
+    return fig
+
+
+def make_index_period_bars(z: pd.Series, label: str, thr: float, years_marked: list[int] | None = None) -> go.Figure:
+    """One bar per year: the index (z-score) in the selected period, red above / blue below
+    zero, dotted lines at ±thr; `years_marked` (analogues, regime years) get a dot."""
+    fig = _base_fig(f"{label} — z-score of the selected period, by year", height=300)
+    z = z.dropna()
+    if z.empty:
+        return fig
+    fig.add_trace(go.Bar(x=[str(int(y)) for y in z.index], y=z.values,
+                         marker_color=[DIV_POS if v >= 0 else DIV_NEG for v in z.values],
+                         marker_line_width=0, hovertemplate="%{x}: %{y:+.2f} σ<extra></extra>", showlegend=False))
+    marked = [y for y in (years_marked or []) if y in z.index]
+    if marked:   # a trace, not annotations: year-like strings on a category axis are read as positions
+        fig.add_trace(go.Scatter(x=[str(int(y)) for y in marked], y=[float(z[y]) + (0.12 if z[y] >= 0 else -0.12) for y in marked],
+                                 mode="markers", marker=dict(size=8, color=CAT_ORANGE), showlegend=False, hoverinfo="skip"))
+    for t in (thr, -thr):
+        fig.add_hline(y=t, line_dash="dot", line_color=INK_MUTED, line_width=1)
+    fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
+    fig.update_yaxes(title_text="σ")
+    fig.update_xaxes(type="category", tickangle=-60)
+    return fig
+
+
+def make_index_recent_chart(recent: pd.DataFrame, names: list[str]) -> go.Figure:
+    """The last weeks of the selected indices, daily, one line each (identity hues)."""
+    fig = _base_fig("Selected indices — last 45 days (daily, native units)", height=300)
+    for i, n in enumerate(names):
+        d = recent[recent["index_name"] == n].sort_values("date")
+        if d.empty:
+            continue
+        fig.add_trace(go.Scatter(x=d["date"], y=d["value"], mode="lines", name=n,
+                                 line=dict(color=CATEGORICAL[i % len(CATEGORICAL)], width=2)))
+    fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
+    return fig
+
+
+def make_tele_scatter(df: pd.DataFrame, xlabel: str, ylabel: str, title: str,
+                      r: float | None = None, p: float | None = None) -> go.Figure:
+    """Index z (x) against the target anomaly (y), one point per year labelled with the year,
+    least-squares line. `df` has year, x, y (already detrended when the tab says so)."""
+    fig = _base_fig(title, height=340)
+    d = df.dropna()
     if d.empty:
         return fig
-    fig.add_trace(go.Scatter(x=d["date"], y=d["value"], mode="lines", name=index_name,
-                             line=dict(color=CAT_BLUE, width=1.6)))
+    fig.add_trace(go.Scatter(x=d["x"], y=d["y"], mode="markers+text", text=[str(int(y)) for y in d["year"]],
+                             textposition="top center", textfont=dict(size=9, color=INK_MUTED),
+                             marker=dict(size=7, color=CAT_BLUE), showlegend=False,
+                             hovertemplate="%{text}<br>index %{x:+.2f} σ · anomaly %{y:+.2f}<extra></extra>"))
+    if len(d) >= 3 and d["x"].std() > 0:
+        k, c = np.polyfit(d["x"], d["y"], 1)
+        xs = np.array([d["x"].min(), d["x"].max()])
+        fig.add_trace(go.Scatter(x=xs, y=k * xs + c, mode="lines", line=dict(color=CAT_ORANGE, width=2),
+                                 showlegend=False, hoverinfo="skip"))
+    if r is not None and np.isfinite(r):
+        fig.add_annotation(xref="paper", yref="paper", x=0.01, y=0.99, showarrow=False, align="left",
+                           text=f"r = {r:+.2f}{_stars(p if p is not None else np.nan)}  ·  n = {len(d)}",
+                           font=dict(size=12, color=INK_PRIMARY))
+    fig.add_hline(y=0, line_color=BASELINE, line_width=1)
+    fig.add_vline(x=0, line_color=BASELINE, line_width=1)
+    fig.update_xaxes(title_text=xlabel)
+    fig.update_yaxes(title_text=ylabel)
+    return fig
+
+
+def make_composite_bars(comp: pd.DataFrame, x_labels: dict[tuple[str, str], str], order: list[str],
+                        unit: str, title: str) -> go.Figure:
+    """Mean anomaly per (country, source) in each class of years, grouped bars; the hover
+    carries the number of years and the p-value against all the other years."""
+    fig = _base_fig(title, height=380)
+    if comp.empty:
+        return fig
+    keys = list(x_labels.keys())
+    for grp in order:
+        g = comp[comp["group"] == grp].set_index(["area", "source"])
+        ys, hov = [], []
+        for k in keys:
+            if k in g.index:
+                row = g.loc[k]
+                ys.append(row["mean"])
+                hov.append(f"{int(row['n'])} yrs · p={row['p']:.2f}" if np.isfinite(row["p"]) else f"{int(row['n'])} yrs")
+            else:
+                ys.append(np.nan)
+                hov.append("")
+        fig.add_trace(go.Bar(x=[x_labels[k] for k in keys], y=ys, name=grp, marker_color=PHASE_COLORS.get(grp, INK_MUTED),
+                             marker_line_width=0, customdata=hov,
+                             hovertemplate=f"{grp} · %{{x}}<br>%{{y:+.2f}} {unit}<br>%{{customdata}}<extra></extra>"))
     fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
-    for y in highlight_years or []:
-        fig.add_vrect(x0=f"{y}-01-01", x1=f"{y}-12-31", fillcolor=hex_to_rgba(CAT_ORANGE, 0.15), line_width=0)
+    fig.update_layout(barmode="group", bargap=0.18, bargroupgap=0.06, hovermode="closest")
+    fig.update_yaxes(title_text=f"mean anomaly ({unit})")
+    return fig
+
+
+def make_regression_fit(years: list[int], observed: np.ndarray, fitted: np.ndarray, title: str, unit: str) -> go.Figure:
+    fig = _base_fig(title, height=320)
+    xs = [str(int(y)) for y in years]
+    fig.add_trace(go.Bar(x=xs, y=observed, name="observed", marker_color=HYDRO_HIST_GREY, marker_line_width=0))
+    fig.add_trace(go.Scatter(x=xs, y=fitted, name="fitted from the indices", mode="lines+markers",
+                             line=dict(color=CAT_BLUE, width=2), marker=dict(size=5)))
+    fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
+    fig.update_yaxes(title_text=unit)
+    fig.update_xaxes(type="category", tickangle=-60)
     return fig
 
 

@@ -7,6 +7,7 @@ Steps, each isolated so one failure does not stop the others:
   4. morning     Energy Quantified Morning Call input (every model, every cycle) to {schema}.morning_daily_eq
   5. volue       Volue (wapi) Morning Call / Gas Demand input to {schema}.morning_daily_volue
   6. hydro-prod  Volue (wapi) hydro production, its forecast and precipitation energy to {schema}.hydro_prod_daily
+  7. indices     all_daily_indices.csv (teleconnection indices) to {schema}.weather_indexes
 
     python run_daily.py                      everything, incremental
     python run_daily.py --skip-swe-model     upload only (the model already ran today)
@@ -16,6 +17,7 @@ Steps, each isolated so one failure does not stop the others:
     python run_daily.py --only morning       the EQ feed, every couple of hours
     python run_daily.py --only volue         the Volue feed (what the dashboard shows for now)
     python run_daily.py --only hydro-prod    the hydro Production tab's feed
+    python run_daily.py --only indices       the Teleconnections tab's indices (after refreshing the CSV)
 
 Exit code 0 when every requested step succeeded, 1 otherwise. Logs in pipeline/logs/.
 """
@@ -35,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_config import load_settings, setup_logging  # noqa: E402
 
 log = logging.getLogger("pipeline")
-STEPS = ["swe-model", "swe", "rivers", "morning", "volue", "hydro-prod"]
+STEPS = ["swe-model", "swe", "rivers", "morning", "volue", "hydro-prod", "indices"]
 
 
 def run_swe_model(settings) -> None:
@@ -77,6 +79,7 @@ def main(argv=None) -> int:
     ap.add_argument("--skip-morning", action="store_true")
     ap.add_argument("--skip-volue", action="store_true")
     ap.add_argument("--skip-hydro-prod", action="store_true")
+    ap.add_argument("--skip-indices", action="store_true")
     ap.add_argument("--backfill", action="store_true", help="full history instead of the incremental window")
     ap.add_argument("--dry-run", action="store_true", help="do not touch Databricks; write frames to pipeline/out/")
     ap.add_argument("--no-heightbands", action="store_true", help="skip the per-catchment height-band rows")
@@ -89,7 +92,7 @@ def main(argv=None) -> int:
     log.info("hydro pipeline start — schema %s, log %s", settings.schema, log_path)
 
     steps = [a.only] if a.only else [s for s, skip in zip(STEPS, [a.skip_swe_model, a.skip_swe, a.skip_rivers, a.skip_morning,
-                                                                  a.skip_volue, a.skip_hydro_prod])
+                                                                  a.skip_volue, a.skip_hydro_prod, a.skip_indices])
                                     if not skip]
     results: dict[str, str] = {}
     writer = None
@@ -101,7 +104,7 @@ def main(argv=None) -> int:
             except Exception as e:
                 log.exception("swe-model failed")
                 results["swe-model"] = f"FAILED: {str(e)[:200]}"
-        if any(x in steps for x in ("swe", "rivers", "morning", "volue", "hydro-prod")):
+        if any(x in steps for x in ("swe", "rivers", "morning", "volue", "hydro-prod", "indices")):
             writer = make_writer(settings, a.dry_run)
         if "swe" in steps:
             try:
@@ -138,6 +141,13 @@ def main(argv=None) -> int:
             except Exception as e:
                 log.exception("hydro production failed")
                 results["hydro-prod"] = f"FAILED: {str(e)[:200]}"
+        if "indices" in steps:
+            try:
+                import indices_upload
+                results["indices"] = f"ok {indices_upload.run(settings, writer, backfill=a.backfill)}"
+            except Exception as e:
+                log.exception("indices upload failed")
+                results["indices"] = f"FAILED: {str(e)[:200]}"
     finally:
         if writer is not None:
             writer.close()

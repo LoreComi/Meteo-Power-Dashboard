@@ -7,11 +7,12 @@ Tab 1  History by country: monthly or weekly values, any combination of years
        country means (hist_daily, source 'Meteomatics' — the same rows as the
        Anomaly Maps tab); wind, solar and precipitation energy are Volue
        actuals vs the Volue normal (source 'Volue').
-Tab 2  Analogues with weather indexes: pick an index and a target period, find
-       the historical years whose index was closest to the current value, and
-       composite the countries' anomalies in those years. Data-driven from
-       {SBX_SCHEMA}.weather_indexes — until that table is loaded the tab shows
-       the expected layout and stays otherwise inert.
+Tab 2  Anomaly Maps: gridded ERA5 anomalies from the gold layer (via anomaly_map).
+Tab 3  Teleconnections (_teleconnections.py): the weather indices against temperature,
+       wind, solar and precipitation energy by country — correlations, anomalies by index
+       phase, blends and joint regimes of several indices, regression, analogue years —
+       per month or calendar quarter, with the Meteologica ERA5 reanalysis (since 1979)
+       next to Volue for wind and solar.
 """
 from __future__ import annotations
 
@@ -20,17 +21,18 @@ import pandas as pd
 import streamlit as st
 
 from _config import (
-    AREAS, DEFAULT_AREAS, METRICS, DEFAULT_METRIC, MONTH_NAMES, WEATHER_INDEXES, ANALOG_N_YEARS,
+    AREAS, DEFAULT_AREAS, METRICS, DEFAULT_METRIC, MONTH_NAMES,
     SBX_SCHEMA, area_label, MAP_METRICS, HIST_SOURCE_NOTES, HIST_DEFAULT_SOURCE,
 )
 from _data import (
-    load_hist_years, load_hist_daily, load_hist_monthly_all, load_weather_indexes, load_anomaly_map,
+    load_hist_years, load_hist_daily, load_hist_monthly_all, load_anomaly_map,
     resolve_hist_source,
 )
 from _charts import (
-    make_year_month_heatmap, make_period_bars, make_period_lines, make_index_chart, make_anomaly_heatmap,
+    make_year_month_heatmap, make_period_bars, make_period_lines, make_anomaly_heatmap,
     make_geo_anomaly_map,
 )
+from _teleconnections import render_teleconnections
 from _ui import anomaly_kpi, kpi_row, status_banner
 
 
@@ -145,80 +147,7 @@ def _render_history():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — ANALOGUES WITH WEATHER INDEXES
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _render_analogues():
-    idx = load_weather_indexes()
-    if idx.empty:
-        status_banner(f"Weather indexes are not loaded yet. The tab reads {SBX_SCHEMA}.weather_indexes "
-                      "(index_name, date, value, source); it comes alive as soon as rows land there.", "warning")
-        st.markdown("**Expected indexes**")
-        st.dataframe(pd.DataFrame({"index_name": list(WEATHER_INDEXES.keys()),
-                                   "description": list(WEATHER_INDEXES.values())}),
-                     use_container_width=True, hide_index=True)
-        st.markdown(
-            "**Method once loaded** — pick an index and a target period; the index is averaged over that "
-            "period for every historical year and the closest years to the current (or assumed) value become "
-            "the analogues. Their country anomalies (from hist_daily) are composited as a mean and spread, "
-            "next to the same period's ensemble forecast for a sanity check.")
-        return
-
-    names = sorted(idx["index_name"].unique())
-    c1, c2, c3, c4 = st.columns([1.3, 2.4, 2.4, 1.2])
-    with c1:
-        index_name = st.selectbox("Index", names, format_func=lambda n: f"{n} — {WEATHER_INDEXES.get(n, '')}", key="an_idx")
-    with c2:
-        months = st.multiselect("Target months", list(range(1, 13)), [pd.Timestamp.today().month],
-                                format_func=lambda m: MONTH_NAMES[m - 1], key="an_months")
-    with c3:
-        areas = st.multiselect("Countries", list(AREAS.keys()), DEFAULT_AREAS, format_func=area_label, key="an_areas")
-    with c4:
-        n_analog = st.slider("Analog years", 3, 10, ANALOG_N_YEARS, key="an_n")
-    metric = st.selectbox("Metric to composite", list(METRICS.keys()), key="an_metric")
-    if not (months and areas):
-        st.info("Pick months and countries.")
-        return
-
-    s = idx[idx["index_name"] == index_name].dropna(subset=["value"]).sort_values("date")
-    s["year"] = s["date"].dt.year
-    s["month"] = s["date"].dt.month
-    per_year = s[s["month"].isin(months)].groupby("year")["value"].mean()
-    latest_val = float(s["value"].iloc[-1])
-    target = st.slider(f"Assumed {index_name} value", float(np.floor(s["value"].min())), float(np.ceil(s["value"].max())),
-                       round(latest_val, 2), 0.05, key="an_target",
-                       help=f"Defaults to the latest observed value ({latest_val:+.2f}, {s['date'].iloc[-1]:%b %Y})")
-    this_year = pd.Timestamp.today().year
-    cand = per_year[per_year.index < this_year]
-    analogs = (cand - target).abs().sort_values().head(n_analog)
-    st.caption("Analog years: " + ", ".join(f"{y} ({cand[y]:+.2f})" for y in analogs.index))
-    st.plotly_chart(make_index_chart(s, index_name, list(analogs.index)), use_container_width=True)
-
-    source, _ = resolve_hist_source(metric)
-    try:
-        monthly = load_hist_monthly_all(metric, tuple(areas), source)
-    except Exception as e:
-        st.error(f"Failed to load history: {e}")
-        return
-    m = METRICS[metric]
-    comp = monthly[monthly["year"].isin(analogs.index) & monthly["month"].isin(months)]
-    if comp.empty:
-        status_banner("No historical rows for the analog years / months.", "warning")
-        return
-    a_unit = m["unit"] if m["anomaly_kind"] == "diff" else "%"
-    comp = comp.copy()
-    a_col = "anomaly" if m["anomaly_kind"] == "diff" else "anomaly_pct"
-    summary = comp.groupby("area")[a_col].agg(["mean", "std", "count"])
-    kpi_row([anomaly_kpi(f"{area_label(a)} · analog composite", summary.loc[a, "mean"] if a in summary.index else None,
-                         a_unit, summary.loc[a, "mean"] if a in summary.index else None,
-                         anomaly_unit=f" {a_unit}", warm_is_positive=m["warm_is_positive"], fmt="{:+.1f}") for a in areas])
-    comp["period"] = [f"{int(y)}-{MONTH_NAMES[int(mm) - 1]}" for y, mm in zip(comp["year"], comp["month"])]
-    st.plotly_chart(make_period_bars(comp, a_unit, f"{metric} anomaly in analog years", "period", a_col,
-                                     m["warm_is_positive"]), use_container_width=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — ANOMALY MAPS (gold layer)
+# TAB 2 — ANOMALY MAPS (gold layer)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _render_maps():
@@ -271,11 +200,12 @@ def render_historical():
     st.caption("History by country — temperature from the Meteomatics / ERA5 climatology since 1979 "
                "(population-weighted country means, the Anomaly Maps' own value / normal / anomaly), wind, "
                "solar and precipitation energy from Volue since 2013 · monthly and weekly · multi-year and "
-               "multi-month selections · ERA5 anomaly maps · analogues from weather indexes.")
-    tabs = st.tabs(["History by country", "Anomaly Maps", "Analogues (weather indexes)"])
+               "multi-month selections · ERA5 anomaly maps · teleconnections: weather indices against temperature, wind "
+               "and solar (reanalysis since 1979) — correlations, phases, blends, regression, analogues.")
+    tabs = st.tabs(["History by country", "Anomaly Maps", "Teleconnections"])
     with tabs[0]:
         _render_history()
     with tabs[1]:
         _render_maps()
     with tabs[2]:
-        _render_analogues()
+        render_teleconnections()

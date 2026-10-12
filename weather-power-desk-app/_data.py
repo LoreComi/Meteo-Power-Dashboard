@@ -759,16 +759,63 @@ def load_hist_monthly_all(metric: str, areas: tuple[str, ...], source: str | Non
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_weather_indexes() -> pd.DataFrame:
-    """Teleconnection indexes; empty until the weather_indexes table is loaded."""
+def load_index_monthly() -> pd.DataFrame:
+    """Monthly mean of every teleconnection index with the number of days behind it
+    (index_name, year, month, value, n_days), from the daily weather_indexes table that
+    pipeline/indices_upload.py loads. Aggregated in SQL — the daily table is ~580 k rows.
+    Empty (never raises) until the pipeline has run."""
     try:
-        df = run_query(f"SELECT index_name, date, value, source FROM {SBX_SCHEMA}.weather_indexes ORDER BY index_name, date")
+        df = run_query(f"""
+            SELECT index_name, YEAR(date) AS year, MONTH(date) AS month, AVG(value) AS value, COUNT(value) AS n_days
+            FROM {SBX_SCHEMA}.weather_indexes WHERE value IS NOT NULL
+            GROUP BY index_name, YEAR(date), MONTH(date) ORDER BY index_name, year, month
+        """)
     except Exception:
-        return pd.DataFrame(columns=["index_name", "date", "value", "source"])
+        df = pd.DataFrame()
     if df.empty:
-        return df
-    df = _dt(df, ["date"])
-    return _num(df, ["value"])
+        return pd.DataFrame(columns=["index_name", "year", "month", "value", "n_days"])
+    return _num(df, ["year", "month", "value", "n_days"])
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_index_recent(days: int = 45) -> pd.DataFrame:
+    """The last `days` days of every index, daily (index_name, date, value) — the 'where are
+    the indices now' strip, which the monthly aggregate cannot give for a running month."""
+    try:
+        df = run_query(f"""
+            SELECT index_name, date, value FROM {SBX_SCHEMA}.weather_indexes
+            WHERE value IS NOT NULL AND date >= current_date() - INTERVAL {int(days)} DAYS
+            ORDER BY index_name, date
+        """)
+    except Exception:
+        df = pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame(columns=["index_name", "date", "value"])
+    return _num(_dt(df, ["date"]), ["value"])
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_reanalysis_monthly(metric: str, areas: tuple[str, ...]) -> pd.DataFrame:
+    """Meteologica ERA5 reanalysis generation (reanalysis_daily, built by the notebook's cell
+    5b from the latest vintage of dna_prod_silver.meteologica.reanalysis) as monthly means
+    per country: area, year, month, value_mw, capacity_mw, n_days. Wind and Solar only.
+    Empty (never raises) until the notebook has built the table."""
+    from _config import TELE_REANALYSIS_TABLE
+    cols = ["area", "year", "month", "value_mw", "capacity_mw", "n_days"]
+    if metric not in ("Wind", "Solar") or not areas:
+        return pd.DataFrame(columns=cols)
+    try:
+        df = run_query(f"""
+            SELECT area, year, month, AVG(value_mw) AS value_mw, MAX(capacity_mw) AS capacity_mw, COUNT(*) AS n_days
+            FROM {SBX_SCHEMA}.{TELE_REANALYSIS_TABLE}
+            WHERE metric = '{metric}' AND area IN ({_sql_list(areas)})
+            GROUP BY area, year, month ORDER BY area, year, month
+        """)
+    except Exception:
+        df = pd.DataFrame()
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    return _num(df, ["year", "month", "value_mw", "capacity_mw", "n_days"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════

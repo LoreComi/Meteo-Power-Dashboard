@@ -646,20 +646,68 @@ HIST_SOURCE_NOTES: dict[str, str] = {
 def hist_source(metric: str) -> str:
     return HIST_SOURCES.get(metric, HIST_DEFAULT_SOURCE)
 
-# Weather indexes the analogue tab expects in {SBX_SCHEMA}.weather_indexes
-# (index_name, date, value). Empty table until loaded.
-WEATHER_INDEXES: dict[str, str] = {
-    "NAO": "North Atlantic Oscillation",
-    "AO": "Arctic Oscillation",
-    "EA": "East Atlantic pattern",
-    "SCAND": "Scandinavian pattern",
-    "PNA": "Pacific/North American pattern",
-    "ONI": "Oceanic Niño Index (ENSO)",
-    "MJO_AMP": "MJO amplitude (RMM)",
-    "MJO_PHASE": "MJO phase (RMM)",
-    "QBO": "Quasi-Biennial Oscillation (30 hPa)",
-    "SSW": "Stratospheric polar vortex (10 hPa 60N zonal wind)",
+# ── Teleconnections tab ───────────────────────────────────────────────────────
+# Daily indices, one row per (index_name, date) in {SBX_SCHEMA}.weather_indexes —
+# loaded by pipeline/indices_upload.py from all_daily_indices.csv (names are the CSV
+# headers upper-cased, spaces as underscores). name -> (group, what it is). The
+# `*_PHASE` columns are categorical (MJO / GWO phase 1-8) and are not in the table's
+# analysed set: a correlation on a phase number means nothing, the amplitude and the
+# two components carry the same information continuously.
+TELE_INDICES: dict[str, tuple[str, str]] = {
+    "NAO_EOF":         ("Atlantic–Europe", "North Atlantic Oscillation, EOF-based"),
+    "NAO_STNPRS":      ("Atlantic–Europe", "North Atlantic Oscillation, station-pressure based"),
+    "EA":              ("Atlantic–Europe", "East Atlantic pattern"),
+    "EAWR":            ("Atlantic–Europe", "East Atlantic / West Russia pattern"),
+    "SCAND":           ("Atlantic–Europe", "Scandinavian pattern (blocking over Scandinavia)"),
+    "SGDIPOLE":        ("Atlantic–Europe", "SG dipole pattern"),
+    "AO":              ("Hemispheric & Pacific", "Arctic Oscillation"),
+    "AAO":             ("Hemispheric & Pacific", "Antarctic Oscillation"),
+    "PNA":             ("Hemispheric & Pacific", "Pacific / North American pattern"),
+    "EPO":             ("Hemispheric & Pacific", "East Pacific Oscillation"),
+    "WPO":             ("Hemispheric & Pacific", "West Pacific Oscillation"),
+    "ABNA":            ("Hemispheric & Pacific", "ABNA pattern"),
+    "U1060N":          ("Stratosphere", "10 hPa zonal wind at 60°N — polar vortex strength (series 1)"),
+    "U10060N":         ("Stratosphere", "10 hPa zonal wind at 60°N — polar vortex strength (series 2)"),
+    "SOI":             ("ENSO & ocean modes", "Southern Oscillation Index (negative = El Niño)"),
+    "NINO12":          ("ENSO & ocean modes", "SST anomaly, Niño 1+2 (°C)"),
+    "NINO3":           ("ENSO & ocean modes", "SST anomaly, Niño 3 (°C)"),
+    "NINO34":          ("ENSO & ocean modes", "SST anomaly, Niño 3.4 (°C) — the ENSO reference"),
+    "NINO4":           ("ENSO & ocean modes", "SST anomaly, Niño 4 (°C)"),
+    "NINO34_RELATIVE": ("ENSO & ocean modes", "Niño 3.4 relative to the tropical-mean SST"),
+    "MODOKI":          ("ENSO & ocean modes", "ENSO Modoki (central-Pacific El Niño) index"),
+    "IOD":             ("ENSO & ocean modes", "Indian Ocean Dipole"),
+    "AMO":             ("ENSO & ocean modes", "Atlantic Multidecadal Oscillation"),
+    "PDO":             ("ENSO & ocean modes", "Pacific Decadal Oscillation"),
+    "NPM":             ("ENSO & ocean modes", "North Pacific Mode"),
+    "MJO_AMPLITUDE":   ("Tropical convection", "MJO amplitude (RMM)"),
+    "RMM1":            ("Tropical convection", "MJO RMM1 component"),
+    "RMM2":            ("Tropical convection", "MJO RMM2 component"),
+    "GLAAM":           ("Tropical convection", "Global atmospheric angular momentum"),
+    "GWO1":            ("Tropical convection", "Global Wind Oscillation, component 1"),
+    "GWO2":            ("Tropical convection", "Global Wind Oscillation, component 2"),
+    "GWO_AMPLITUDE":   ("Tropical convection", "Global Wind Oscillation amplitude"),
 }
+TELE_DEFAULT_INDICES = ["NAO_EOF", "EA", "SCAND", "AO"]
+TELE_AREAS: dict[str, str] = {**AREAS, "AT": "Austria", "CH": "Switzerland"}   # the reanalysis also has AT and CH
+TELE_REANALYSIS_BASE_YEARS = (1991, 2020)     # climatology the reanalysis anomalies are taken against (WMO normal)
+TELE_REANALYSIS_TABLE = "reanalysis_daily"
+
+# Where each metric's history can come from, in the order shown. `Reanalysis` is the
+# Meteologica ERA5-driven generation series (fixed present-day fleet, 1979 →, wind and
+# solar only); `Volue` the actuals vs the Volue normal since 2013; `Meteomatics` the
+# ERA5 population-weighted temperature the History tab already shows.
+TELE_SOURCES: dict[str, list[str]] = {
+    "Temperature": ["Meteomatics"],
+    "Wind": ["Reanalysis", "Volue"],
+    "Solar": ["Reanalysis", "Volue"],
+    "Precipitation energy": ["Volue"],
+}
+TELE_SOURCE_LABELS: dict[str, str] = {
+    "Meteomatics": "ERA5 · Meteomatics (1979+)",
+    "Reanalysis": "Meteologica reanalysis (1979+, fixed fleet)",
+    "Volue": "Volue actuals (2013+)",
+}
+TELE_SOURCE_SHORT: dict[str, str] = {"Meteomatics": "ERA5", "Reanalysis": "Reanal.", "Volue": "Volue"}
 ANALOG_N_YEARS = 5
 
 # ══════════════════════════════════════════════════════════════════════════════

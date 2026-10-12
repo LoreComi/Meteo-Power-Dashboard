@@ -50,7 +50,10 @@ Tables written (all read by weather-power-desk-app/_data.py):
   wr_gph_clim           ERA5 day-of-year mean Z500 per grid point (once)
   wr_forecast_members   per run / member / lead day: 7 IWR values + regime
   wr_reanalysis_daily   ERA5 classified into regimes, for the climatology
-  weather_indexes       CREATE IF NOT EXISTS — loaded separately
+  reanalysis_daily      Meteologica ERA5 reanalysis wind / solar generation per
+                        country and CET day since 1979, latest vintage only
+  weather_indexes       CREATE IF NOT EXISTS — daily teleconnection indices, loaded
+                        by pipeline/indices_upload.py from all_daily_indices.csv
   meteologica_members   CREATE IF NOT EXISTS — populated only if METEOLOGICA_TABLE set
 
 Lookup tables below mirror weather-power-desk-app/_config.py — update both.
@@ -721,6 +724,79 @@ if GOLD_OK:
 
 # COMMAND ----------
 
+# DBTITLE 1,5b. Meteologica ERA5 reanalysis — wind and solar generation per country/day, one vintage
+# dna_prod_silver.meteologica.reanalysis holds Meteologica's ERA5-driven hourly wind and
+# PV generation per country since 1979 — what TODAY's fleet would have produced in the
+# weather of each past hour. Two traps in the table:
+#
+#   * It is re-delivered about monthly, and every delivery (update_id) carries the whole
+#     1979 → delivery history again, rescaled to the fleet installed at that delivery
+#     (Italy wind, 15 Jan 2020 12:00: 531 MW in the Aug-2025 vintage, 403 MW in the
+#     Sep-2026 one, because capacity went 12.6 → 13.4 GW). Averaging across updates
+#     would blur the vintages; summing them would multiply the series by 11–16. So each
+#     content_id is read from its LATEST update_id only: one fleet, constant over all
+#     the years, so the series is weather and nothing else (no capacity growth in it).
+#   * The values are strings in `forecast` (`observation` is a sparse real measurement
+#     and is not used — it would put metered, fleet-growing values next to a fixed-fleet
+#     series).
+#
+# One row per country, technology and CET day (the same CET_DAY as hist_daily's Volue
+# rows, so the two compare day for day), the mean MW over the day's hours; a day needs
+# at least 23 of its 24 hours (the spring-forward day has 23) or it is dropped.
+# `capacity_mw` is the fleet the vintage is scaled to, so the app can show a capacity
+# factor. The app turns this into monthly anomalies against a 1991-2020 climatology.
+REANALYSIS_TABLE = "dna_prod_silver.meteologica.reanalysis"
+REANALYSIS_COUNTRIES = {
+    "Germany": "DE", "France": "FR", "Italy": "IT", "Spain": "ES", "UK": "UK", "Netherlands": "NL",
+    "Belgium": "BE", "Poland": "PL", "Norway": "NO", "Sweden": "SE", "Finland": "FI", "Denmark": "DK",
+    "Portugal": "PT", "Austria": "AT", "Switzerland": "CH",
+}
+REANALYSIS_TECH = {"wind": "Wind", "photovoltaic": "Solar"}
+_rean_country_case = "CASE " + " ".join(f"WHEN country = '{n}' THEN '{c}'" for n, c in REANALYSIS_COUNTRIES.items()) + " END"
+_rean_tech_case = "CASE " + " ".join(f"WHEN tech = '{t}' THEN '{m}'" for t, m in REANALYSIS_TECH.items()) + " END"
+
+reanalysis_sql = f"""
+WITH latest AS (
+  SELECT content_id, MAX(update_id) AS update_id FROM {REANALYSIS_TABLE} GROUP BY content_id
+),
+parsed AS (
+  SELECT r.content_id, r.update_id, r.delivery_start,
+         regexp_extract(r.content_name, '^(.+) (wind|photovoltaic) power generation reanalysis', 1) AS country,
+         regexp_extract(r.content_name, '^(.+) (wind|photovoltaic) power generation reanalysis', 2) AS tech,
+         CAST(r.forecast AS DOUBLE) AS mw,
+         CAST(regexp_extract(r.installed_capacity, '^([0-9.]+)', 1) AS DOUBLE) AS capacity_mw
+  FROM {REANALYSIS_TABLE} r JOIN latest l ON l.content_id = r.content_id AND l.update_id = r.update_id
+  WHERE r.forecast IS NOT NULL
+),
+named AS (
+  SELECT content_id, update_id, delivery_start, mw, capacity_mw,
+         {_rean_country_case} AS area, {_rean_tech_case} AS metric
+  FROM parsed
+)
+SELECT metric, area, {CET_DAY} AS day, YEAR({CET_DAY}) AS year, MONTH({CET_DAY}) AS month,
+       AVG(mw) AS value_mw, MAX(capacity_mw) AS capacity_mw, COUNT(*) AS n_hours,
+       MAX(update_id) AS update_id, current_timestamp() AS snapshot_ts
+FROM named
+WHERE area IS NOT NULL AND metric IS NOT NULL
+GROUP BY metric, area, {CET_DAY}
+HAVING COUNT(*) >= 23
+"""
+try:
+    spark.sql(f"CREATE OR REPLACE TABLE {SBX}.reanalysis_daily AS {reanalysis_sql}")
+    count("reanalysis_daily")
+    for _r in spark.sql(f"""
+        SELECT metric, COUNT(DISTINCT area) AS areas, MIN(day) AS first_day, MAX(day) AS last_day,
+               MAX(update_id) AS vintage, COUNT(*) AS n
+        FROM {SBX}.reanalysis_daily GROUP BY metric ORDER BY metric
+    """).collect():
+        print(f"  {_r['metric']:<6s} {_r['areas']:>3d} areas  {_r['first_day']} -> {_r['last_day']}  "
+              f"vintage {_r['vintage']}  {_r['n']:>8,d} rows")
+except Exception as _e:   # no access to the silver table must not stop the rest of the refresh
+    print(f"!! {REANALYSIS_TABLE} not readable ({str(_e)[:200]}) — reanalysis_daily left as-is; "
+          "the Teleconnections tab then offers the Volue (2013+) and Meteomatics sources only")
+
+# COMMAND ----------
+
 # DBTITLE 1,6. Hydro components — actual (SA) and normal (N): silver since 2013 + the share for the Eastern areas
 # The silver hydro_reservoir table carries only the Western / Nordic areas (and
 # their bidding-zone sub-areas). The Volue share's reservoir_hydro view adds SEE
@@ -1301,12 +1377,12 @@ print(f"wr_reanalysis_daily spans {_span[0]} -> {_span[1]} ({_span[2]:,} days)")
 # DBTITLE 1,8. Placeholders — weather indexes and Meteologica
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {SBX}.weather_indexes (
-  index_name STRING COMMENT 'NAO, AO, EA, SCAND, PNA, ONI, MJO_AMP, MJO_PHASE, QBO, SSW',
+  index_name STRING COMMENT 'column of all_daily_indices.csv: NAO_EOF, AO, PNA, SCAND, NINO34, MJO Amplitude, ...',
   date       DATE,
   value      DOUBLE,
   source     STRING COMMENT 'e.g. NOAA CPC, BoM, ERA5-derived',
   loaded_at  TIMESTAMP
-) COMMENT 'Daily/monthly teleconnection indexes for the analogue tab. Loaded by a separate job.'
+) COMMENT 'Daily teleconnection indices for the Historical -> Teleconnections tab. Loaded by pipeline/indices_upload.py, not by this notebook.'
 """)
 
 spark.sql(f"""

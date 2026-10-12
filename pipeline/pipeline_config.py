@@ -31,6 +31,7 @@ DEFAULT_SCHEMA = "dna_snbx_weather.power_desk"                      # power_desk
 DEFAULT_HTTP_PATH = "/sql/1.0/warehouses/2f4ff6b7c65abb1a"          # the desk apps' warehouse (app.yaml)
 DEFAULT_EQ_FUNDAMENTALS = r"P:\QFA\TonyWeather\Lorenzo_Trainee\EQ_project\eq_fundamentals.py"
 DEFAULT_SWE_ROOT = Path(r"P:\QFA\TonyWeather\Hydro_Report\SWE_Exolabs")
+DEFAULT_INDICES_CSV = HERE.parent / "all_daily_indices.csv"
 
 
 def load_env_file(path: Path = ENV_FILE) -> int:
@@ -121,7 +122,16 @@ class Settings:
     # ── Local ───────────────────────────────────────────────────────────────
     log_dir: Path
     out_dir: Path
+    # ── Teleconnection indices (all_daily_indices.csv → weather_indexes) ────
+    indices_csv: Path = DEFAULT_INDICES_CSV
+    indices_table: str = "weather_indexes"
+    indices_start_year: int = 1979       # the targets (ERA5 / reanalysis) start in 1979; 1950 loads the whole file
+    indices_refresh_days: int = 90       # days re-sent every run — providers revise recent daily values
     extra: dict = field(default_factory=dict)
+
+    @property
+    def indices_table_fq(self) -> str:
+        return f"{self.schema}.{self.indices_table}"
 
     @property
     def river_table_fq(self) -> str:
@@ -195,6 +205,10 @@ def load_settings() -> Settings:
         swe_model_timeout_min=_int("SWE_MODEL_TIMEOUT_MIN", 120),
         log_dir=Path(os.environ.get("PIPELINE_LOG_DIR", str(HERE / "logs"))),
         out_dir=Path(os.environ.get("PIPELINE_OUT_DIR", str(HERE / "out"))),
+        indices_csv=Path(os.environ.get("INDICES_CSV", str(DEFAULT_INDICES_CSV))),
+        indices_table=os.environ.get("INDICES_TABLE", "weather_indexes"),
+        indices_start_year=_int("INDICES_START_YEAR", 1979),
+        indices_refresh_days=_int("INDICES_REFRESH_DAYS", 90),
     )
 
 
