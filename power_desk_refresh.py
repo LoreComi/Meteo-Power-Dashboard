@@ -791,6 +791,40 @@ try:
     """).collect():
         print(f"  {_r['metric']:<6s} {_r['areas']:>3d} areas  {_r['first_day']} -> {_r['last_day']}  "
               f"vintage {_r['vintage']}  {_r['n']:>8,d} rows")
+
+    # The reanalysis has no normal of its own (the table is values only), so one is made here:
+    # the mean of each calendar day over REANALYSIS_NORMAL_YEARS, smoothed with a centred
+    # 15-day window (a single day-of-year mean over 30 years is noisy; the window is cut
+    # short in the first and last week of the year). Rows go into hist_daily as source
+    # 'Reanalysis' — same layout, display unit GWh/h like Volue's — so the Historical →
+    # History tab offers it next to Volue for wind and solar. Cell 5 recreates hist_daily
+    # on every run, and the DELETE keeps a lone re-run of this cell from duplicating rows.
+    REANALYSIS_NORMAL_YEARS = (1991, 2020)
+    reanalysis_hist_sql = f"""
+    WITH base AS (
+      SELECT metric, area, day, value_mw * 0.001 AS actual FROM {SBX}.reanalysis_daily
+    ),
+    clim AS (
+      SELECT metric, area, DAYOFYEAR(day) AS doy, AVG(actual) AS m FROM base
+      WHERE YEAR(day) BETWEEN {REANALYSIS_NORMAL_YEARS[0]} AND {REANALYSIS_NORMAL_YEARS[1]}
+      GROUP BY metric, area, DAYOFYEAR(day)
+    ),
+    smooth AS (
+      SELECT metric, area, doy,
+             AVG(m) OVER (PARTITION BY metric, area ORDER BY doy ROWS BETWEEN 7 PRECEDING AND 7 FOLLOWING) AS normal
+      FROM clim
+    )
+    SELECT 'Reanalysis' AS source, b.metric, b.area, b.day, YEAR(b.day) AS year, MONTH(b.day) AS month,
+           WEEKOFYEAR(b.day) AS iso_week, DATE_TRUNC('week', b.day) AS week_start,
+           b.actual, s.normal, b.actual - s.normal AS anomaly,
+           CASE WHEN s.normal != 0 THEN (b.actual / s.normal - 1) * 100 END AS anomaly_pct,
+           current_timestamp() AS snapshot_ts
+    FROM base b JOIN smooth s ON s.metric = b.metric AND s.area = b.area AND s.doy = DAYOFYEAR(b.day)
+    """
+    spark.sql(f"DELETE FROM {SBX}.hist_daily WHERE source = 'Reanalysis'")
+    spark.sql(f"INSERT INTO {SBX}.hist_daily {reanalysis_hist_sql}")
+    print(f"hist_daily: + Reanalysis rows (normal {REANALYSIS_NORMAL_YEARS[0]}-{REANALYSIS_NORMAL_YEARS[1]}, "
+          f"15-day smoothed day-of-year mean)")
 except Exception as _e:   # no access to the silver table must not stop the rest of the refresh
     print(f"!! {REANALYSIS_TABLE} not readable ({str(_e)[:200]}) — reanalysis_daily left as-is; "
           "the Teleconnections tab then offers the Volue (2013+) and Meteomatics sources only")

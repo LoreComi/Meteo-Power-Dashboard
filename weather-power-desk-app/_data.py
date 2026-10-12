@@ -691,13 +691,22 @@ def hist_sources() -> dict[str, list[str]]:
     return out
 
 
-def resolve_hist_source(metric: str) -> tuple[str | None, str | None]:
+def hist_source_options(metric: str) -> list[str]:
+    """Sources the user can pick for `metric` (HIST_SOURCE_OPTIONS) that have rows in hist_daily."""
+    from _config import HIST_SOURCE_OPTIONS
+    have = hist_sources().get(metric, [])
+    return [s for s in HIST_SOURCE_OPTIONS.get(metric, []) if s in have]
+
+
+def resolve_hist_source(metric: str, choice: str | None = None) -> tuple[str | None, str | None]:
     """(source to read for `metric`, note for the UI when it is not the configured one).
 
     None as the source means "do not filter" — the sandbox predates the column
-    and its rows are Volue's.
+    and its rows are Volue's. `choice` is the user's pick from hist_source_options.
     """
     avail = hist_sources()
+    if choice and choice in avail.get(metric, []):
+        return choice, None
     if not avail:
         return None, ("hist_daily has no `source` column yet, so temperature is still Volue's — re-run "
                       "power_desk_refresh.py for the Meteomatics / ERA5 population-weighted history.")

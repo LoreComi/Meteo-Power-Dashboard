@@ -639,8 +639,13 @@ HIST_DEFAULT_SOURCE = "Volue"
 HIST_SOURCE_NOTES: dict[str, str] = {
     "Meteomatics": "Meteomatics / ERA5 climatology (gold layer) · population-weighted country means · the same "
                    "value, normal and anomaly fields as the Anomaly Maps tab",
-    "Volue": "Volue actuals vs the Volue normal",
+    "Volue": "Volue actuals vs the Volue normal (since 2013, the fleet grows over the period)",
+    "Reanalysis": "Meteologica ERA5 reanalysis since 1979 — what today's fleet would have produced, so capacity is constant "
+                  "and the series is weather only · normal = 1991–2020 mean of the calendar day (15-day smoothed)",
 }
+# Metrics whose History view can switch between sources (first = default). Needs the notebook's
+# cell 5b to have added the 'Reanalysis' rows to hist_daily; a source without rows is not offered.
+HIST_SOURCE_OPTIONS: dict[str, list[str]] = {"Wind": ["Volue", "Reanalysis"], "Solar": ["Volue", "Reanalysis"]}
 
 
 def hist_source(metric: str) -> str:

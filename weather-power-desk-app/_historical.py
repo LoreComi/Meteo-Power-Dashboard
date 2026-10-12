@@ -26,7 +26,7 @@ from _config import (
 )
 from _data import (
     load_hist_years, load_hist_daily, load_hist_monthly_all, load_anomaly_map,
-    resolve_hist_source,
+    resolve_hist_source, hist_source_options,
 )
 from _charts import (
     make_year_month_heatmap, make_period_bars, make_period_lines, make_anomaly_heatmap,
@@ -66,7 +66,11 @@ def _render_history():
     # Temperature reads the Meteomatics / ERA5 rows of hist_daily, the other
     # metrics Volue's; an older sandbox (no `source` column) or a notebook run
     # without gold access falls back and says so.
-    source, note = resolve_hist_source(metric)
+    opts = hist_source_options(metric)
+    choice = st.radio("Source", opts, horizontal=True, key=f"h_src_{metric}",
+                      format_func=lambda s: {"Volue": "Volue actuals (2013+)", "Reanalysis": "Meteologica reanalysis (1979+)"}.get(s, s)
+                      ) if len(opts) > 1 else None
+    source, note = resolve_hist_source(metric, choice)
     if note:
         status_banner(note, "warning")
     st.caption(f"Source — {HIST_SOURCE_NOTES.get(source or HIST_DEFAULT_SOURCE, source)}.")
