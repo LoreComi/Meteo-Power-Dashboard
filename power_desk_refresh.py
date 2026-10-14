@@ -867,11 +867,19 @@ for comp in HYDRO_COMPONENTS:
     GROUP BY split(curve_name, ' ')[1], {CET_DAY}, CASE WHEN curve_name LIKE '% sa' THEN 'SA' ELSE 'N' END
     """)
 
-spark.sql(f"""
-CREATE OR REPLACE TABLE {SBX}.hydro_daily AS
-SELECT area, component, day, data_type, value, current_timestamp() AS snapshot_ts
-FROM ({" UNION ALL ".join(comp_blocks + (share_blocks if HYDRO_SHARE_AREAS else []))})
-""")
+try:
+    spark.sql(f"""
+    CREATE OR REPLACE TABLE {SBX}.hydro_daily AS
+    SELECT area, component, day, data_type, value, current_timestamp() AS snapshot_ts
+    FROM ({" UNION ALL ".join(comp_blocks + (share_blocks if HYDRO_SHARE_AREAS else []))})
+    """)
+except Exception as _e:
+    print(f"!! hydro share query failed, falling back to silver-only: {str(_e)[:200]}")
+    spark.sql(f"""
+    CREATE OR REPLACE TABLE {SBX}.hydro_daily AS
+    SELECT area, component, day, data_type, value, current_timestamp() AS snapshot_ts
+    FROM ({" UNION ALL ".join(comp_blocks)})
+    """)
 count("hydro_daily")
 for _r in spark.sql(f"SELECT area, MIN(day) first_day, MAX(day) last_day, COUNT(DISTINCT component) comps "
                     f"FROM {SBX}.hydro_daily WHERE data_type = 'SA' GROUP BY area ORDER BY area").collect():
