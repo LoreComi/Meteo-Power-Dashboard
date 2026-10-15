@@ -692,7 +692,7 @@ TELE_INDICES: dict[str, tuple[str, str]] = {
     "GWO2":            ("Tropical convection", "Global Wind Oscillation, component 2"),
     "GWO_AMPLITUDE":   ("Tropical convection", "Global Wind Oscillation amplitude"),
 }
-TELE_DEFAULT_INDICES = ["NAO_EOF", "EA", "SCAND", "AO"]
+TELE_DEFAULT_INDICES = ["NINO34"]
 TELE_AREAS: dict[str, str] = {**AREAS, "AT": "Austria", "CH": "Switzerland"}   # the reanalysis also has AT and CH
 TELE_REANALYSIS_BASE_YEARS = (1991, 2020)     # climatology the reanalysis anomalies are taken against (WMO normal)
 TELE_REANALYSIS_TABLE = "reanalysis_daily"
@@ -713,7 +713,6 @@ TELE_SOURCE_LABELS: dict[str, str] = {
     "Volue": "Volue actuals (2013+)",
 }
 TELE_SOURCE_SHORT: dict[str, str] = {"Meteomatics": "ERA5", "Reanalysis": "Reanal.", "Volue": "Volue"}
-ANALOG_N_YEARS = 5
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HYDRO (see _hydro_quantify.py for the maths)

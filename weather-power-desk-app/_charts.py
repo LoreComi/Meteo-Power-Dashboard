@@ -632,9 +632,10 @@ def make_tele_scatter(df: pd.DataFrame, xlabel: str, ylabel: str, title: str,
 
 
 def make_composite_bars(comp: pd.DataFrame, x_labels: dict[tuple[str, str], str], order: list[str],
-                        unit: str, title: str) -> go.Figure:
+                        unit: str, title: str, now: str | None = None) -> go.Figure:
     """Mean anomaly per (country, source) in each class of years, grouped bars; the hover
-    carries the number of years and the p-value against all the other years."""
+    carries the number of years and the p-value against all the other years. `now` names the
+    class the current value falls in — its legend entry reads '<class> · now'."""
     fig = _base_fig(title, height=380)
     if comp.empty:
         return fig
@@ -650,7 +651,8 @@ def make_composite_bars(comp: pd.DataFrame, x_labels: dict[tuple[str, str], str]
             else:
                 ys.append(np.nan)
                 hov.append("")
-        fig.add_trace(go.Bar(x=[x_labels[k] for k in keys], y=ys, name=grp, marker_color=PHASE_COLORS.get(grp, INK_MUTED),
+        fig.add_trace(go.Bar(x=[x_labels[k] for k in keys], y=ys, name=f"{grp} · now" if grp == now else grp,
+                             marker_color=PHASE_COLORS.get(grp, INK_MUTED),
                              marker_line_width=0, customdata=hov,
                              hovertemplate=f"{grp} · %{{x}}<br>%{{y:+.2f}} {unit}<br>%{{customdata}}<extra></extra>"))
     fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
@@ -659,12 +661,23 @@ def make_composite_bars(comp: pd.DataFrame, x_labels: dict[tuple[str, str], str]
     return fig
 
 
-def make_regression_fit(years: list[int], observed: np.ndarray, fitted: np.ndarray, title: str, unit: str) -> go.Figure:
+def make_regression_fit(years: list[int], observed: np.ndarray, predicted: np.ndarray, title: str, unit: str,
+                        now: dict[int, float] | None = None) -> go.Figure:
+    """Observed anomaly per year (bars) against the model's OUT-OF-SAMPLE prediction for that
+    year (line: each year predicted without having seen it). Years where the prediction had
+    the wrong sign are drawn in orange, so a model's misses are visible, not averaged away.
+    `now` = predictions for years the target does not have yet, shown as a diamond."""
     fig = _base_fig(title, height=320)
     xs = [str(int(y)) for y in years]
-    fig.add_trace(go.Bar(x=xs, y=observed, name="observed", marker_color=HYDRO_HIST_GREY, marker_line_width=0))
-    fig.add_trace(go.Scatter(x=xs, y=fitted, name="fitted from the indices", mode="lines+markers",
+    miss = np.sign(observed) != np.sign(predicted)
+    fig.add_trace(go.Bar(x=xs, y=observed, name="observed", marker_line_width=0,
+                         marker_color=[CAT_ORANGE if m else HYDRO_HIST_GREY for m in miss],
+                         hovertemplate="%{x}: %{y:+.1f} " + unit + "<extra>observed</extra>"))
+    fig.add_trace(go.Scatter(x=xs, y=predicted, name="predicted without that year", mode="lines+markers",
                              line=dict(color=CAT_BLUE, width=2), marker=dict(size=5)))
+    if now:
+        fig.add_trace(go.Scatter(x=[str(int(y)) for y in now], y=list(now.values()), name="prediction now", mode="markers",
+                                 marker=dict(size=11, symbol="diamond", color=CAT_VIOLET)))
     fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
     fig.update_yaxes(title_text=unit)
     fig.update_xaxes(type="category", tickangle=-60)

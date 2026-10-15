@@ -9,10 +9,11 @@ quarter by quarter, across the years.
                one or several; several can be blended into a single index
   Indices      where the indices are, and the selected period's index by year
   Correlations indices × countries for the period, the index's seasonal profile, a scatter
-  By phase     the target's anomaly when the index is high / low / neutral, or when
-               several indices line up at once (joint regime)
-  Regression   the target on several indices together, with its out-of-sample skill
-  Analogues    the years whose index looked most like now, and what the target did then
+  Phase &      the target's anomaly when the index is high / low / neutral — the years in
+  analogues    the same phase as now are the analogues — or when several indices line up
+               at once (joint regime)
+  Model & hit  the target as a forecast model of the indices, judged out of sample: hit
+  rate         rate, skill against climatology, a usability verdict, the prediction now
 
 Sources of the same metric (Meteologica reanalysis and Volue actuals for wind and solar)
 sit side by side as adjacent columns of the same grid, never in separate stacked tables.
@@ -26,7 +27,7 @@ import streamlit as st
 
 import _tele_stats as ts
 from _config import (
-    METRICS, DEFAULT_METRIC, MONTH_NAMES, DEFAULT_AREAS, ANALOG_N_YEARS, SBX_SCHEMA, HIST_DEFAULT_SOURCE,
+    METRICS, DEFAULT_METRIC, MONTH_NAMES, DEFAULT_AREAS, SBX_SCHEMA, HIST_DEFAULT_SOURCE,
     TELE_INDICES, TELE_DEFAULT_INDICES, TELE_AREAS, TELE_SOURCES, TELE_SOURCE_LABELS, TELE_SOURCE_SHORT,
     TELE_REANALYSIS_BASE_YEARS,
 )
@@ -159,7 +160,7 @@ def render_teleconnections():
                              [n for n in TELE_DEFAULT_INDICES if n in names_avail],
                              format_func=lambda n: f"{n} — {TELE_INDICES[n][1]}", key="tc_idx")
     with i2:
-        thr = st.slider("High / low beyond ±σ", 0.25, 1.5, 0.5, 0.05, key="tc_thr",
+        thr = st.slider("High / low beyond ±σ", 0.25, 2.0, 0.5, 0.05, key="tc_thr",
                         help="An index is 'high' above +σ, 'low' below −σ, in z-scores of its own history for the period.")
     if not sel:
         st.info("Pick at least one index.")
@@ -222,7 +223,7 @@ def render_teleconnections():
                    f"pure weather), anomaly = % of its {TELE_REANALYSIS_BASE_YEARS[0]}–{TELE_REANALYSIS_BASE_YEARS[1]} "
                    f"mean for the month. Volue: actuals vs the Volue normal, and its fleet grows over time.")
 
-    tabs = st.tabs(["Indices", "Correlations", "Anomalies by phase", "Regression", "Analogue years"])
+    tabs = st.tabs(["Indices", "Correlations", "Phase & analogue years", "Model & hit rate"])
 
     # ══ INDICES ═══════════════════════════════════════════════════════════════
     with tabs[0]:
@@ -233,17 +234,13 @@ def render_teleconnections():
         _render_correlations(all_frames, focus, focus_f, tgt, labels, areas, sources, resolution, period, plabel,
                              detrend, years, ctx, trend_note, metric, a_unit)
 
-    # ══ BY PHASE ══════════════════════════════════════════════════════════════
+    # ══ PHASE & ANALOGUES ══════════════════════════════════════════════════════════════
     with tabs[2]:
-        _render_phase(sel, frames, focus, focus_f, tgt, labels, period, plabel, detrend, years, thr, a_unit, metric, ctx)
+        _render_phase(sel, frames, focus, focus_f, focus_m, tgt, labels, period, plabel, detrend, years, thr, a_unit, metric, ctx)
 
-    # ══ REGRESSION ════════════════════════════════════════════════════════════
+    # ══ MODEL ════════════════════════════════════════════════════════════
     with tabs[3]:
         _render_regression(sel, frames, tgt, labels, period, plabel, detrend, years, a_unit, metric, ctx)
-
-    # ══ ANALOGUES ═════════════════════════════════════════════════════════════
-    with tabs[4]:
-        _render_analogues(focus, focus_f, focus_m, tgt, labels, period, plabel, detrend, years, thr, a_unit, metric, ctx)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -346,9 +343,9 @@ def _group_years(groups: pd.Series, order: list[str]) -> str:
                       (", ".join(str(int(y)) for y in groups[groups == g].index) or "—") for g in order)
 
 
-def _composite_block(tgt, labels, period, groups, order, detrend, years, a_unit, title, key):
+def _composite_block(tgt, labels, period, groups, order, detrend, years, a_unit, title, key, now=None):
     comp = ts.composite(tgt, period, groups, order, detrend, years)
-    st.plotly_chart(make_composite_bars(comp, labels, order, a_unit, title), use_container_width=True)
+    st.plotly_chart(make_composite_bars(comp, labels, order, a_unit, title, now), use_container_width=True)
     with st.expander("Composites — table (mean anomaly; countries as rows, sources and groups as columns)"):
         t = comp.pivot_table(index="area", columns=["source", "group"], values="mean", sort=False).round(2)
         st.dataframe(t, use_container_width=True)
@@ -356,17 +353,40 @@ def _composite_block(tgt, labels, period, groups, order, detrend, years, a_unit,
     return comp
 
 
-def _render_phase(sel, frames, focus, focus_f, tgt, labels, period, plabel, detrend, years, thr, a_unit, metric, ctx):
-    mode = st.radio("Group the years by", ["Phase of the focus index", "Joint regime — several indices at once"],
+def _render_phase(sel, frames, focus, focus_f, focus_m, tgt, labels, period, plabel, detrend, years, thr, a_unit, metric, ctx):
+    """Phase composites and analogue years in one view. The analogues are the years in the same
+    PHASE as the current value (high / neutral / low beyond ±thr), not the N nearest values:
+    five or six nearest years are too few to say anything, a phase holds a dozen or more and
+    carries a t-test against the other years. Raise the threshold to make 'years like now'
+    stricter."""
+    mode = st.radio("Group the years by", ["Phase of the focus index — and the years like now",
+                                           "Joint regime — several indices at once"],
                     horizontal=True, key="tc_phase_mode")
     if mode.startswith("Phase"):
         z = focus_f[focus_f["period"] == period].set_index("year")["z"].dropna()
         z = z[(z.index >= years[0]) & (z.index <= years[1])]
+        if z.empty:
+            st.info("No index values for that period and years.")
+            return
         groups = ts.classify(z, thr)
         order = ["Low", "Neutral", "High"]
+        latest = focus_m.sort_values(["year", "period"]).iloc[-1]
+        now_z = st.slider(f"Current {focus} (σ)", -4.0, 4.0, float(np.clip(round(float(latest["z"]), 2), -4, 4)), 0.05,
+                          key="tc_now", help=f"Defaults to the latest value: {latest['z']:+.2f}σ in "
+                                             f"{MONTH_NAMES[int(latest['period']) - 1]} {int(latest['year'])}. Move it to ask "
+                                             "'what if it were …'.")
+        now_cls = "High" if now_z >= thr else ("Low" if now_z <= -thr else "Neutral")
+        this_year = pd.Timestamp.today().year
+        like_now = [y for y in groups.index[groups == now_cls] if y != this_year]
+        st.caption(f"**Now: {focus} {now_z:+.2f}σ → {now_cls} phase** (beyond ±{thr:g}σ). Years like now "
+                   f"({len(like_now)}): {', '.join(str(int(y)) for y in like_now) or '—'}")
+        if len(like_now) < 5:
+            status_banner(f"Only {len(like_now)} year(s) are in the {now_cls} phase at ±{thr:g}σ — too few for a composite to "
+                          "mean much; lower the threshold.", "warning")
+        st.plotly_chart(make_index_period_bars(z, f"{focus} · {plabel}", thr, like_now), use_container_width=True)
         st.caption(_group_years(groups, order))
         _composite_block(tgt, labels, period, groups, order, detrend, years, a_unit,
-                         f"{metric} anomaly when {focus} is low / neutral / high · {ctx}", f"tele_phase_{metric}_{plabel}")
+                         f"{metric} anomaly when {focus} is low / neutral / high · {ctx}", f"tele_phase_{metric}_{plabel}", now_cls)
         return
     st.caption(f"Pick a condition per index. A year is in the regime when every condition holds at once "
                f"(positive = at or above +{thr:g}σ, negative = at or below −{thr:g}σ).")
@@ -392,22 +412,40 @@ def _render_phase(sel, frames, focus, focus_f, tgt, labels, period, plabel, detr
                      f"{metric} anomaly in the joint regime vs all other years · {ctx}", f"tele_regime_{metric}_{plabel}")
 
 
+_VERDICT_BG = {"Usable": "background-color:#d6efd6", "Marginal": "background-color:#fbe9c3",
+               "Not usable": "background-color:#ececea"}
+
+
 def _render_regression(sel, frames, tgt, labels, period, plabel, detrend, years, a_unit, metric, ctx):
-    pred = st.multiselect("Predictors (2–4 work best — with ~45 years more starts to fit noise)", sel, sel[:3], max_selections=4,
-                          key="tc_reg_pred")
+    """The indices as a forecast model for the target anomaly, judged out of sample."""
+    st.caption("A model of the target anomaly from the indices, judged only on years it did not see: every year is "
+               "predicted by a fit that leaves that year out. **Hit rate** = share of years whose above / below-normal sign "
+               "it got right.")
+    pred = st.multiselect("Predictors (1–4 — with ~45 years, more start to fit noise)", sel, sel[:3], max_selections=4,
+                          key="tc_reg_pred_" + "|".join(sel))
     if not pred:
         st.info("Pick at least one predictor.")
         return
-    X = pd.concat([frames[n][frames[n]["period"] == period].set_index("year")["z"].rename(n) for n in pred], axis=1, join="inner")
+    X = pd.concat([frames[n][frames[n]["period"] == period].set_index("year")["z"].rename(n) for n in pred],
+                  axis=1, join="inner")
     rows, fits = [], {}
     for (a, s), lab in labels.items():
-        y = tgt[(tgt["area"] == a) & (tgt["source"] == s) & (tgt["period"] == period)].set_index("year")["anomaly"].sort_index()
-        o = ts.ols(X, y, detrend, years)
+        y = tgt[(tgt["area"] == a) & (tgt["source"] == s) & (tgt["period"] == period)].set_index("year")["anomaly"].sort_index().dropna()
+        o = ts.ols(X, y, detrend, years, X[~X.index.isin(y.index)])
         if o is None:
             continue
         fits[(a, s)] = o
+        verdict = ts.usability(o)
+        now_txt = "—"
+        if o["now"] and verdict != "Not usable":     # a prediction from a model with no skill would only mislead
+            yr = max(o["now"])
+            now_txt = f"{o['now'][yr]:+.1f} {a_unit} ({yr})"
+        elif o["now"]:
+            now_txt = "no skill"
         row = {"country": a, "source": TELE_SOURCE_SHORT.get(s, s), "years": o["n"],
-               "R² (in-sample)": o["r2"], "adj. R²": o["adj_r2"], "R² leave-one-year-out": o["loo_r2"]}
+               "hit rate": o["hit_rate"], "coin / always-common-sign": f"50% / {o['naive']:.0%}",
+               "hit rate, clear years": o["hit_strong"], "R² out of sample": o["loo_r2"],
+               "typical miss": o["rmse_loo"], "verdict": verdict, "prediction now": now_txt}
         for n in pred:
             row[f"β {n}"] = f"{o['beta'][n]:+.2f}" + ("*" if o["p"][n] < 0.05 else "")
         rows.append(row)
@@ -415,37 +453,27 @@ def _render_regression(sel, frames, tgt, labels, period, plabel, detrend, years,
         st.info("Too few overlapping years for this many predictors.")
         return
     tab = pd.DataFrame(rows)
-    st.dataframe(tab.style.format({c: "{:.2f}" for c in tab.columns if c.startswith(("R²", "adj"))}),
-                 use_container_width=True, hide_index=True)
-    st.caption(f"{metric} anomaly ({a_unit}) regressed on the standardised indices, {ctx}. β is per standard deviation of "
-               "the index (both sides standardised), * p < 0.05. **R² leave-one-year-out** is the out-of-sample skill: each "
-               "year predicted by a model that never saw it. If it is near zero or negative the in-sample R² is "
-               "overfitting, whatever its size.")
-    pick = st.selectbox("Show the fit for", list(fits), format_func=lambda k: f"{k[0]} · {TELE_SOURCE_LABELS.get(k[1], k[1])}",
-                        key="tc_reg_pick")
+    n_ok = int((tab["verdict"] == "Usable").sum())
+    st.markdown(f"**{n_ok} of {len(tab)}** country / source cells are *Usable* for {metric} in {plabel} from "
+                f"{', '.join(pred)}.")
+    sty = tab.style.format({"hit rate": "{:.0%}", "hit rate, clear years": "{:.0%}", "R² out of sample": "{:.2f}",
+                            "typical miss": "{:.1f}"}, na_rep="—")
+    sty = (sty.map if hasattr(sty, "map") else sty.applymap)(lambda v: _VERDICT_BG.get(v, ""), subset=["verdict"])
+    st.dataframe(sty, use_container_width=True, hide_index=True)
+    st.caption(
+        f"{metric} anomaly ({a_unit}), {ctx}. **Usable** = out-of-sample R² ≥ 0.10, hit rate ≥ 65 % that a coin toss would "
+        "rarely give (p < 0.05) and above the always-guess-the-common-sign baseline; **Marginal** = some skill and a hit rate "
+        "beating a coin at p < 0.10; otherwise **Not usable**. These cut-offs are a judgement call, not a standard. "
+        "**Clear years** are those where the anomaly exceeded half a standard deviation — the ones that matter for a "
+        "position. **Typical miss** is the out-of-sample RMSE. **Prediction now** needs the index to be observed for the "
+        "period at the chosen lead (a lead of 3+ months usually does). β is per standard deviation of the index, * p < 0.05. "
+        "Caveats: this is a hindcast, not a live track record; trend removal uses all years; and if you screened many "
+        "indices and countries to find a Usable cell, some luck is built in — treat it as a lead to check, with a physical "
+        "reason, not a trading signal on its own.")
+    pick = st.selectbox("Show the year-by-year record for", list(fits),
+                        format_func=lambda k: f"{k[0]} · {TELE_SOURCE_LABELS.get(k[1], k[1])}", key="tc_reg_pick")
     o = fits[pick]
-    st.plotly_chart(make_regression_fit(o["years"], o["observed"], o["fitted"],
-                                        f"{pick[0]} {metric} anomaly — observed vs fitted from {', '.join(pred)} · {plabel}",
-                                        a_unit), use_container_width=True)
-
-
-def _render_analogues(focus, focus_f, focus_m, tgt, labels, period, plabel, detrend, years, thr, a_unit, metric, ctx):
-    z = focus_f[focus_f["period"] == period].set_index("year")["z"].dropna()
-    z = z[(z.index >= years[0]) & (z.index <= years[1])]
-    if z.empty:
-        st.info("No index values for that period and years.")
-        return
-    latest = focus_m.sort_values(["year", "period"]).iloc[-1]
-    c1, c2 = st.columns(2)
-    with c1:
-        n_an = st.slider("Analogue years", 3, 10, ANALOG_N_YEARS, key="tc_an_n")
-    with c2:
-        target = st.slider(f"Assumed {focus} (σ)", -3.0, 3.0, float(np.clip(round(float(latest["z"]), 2), -3, 3)), 0.05, key="tc_an_target",
-                           help=f"Defaults to the latest value: {latest['z']:+.2f}σ in {MONTH_NAMES[int(latest['period']) - 1]} {int(latest['year'])}.")
-    this_year = pd.Timestamp.today().year
-    an = ts.nearest_years(z, target, n_an, exclude={this_year})
-    st.caption("Analogue years: " + ", ".join(f"{int(y)} ({v:+.2f}σ)" for y, v in an.items()))
-    st.plotly_chart(make_index_period_bars(z, f"{focus} · {plabel}", thr, list(an.index)), use_container_width=True)
-    groups = pd.Series(np.where(z.index.isin(an.index), "Analogues", "Rest"), index=z.index)
-    _composite_block(tgt, labels, period, groups, ["Analogues", "Rest"], detrend, years, a_unit,
-                     f"{metric} anomaly in the analogue years vs the rest · {ctx}", f"tele_analogues_{metric}_{plabel}")
+    st.plotly_chart(make_regression_fit(o["years"], o["observed"], o["loo_pred"],
+                                        f"{pick[0]} {metric} anomaly — observed vs out-of-sample prediction from "
+                                        f"{', '.join(pred)} · {plabel} · hit rate {o['hit_rate']:.0%} (misses in orange)",
+                                        a_unit, o["now"]), use_container_width=True)

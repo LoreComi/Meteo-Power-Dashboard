@@ -272,51 +272,97 @@ def composite(targets: pd.DataFrame, period: int, groups: pd.Series, order: list
     return pd.DataFrame(rows, columns=["area", "source", "group", "mean", "n", "n_rest", "p"])
 
 
-def ols(X: pd.DataFrame, y: pd.Series, detrend: bool = True, years: tuple[int, int] | None = None) -> dict | None:
-    """OLS of the target on the predictors (all year-indexed; y and every column of X are
-    standardised, so coefficients are standardised betas comparable across indices).
-    Returns n, r2, adj_r2, loo_r2 (leave-one-year-out, from the hat matrix — the honest
-    out-of-sample figure), per-predictor beta / p, and the fitted / observed series in
-    the target's units. None when there are too few years for the number of predictors."""
+def _trend_line(s: pd.Series) -> tuple[float, float]:
+    """(slope, intercept) of a linear fit against the (year) index."""
+    slope, icpt = np.polyfit(np.asarray(s.index, dtype=float), s.values, 1)
+    return float(slope), float(icpt)
+
+
+def ols(X: pd.DataFrame, y: pd.Series, detrend: bool = True, years: tuple[int, int] | None = None,
+        X_new: pd.DataFrame | None = None) -> dict | None:
+    """The target on the predictors, fitted and judged as a forecast model.
+
+    All series are year-indexed. y and every column of X are standardised, so the
+    coefficients are standardised betas comparable across indices. Besides the in-sample
+    R², everything that says whether the model is usable is OUT of sample — each year is
+    predicted by a model that never saw it (leave-one-year-out, exact from the hat matrix):
+
+      loo_r2      skill against always predicting the average (≤ 0: no skill)
+      hit_rate    share of years whose above / below-normal sign the out-of-sample prediction got right
+      hit_strong  the same over the clear years only (|anomaly| above half a standard deviation)
+      hit_p       one-sided binomial p-value of hit_rate against a coin toss
+      naive       hit rate of always guessing the more frequent sign — the number to beat
+      rmse_loo    typical out-of-sample miss, in the target's units
+
+    `X_new` (index values for years the target does not have yet) gets a prediction in
+    `now`, {year: anomaly}; with `detrend` the trend of both sides is extrapolated.
+    Trend removal itself uses every year (a small leak the caption states). None when there
+    are too few years for the number of predictors."""
     df = pd.concat([X, y.rename("__y")], axis=1, join="inner").dropna()
     if years is not None:
         df = df[(df.index >= years[0]) & (df.index <= years[1])]
     k = X.shape[1]
     if len(df) < max(MIN_YEARS, k + 4):
         return None
+    lines = {c: (0.0, 0.0) for c in df.columns}
     if detrend:
-        df = pd.concat([detrended(df[c]).rename(c) for c in df.columns], axis=1)
-    sd = df.std()
+        lines = {c: _trend_line(df[c]) for c in df.columns}
+        df = pd.concat([(df[c] - (lines[c][0] * df.index.values + lines[c][1])).rename(c) for c in df.columns], axis=1)
+    sd, mu_all = df.std(), df.mean()
     if (sd == 0).any():
         return None
     obs = df["__y"]
-    Z = (df - df.mean()) / sd
+    Z = (df - mu_all) / sd
     A = np.column_stack([np.ones(len(Z)), Z[X.columns].values])
     yz = Z["__y"].values
     AtA_inv = np.linalg.pinv(A.T @ A)
     beta = AtA_inv @ A.T @ yz
-    fit = A @ beta
-    resid = yz - fit
+    resid = yz - A @ beta
     n, p = A.shape
     sst = float(((yz - yz.mean()) ** 2).sum())
     r2 = 1 - float((resid ** 2).sum()) / sst
     adj = 1 - (1 - r2) * (n - 1) / (n - p)
     h = np.einsum("ij,jk,ik->i", A, AtA_inv, A)
-    loo = 1 - float(((resid / (1 - h)) ** 2).sum()) / sst
+    loo_resid = resid / (1 - h)
+    loo = 1 - float((loo_resid ** 2).sum()) / sst
     s2 = float((resid ** 2).sum()) / (n - p)
     se = np.sqrt(np.diag(AtA_inv) * s2)
     pv = 2 * stats.t.sf(np.abs(beta / se), n - p)
-    mu, s_y = obs.mean(), obs.std()
+    mu_y, s_y = float(mu_all["__y"]), float(sd["__y"])
+    loo_pred = (yz - loo_resid) * s_y + mu_y            # out-of-sample prediction, target units
+    o = obs.values
+    nz = o != 0
+    hit = np.sign(loo_pred) == np.sign(o)
+    n_hit, n_eval = int(hit[nz].sum()), int(nz.sum())
+    strong = nz & (np.abs(o) > 0.5 * s_y)
+    pos = float((o[nz] > 0).mean()) if n_eval else np.nan
+    now = {}
+    if X_new is not None and not X_new.empty:
+        xn = X_new[list(X.columns)].dropna()
+        for yr, row in xn.iterrows():
+            xs = [(row[c] - (lines[c][0] * yr + lines[c][1]) - mu_all[c]) / sd[c] for c in X.columns]
+            pred_d = (beta[0] + float(np.dot(beta[1:], xs))) * s_y + mu_y
+            now[int(yr)] = pred_d + (lines["__y"][0] * yr + lines["__y"][1])
     return {
         "n": n, "r2": r2, "adj_r2": adj, "loo_r2": loo,
         "beta": dict(zip(X.columns, beta[1:])), "p": dict(zip(X.columns, pv[1:])),
-        "years": list(df.index), "observed": obs.values, "fitted": fit * s_y + mu,
+        "years": list(df.index), "observed": o, "loo_pred": loo_pred,
+        "hit_rate": n_hit / n_eval if n_eval else np.nan,
+        "hit_p": float(stats.binomtest(n_hit, n_eval, 0.5, alternative="greater").pvalue) if n_eval else np.nan,
+        "naive": max(pos, 1 - pos) if n_eval else np.nan,
+        "hit_strong": float(hit[strong].mean()) if strong.any() else np.nan, "n_strong": int(strong.sum()),
+        "rmse_loo": float(np.sqrt(np.mean((o - loo_pred) ** 2))), "now": now,
     }
 
 
-def nearest_years(z: pd.Series, target: float, n: int, exclude: set[int] | None = None) -> pd.Series:
-    """The `n` years whose z is closest to `target`, closest first (value = their z)."""
-    z = z.dropna()
-    if exclude:
-        z = z[~z.index.isin(exclude)]
-    return z.iloc[(z - target).abs().argsort()[:n]]
+def usability(o: dict) -> str:
+    """One word for how far a fitted model can be trusted as a forecast signal. Judgement
+    thresholds, all out of sample: Usable = skill over climatology (leave-one-out R² ≥ 0.10),
+    a hit rate of at least 65 % that a coin toss would rarely give (p < 0.05) and above the
+    always-guess-the-common-sign baseline; Marginal = some skill and a hit rate that beats
+    a coin at p < 0.10; anything else is Not usable."""
+    if o["loo_r2"] >= 0.10 and o["hit_rate"] >= 0.65 and o["hit_p"] < 0.05 and o["hit_rate"] > o["naive"]:
+        return "Usable"
+    if o["loo_r2"] > 0 and o["hit_p"] < 0.10:
+        return "Marginal"
+    return "Not usable"
