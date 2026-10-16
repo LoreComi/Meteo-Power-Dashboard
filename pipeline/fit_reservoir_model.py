@@ -20,7 +20,10 @@ leave-one-year-out — see Power_dashboard/README.md, Method notes → Reservoir
   state     β0 + β1 · S_a0 (+ β2 · SWE_a0 for Dec–Jun starts), per start season and
             horizon in weeks — the mean reversion of the level anomaly (−20…−35 % RMSE at
             13–26 weeks for winter/spring starts) and the snowpack's refill signal.
-            Ramped in between 2 and 8 weeks so the short term is the weather term's.
+            Ramped in between 2 and 8 weeks so the short term is the weather term's, and
+            entered at half weight (STATE_SHRINK): head-to-head on the 45 monthly issues the
+            full term over-predicted the 2–3-month drawdown, the half term beats the normal
+            path and Volue's forecast at every horizon.
   analogues the k nearest years on (S_a0, SWE_a0) at the same week — context only: as a
             point forecast they were worse than the normal path.
 
@@ -59,6 +62,9 @@ ENS_DAYS, EXT_DAYS = 16, 46
 SEASONS = {12: "DJF", 1: "DJF", 2: "DJF", 3: "MAM", 4: "MAM", 5: "MAM", 6: "JJA", 7: "JJA", 8: "JJA", 9: "SON", 10: "SON", 11: "SON"}
 SWE_MONTHS = [12, 1, 2, 3, 4, 5, 6]               # starts for which the snowpack term applies
 STATE_RAMP_DAYS = (14, 56)                         # the state term weighs 0 at 14 d, 1 from 56 d
+STATE_SHRINK = 0.5                                 # the state term enters at half weight: on the 45 monthly issues 2023-26 the full
+                                                   # regression over-predicted the drawdown at 2-3 months (RMSE 792/923 vs normal
+                                                   # 707/877 GWh); at 0.5 it beats the normal path at every horizon (699/853/912)
 MODEL_VERSION = "fr-2026.10"
 OUT_JSON = HERE.parent / "weather-power-desk-app" / "reservoir_model_fr.json"
 
@@ -291,7 +297,7 @@ def main(argv=None) -> int:
         "history": {"from": str(d.index.min().date()), "to": str(d["wtr"].last_valid_index().date())},
         "issues": {"from": str(min(inst).date()), "to": str(max(inst).date()), "n": int(len(B))},
         "weather": {"h_days": WEATHER_H, "ens_days": ENS_DAYS, "ext_days": EXT_DAYS, **weather},
-        "state": {"h_weeks": STATE_HW, "swe_months": SWE_MONTHS, "ramp_days": list(STATE_RAMP_DAYS), "beta": state},
+        "state": {"h_weeks": STATE_HW, "swe_months": SWE_MONTHS, "ramp_days": list(STATE_RAMP_DAYS), "shrink": STATE_SHRINK, "beta": state},
         "swe": {"source": str(swe_csv), "country": SWE_COUNTRY, "clim_by_week": swe_clim},
         "analogue_library": library,
         "seasons": {str(k): v for k, v in SEASONS.items()},

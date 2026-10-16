@@ -8,7 +8,7 @@ on today's inputs and writes one daily path per series for the next 365 days:
   weather       the weather term alone: k(h, season) × cumulative precipitation-energy forecast
                 anomaly (ec00ens members for days 1–16, the ecmonthly 'Avg' for 17–46), ensemble mean
   state         the state term alone: mean reversion of the level anomaly (+ the SWE term Dec–Jun),
-                ramped in between 14 and 56 days
+                ramped in between 14 and 56 days and entered at the fit's `shrink` weight (0.5)
   model         baseline + weather + state;  model_p10 / p25 / p75 / p90 combine the member spread of
                 the weather term with the state regression's residual std (independent, in quadrature)
   volue         Volue's own reservoir forecast ('res fr hydro wtr gwh cet h f'), re-anchored on S0
@@ -110,7 +110,8 @@ def state_term(model: dict, season: str, month: int, s_a0: float, swe_a0: float 
     r0, r1 = scfg["ramp_days"]
     ramp = np.clip((h - r0) / (r1 - r0), 0.0, 1.0)
     hw = h / 7.0
-    return ramp * _interp(hw_grid, mean_g, hw), ramp * _interp(hw_grid, sig_g, hw)
+    shrink = float(scfg.get("shrink", 1.0))         # the regression enters at reduced weight (see fit_reservoir_model.STATE_SHRINK)
+    return shrink * ramp * _interp(hw_grid, mean_g, hw), ramp * _interp(hw_grid, sig_g, hw)
 
 
 def analogue_years(model: dict, t0: pd.Timestamp, s_a0: float, swe_a0: float | None, k: int) -> list[int]:
