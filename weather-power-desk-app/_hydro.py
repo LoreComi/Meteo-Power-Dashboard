@@ -1093,7 +1093,9 @@ def _render_reservoir_outlook():
     st.caption(f"{country}: where the reservoir stock goes from here. The Volue normal path from the latest level, moved by a "
                "**weather term** — the precipitation-energy ensemble's cumulative anomaly over 46 days × a season-specific response "
                "(the direct rain → reservoir relation, which absorbs the production response) — and, from 2–8 weeks on, a **state term** — "
-               "the mean reversion of the level anomaly and the snowpack (Exolabs SWE) anomaly from December to June. The band is the "
+               "the mean reversion of the level anomaly, fitted separately below and above normal (the refill from below is fast, the "
+               "drawdown from above slow — and weighted down, since stock has been kept higher since 2022), and the snowpack (Exolabs SWE) "
+               "anomaly from December to June. The band is the "
                "members' spread plus the state regression's residual. Volue's own reservoir forecast and the nearest **analogue years** "
                "(level and snow anomaly at this week, their actual path re-anchored on today's level) are context, not the forecast.")
     try:

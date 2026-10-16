@@ -17,13 +17,19 @@ leave-one-year-out — see Power_dashboard/README.md, Method notes → Reservoir
             production response that makes an inflow − production balance unusable on
             forecasts (inflow and turbining co-move; Volue's own reservoir forecast is
             worse than the normal path at every horizon).
-  state     β0 + β1 · S_a0 (+ β2 · SWE_a0 for Dec–Jun starts), per start season and
-            horizon in weeks — the mean reversion of the level anomaly (−20…−35 % RMSE at
-            13–26 weeks for winter/spring starts) and the snowpack's refill signal.
-            Ramped in between 2 and 8 weeks so the short term is the weather term's, and
-            entered at half weight (STATE_SHRINK): head-to-head on the 45 monthly issues the
-            full term over-predicted the 2–3-month drawdown, the half term beats the normal
-            path and Volue's forecast at every horizon.
+  state     β0 + β_below · min(S_a0, 0) + β_above · max(S_a0, 0) (+ β_swe · SWE_a0 for Dec–Jun
+            starts), per start season and horizon in weeks — the mean reversion of the level
+            anomaly as a hinge, because it is asymmetric: from below normal the refill is fast
+            (inflow and the drive to be full by summer), from above it is slow (capped by
+            capacity, and stock is kept) — and the snowpack's refill signal.
+            Ramped in between 2 and 8 weeks so the short term is the weather term's. The two
+            slopes are pooled toward the all-season hinge, capped to [−1, 0] and weighted
+            asymmetrically (STATE_SHRINK_BELOW 0.75, STATE_SHRINK_ABOVE 0.5): head-to-head on
+            the 45 monthly issues 2023–26 the full slopes over-predicted the drawdown from
+            above normal (stock has been kept higher since 2022) and overshot the 6-month
+            refill from below; so weighted, the model beats the normal path and Volue's
+            forecast at every horizon (452 / 737 / 886 / 912 GWh at 4 / 8 / 13 / 26 weeks vs
+            518 / 707 / 877 / 1 042 and 867 / 1 089 / 1 167 / 1 073).
   analogues the k nearest years on (S_a0, SWE_a0) at the same week — context only: as a
             point forecast they were worse than the normal path.
 
@@ -62,10 +68,11 @@ ENS_DAYS, EXT_DAYS = 16, 46
 SEASONS = {12: "DJF", 1: "DJF", 2: "DJF", 3: "MAM", 4: "MAM", 5: "MAM", 6: "JJA", 7: "JJA", 8: "JJA", 9: "SON", 10: "SON", 11: "SON"}
 SWE_MONTHS = [12, 1, 2, 3, 4, 5, 6]               # starts for which the snowpack term applies
 STATE_RAMP_DAYS = (14, 56)                         # the state term weighs 0 at 14 d, 1 from 56 d
-STATE_SHRINK = 0.5                                 # the state term enters at half weight: on the 45 monthly issues 2023-26 the full
-                                                   # regression over-predicted the drawdown at 2-3 months (RMSE 792/923 vs normal
-                                                   # 707/877 GWh); at 0.5 it beats the normal path at every horizon (699/853/912)
-MODEL_VERSION = "fr-2026.10"
+STATE_SHRINK_BELOW = 0.75   # weight of the below-normal reversion slope: the refill is robust physics, but at 6 months
+                            # the full slope overshot on the 2023-26 issues that started below normal
+STATE_SHRINK_ABOVE = 0.5    # weight of the above-normal slope: since 2022 stock is kept higher for longer, the
+                            # historical drawdown speed over-predicted the 2023-26 issues at 2-6 months
+MODEL_VERSION = "fr-2026.10b"
 OUT_JSON = HERE.parent / "weather-power-desk-app" / "reservoir_model_fr.json"
 
 
@@ -198,6 +205,23 @@ def fit_weather(d: pd.DataFrame, issues: dict) -> tuple[dict, pd.DataFrame]:
     return {"k": {str(h): v for h, v in k.items()}, "scores": {str(h): v for h, v in scores.items()}}, B
 
 
+HINGE_POOL_WEEKS = 100      # prior weight (in weeks) pulling a season's hinge slopes toward the all-season slopes
+HINGE_SLOPE_RANGE = (-1.0, 0.0)   # a slope of -1 is full reversion within the horizon; the sign cannot flip
+
+
+def fit_hinge(g: pd.DataFrame, pool: pd.DataFrame, with_swe: bool) -> np.ndarray:
+    """[b0, b_below, b_above(, b_swe)] on frame g: slopes shrunk toward the pooled fit with
+    HINGE_POOL_WEEKS of prior weight, capped to HINGE_SLOPE_RANGE, intercept re-estimated."""
+    cols = ["neg", "pos"] + (["swe_a"] if with_swe else [])
+    b_sea = ols(g[cols].values, g["y"].values)[1:]
+    b_pool = ols(pool[cols].values, pool["y"].values)[1:]
+    n = len(g)
+    b = (n * b_sea + HINGE_POOL_WEEKS * b_pool) / (n + HINGE_POOL_WEEKS)
+    b[:2] = np.clip(b[:2], *HINGE_SLOPE_RANGE)
+    b0 = float(np.mean(g["y"].values - g[cols].values @ b))
+    return np.concatenate([[b0], b])
+
+
 def fit_state(w: pd.DataFrame) -> dict:
     """β(season, hw): cumulative hw-week change of the level anomaly on S_a0 (all years) and on
     S_a0 + SWE_a0 (years with SWE), LOYO scores and residual std for the uncertainty band."""
@@ -206,32 +230,34 @@ def fit_state(w: pd.DataFrame) -> dict:
         fut = w["dS_a"].rolling(hw).sum().shift(-hw)
         T = pd.DataFrame({"y": fut, "S_a": w["S_a"], "swe_a": w["swe_a"], "season": w["season"], "yr": w.index.year}).dropna(subset=["y", "S_a"])
         T = T[T["yr"] >= 2014]
+        T["neg"], T["pos"] = T["S_a"].clip(upper=0.0), T["S_a"].clip(lower=0.0)      # hinge: the anomaly below / above normal
         out[str(hw)] = {}
         for sea in ("DJF", "MAM", "JJA", "SON"):
             g = T[T["season"] == sea]
             gs = g.dropna(subset=["swe_a"])
-            b1 = ols(g[["S_a"]].values, g["y"].values)
-            b2 = ols(gs[["S_a", "swe_a"]].values, gs["y"].values) if len(gs) > 40 else None
+            Ts = T.dropna(subset=["swe_a"])
+            b1 = fit_hinge(g, T, False)
+            b2 = fit_hinge(gs, Ts, True) if len(gs) > 40 else None
 
-            def loyo(cols, gg):
+            def loyo(cols, gg, pool_all, with_swe):
                 errs = []
                 for yr in sorted(gg["yr"].unique()):
                     tr, te = gg[gg["yr"] != yr], gg[gg["yr"] == yr]
                     if len(tr) < 20:
                         continue
-                    b = ols(tr[cols].values, tr["y"].values)
+                    b = fit_hinge(tr, pool_all[pool_all["yr"] != yr], with_swe)
                     errs += list(te["y"].values - (b[0] + te[cols].values @ b[1:]))
                 return errs
-            e1 = loyo(["S_a"], g)
-            e2 = loyo(["S_a", "swe_a"], gs) if b2 is not None else None
-            resid = (g["y"].values - (b1[0] + g[["S_a"]].values @ b1[1:]))
+            e1 = loyo(["neg", "pos"], g, T, False)
+            e2 = loyo(["neg", "pos", "swe_a"], gs, Ts, True) if b2 is not None else None
+            resid = (g["y"].values - (b1[0] + g[["neg", "pos"]].values @ b1[1:]))
             out[str(hw)][sea] = {
-                "b0": float(b1[0]), "b_level": float(b1[1]),
-                "b0_swe": float(b2[0]) if b2 is not None else None, "b_level_swe": float(b2[1]) if b2 is not None else None,
-                "b_swe": float(b2[2]) if b2 is not None else None,
+                "b0": float(b1[0]), "b_below": float(b1[1]), "b_above": float(b1[2]),
+                "b0_swe": float(b2[0]) if b2 is not None else None, "b_below_swe": float(b2[1]) if b2 is not None else None,
+                "b_above_swe": float(b2[2]) if b2 is not None else None, "b_swe": float(b2[3]) if b2 is not None else None,
                 "sigma": float(np.std(resid)), "rmse_model": rmse(e1), "rmse_model_swe": rmse(e2) if e2 is not None else None,
-                "rmse_normal": rmse(g["y"]), "n": int(len(g)), "n_swe": int(len(gs)),
-                "rmse_level_on_swe_sample": rmse(loyo(["S_a"], gs)) if b2 is not None else None,
+                "rmse_normal": rmse(g["y"]), "n": int(len(g)), "n_swe": int(len(gs)), "n_below": int((g["S_a"] < 0).sum()),
+                "rmse_level_on_swe_sample": rmse(loyo(["neg", "pos"], gs, T, False)) if b2 is not None else None,
             }
     # one decision per start season, so a path has no kink between horizons: the level term is
     # used when it beats the normal path on average over the grid, the SWE term when it beats
@@ -251,7 +277,7 @@ def fit_state(w: pd.DataFrame) -> dict:
         for i, r in enumerate(rows):
             r["use_level"], r["use_swe"] = bool(lvl), bool(lvl and i in best)
             if not lvl:
-                r["b0"], r["b_level"] = 0.0, 0.0
+                r["b0"], r["b_below"], r["b_above"] = 0.0, 0.0, 0.0
     return out
 
 
@@ -259,6 +285,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cache", help="directory for the fetched history / issues pickles (reused when present)")
     ap.add_argument("--out", default=str(OUT_JSON))
+    ap.add_argument("--shrink-below", type=float, default=STATE_SHRINK_BELOW, help="weight of the below-normal reversion slope (default %(default)s)")
+    ap.add_argument("--shrink-above", type=float, default=STATE_SHRINK_ABOVE, help="weight of the above-normal reversion slope (default %(default)s)")
     a = ap.parse_args(argv)
     settings = load_settings()
     setup_logging(settings.log_dir, "reservoir_fit")
@@ -297,7 +325,7 @@ def main(argv=None) -> int:
         "history": {"from": str(d.index.min().date()), "to": str(d["wtr"].last_valid_index().date())},
         "issues": {"from": str(min(inst).date()), "to": str(max(inst).date()), "n": int(len(B))},
         "weather": {"h_days": WEATHER_H, "ens_days": ENS_DAYS, "ext_days": EXT_DAYS, **weather},
-        "state": {"h_weeks": STATE_HW, "swe_months": SWE_MONTHS, "ramp_days": list(STATE_RAMP_DAYS), "shrink": STATE_SHRINK, "beta": state},
+        "state": {"h_weeks": STATE_HW, "swe_months": SWE_MONTHS, "ramp_days": list(STATE_RAMP_DAYS), "shrink_below": a.shrink_below, "shrink_above": a.shrink_above, "pool_weeks": HINGE_POOL_WEEKS, "slope_range": list(HINGE_SLOPE_RANGE), "beta": state},
         "swe": {"source": str(swe_csv), "country": SWE_COUNTRY, "clim_by_week": swe_clim},
         "analogue_library": library,
         "seasons": {str(k): v for k, v in SEASONS.items()},
