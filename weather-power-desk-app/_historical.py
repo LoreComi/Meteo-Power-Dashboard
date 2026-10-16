@@ -44,10 +44,17 @@ def _aggregate(df: pd.DataFrame, granularity: str) -> pd.DataFrame:
                                                         anomaly=("anomaly", "mean"), n_days=("actual", "count")).reset_index()
         g["period"] = [f"{int(y)}-{MONTH_NAMES[int(m) - 1]}" for y, m in zip(g["year"], g["month"])]
         g["sort"] = g["year"] * 100 + g["month"]
+    elif granularity == "Yearly":
+        # mean over the selected months of each year; the normal is averaged over the very same days,
+        # so the anomaly of a part-year (the running one) is fair, while its `actual` is not a full-year level
+        g = df.groupby(["area", "year"]).agg(actual=("actual", "mean"), normal=("normal", "mean"),
+                                              anomaly=("anomaly", "mean"), n_days=("actual", "count")).reset_index()
+        g["period"] = g["year"].astype(int).astype(str)
+        g["sort"] = g["year"]
     else:
         g = df.groupby(["area", "week_start"]).agg(actual=("actual", "mean"), normal=("normal", "mean"),
                                                     anomaly=("anomaly", "mean"), n_days=("actual", "count")).reset_index()
-        g["period"] = g["week_start"].dt.strftime("%Y-W%V")
+        g["period"] = g["week_start"].dt.strftime("%G-W%V")
         g["sort"] = g["week_start"]
     g["anomaly_pct"] = np.where(g["normal"].abs() > 0, (g["actual"] / g["normal"] - 1) * 100, np.nan)
     return g.sort_values(["sort", "area"])
@@ -90,7 +97,7 @@ def _render_history():
         months = st.multiselect("Months (multiple allowed)", list(range(1, 13)), list(range(1, 13)),
                                 format_func=lambda m: MONTH_NAMES[m - 1], key="h_months")
     with y3:
-        gran = st.radio("Granularity", ["Monthly", "Weekly"], key="h_gran")
+        gran = st.radio("Granularity", ["Monthly", "Weekly", "Yearly"], key="h_gran")
     with y4:
         view = st.radio("View", ["Anomaly", "Actual vs normal"], key="h_view")
     if not (areas and years and months):
@@ -130,6 +137,13 @@ def _render_history():
     else:
         st.plotly_chart(make_period_lines(agg, m["unit"], title, "period", "actual"), use_container_width=True)
 
+    if gran == "Yearly":
+        full = agg.groupby("area")["n_days"].transform("max")
+        part = agg[agg["n_days"] < 0.9 * full]
+        if not part.empty:
+            st.caption("Part-years (fewer days of the selected months than the fullest year): "
+                       + ", ".join(sorted(f"{p}" for p in part["period"].unique()))
+                       + " — their anomaly is fair (same days as the normal), their actual level is not a full-year mean.")
     if gran == "Weekly":
         st.plotly_chart(make_anomaly_heatmap(
             agg.rename(columns={"week_start": "day"}), a_col, a_unit,

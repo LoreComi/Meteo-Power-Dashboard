@@ -502,13 +502,15 @@ def make_period_bars(agg: pd.DataFrame, unit: str, title: str, x_col: str, value
     fig = _base_fig(title, height=380)
     if agg.empty:
         return fig
+    key = "sort" if "sort" in agg.columns else x_col      # the real date key, never the label text ("2024-Apr" < "2024-Feb")
     for a, g in agg.groupby("area"):
-        g = g.sort_values(x_col)
+        g = g.sort_values(key)
         fig.add_trace(go.Bar(x=g[x_col].astype(str), y=g[value_col], name=_area_name(a),
                              marker_color=AREA_COLORS.get(a, INK_MUTED), marker_line_width=0,
                              hovertemplate=f"{_area_name(a)} · %{{x}}<br>%{{y:+.2f}} {unit}<extra></extra>"))
     fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
     fig.update_layout(barmode="group", bargap=0.18, bargroupgap=0.06, hovermode="closest")
+    fig.update_xaxes(type="category", categoryorder="array", categoryarray=_chronological(agg, x_col))
     fig.update_yaxes(title_text=f"anomaly ({unit})")
     return fig
 
@@ -518,16 +520,24 @@ def make_period_lines(agg: pd.DataFrame, unit: str, title: str, x_col: str, valu
     fig = _base_fig(title, height=380)
     if agg.empty:
         return fig
+    key = "sort" if "sort" in agg.columns else x_col
     for a, g in agg.groupby("area"):
-        g = g.sort_values(x_col)
+        g = g.sort_values(key)
         col = AREA_COLORS.get(a, INK_MUTED)
         fig.add_trace(go.Scatter(x=g[x_col], y=g[value_col], mode="lines+markers", name=_area_name(a),
                                  line=dict(color=col, width=2), marker=dict(size=5)))
         if "normal" in g.columns:
             fig.add_trace(go.Scatter(x=g[x_col], y=g["normal"], mode="lines", name=f"{_area_name(a)} normal",
                                      line=dict(color=col, width=1.2, dash="dash"), showlegend=False, opacity=0.7))
+    fig.update_xaxes(type="category", categoryorder="array", categoryarray=_chronological(agg, x_col))
     fig.update_yaxes(title_text=unit)
     return fig
+
+
+def _chronological(agg: pd.DataFrame, x_col: str) -> list[str]:
+    """The x labels of `agg` in time order (by its `sort` column when it has one), each once."""
+    d = agg.sort_values("sort") if "sort" in agg.columns else agg.sort_values(x_col)
+    return list(dict.fromkeys(d[x_col].astype(str)))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
