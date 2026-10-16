@@ -22,6 +22,15 @@ Production     Hydro production per Volue area over the last two weeks — run-o
                with the precipitation energy observed and expected over the same
                windows: a grid with the areas as columns, then a two-panel chart
                per area. Data: hydro_prod_daily (pipeline/volue_hydro_prod.py).
+Reservoir      The French reservoir model: the Volue normal path from the latest
+outlook        level, moved by a weather term (season-specific k × the precip-
+               itation-energy ensemble's cumulative anomaly, 51 members, 46 days)
+               and a state term (mean reversion of the level anomaly, SWE anomaly
+               Dec–Jun, ramped in from 2 to 8 weeks); Volue's own forecast and the
+               nearest analogue years as context; the fit's leave-one-year-out
+               skill and the last issues against the observed level. Data:
+               hydro_reservoir_outlook (pipeline/volue_reservoir_outlook.py) and
+               reservoir_model_fr.json (pipeline/fit_reservoir_model.py).
 Family tabs    Live version of P:/QFA/TonyWeather/Hydro_Report/quantify_*.py:
                for each Volue hydro family (reservoir levels, groundwater = the
                `sgw` snow + groundwater stock, hydro balance) and each country
@@ -47,14 +56,16 @@ from _config import (
     RIVER_TEMP_WARM_ANOMALY_C, RIVER_TEMP_HOT_C, RIVER_TEMP_COLOUR_RANGE_C,
     RIVER_FLOW_CRITICAL_PCT, RIVER_FLOW_LOW_PCT, RIVER_FLOW_HIGH_PCT, RIVER_FLOW_COLOUR_RANGE_PCT, RIVER_STALE_DAYS,
     HYDRO_PROD_TABLE, HYDRO_PROD_AREAS, HYDRO_PROD_DEFAULT_AREAS, HYDRO_PROD_WINDOW_DAYS, HYDRO_PROD_PRECIP_PATTERNS,
+    RESERVOIR_OUTLOOK_TABLE, RESERVOIR_OUTLOOK_AREAS, RESERVOIR_OUTLOOK_HISTORY_DAYS, RESERVOIR_OUTLOOK_PAST_ISSUES,
+    RESERVOIR_OUTLOOK_HORIZONS,
 )
 from _data import (
     load_hydro_available, load_hydro_series, load_hydro_component, load_swe_country_daily, load_river_latest,
-    load_river_series, load_hydro_prod,
+    load_river_series, load_hydro_prod, load_reservoir_outlook, load_reservoir_model,
 )
 from _charts import (
     make_hydro_climatology_chart, make_hydro_anomaly_bars, make_hydro_europe_map, make_river_chart,
-    make_hydro_production_chart,
+    make_hydro_production_chart, make_reservoir_outlook_chart, make_reservoir_terms_chart, make_reservoir_verification_chart,
 )
 from _style import DIV_NEG, DIV_MID, DIV_POS
 from _hydro_quantify import (
@@ -1013,6 +1024,139 @@ def _render_production():
         i += 1
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# RESERVOIR OUTLOOK TAB — the French reservoir model
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _outlook_kpis(P: pd.DataFrame, run: pd.Series, issue: pd.Timestamp) -> list[str]:
+    """Level now vs normal, then the model at each horizon: level, % of normal, what the model
+    adds to the seasonal path. Blue = above normal, red = short of it."""
+    cards = []
+    s0, s_a0 = run["s0"], run["s_a0"]
+    n0 = s0 - s_a0
+    cls0 = "kpi-card-cool" if s_a0 >= 0 else ("kpi-card-critical" if n0 and s0 / n0 < 0.7 else "kpi-card-warm")
+    cards.append(kpi_card(f"Level · {pd.Timestamp(run['s0_day']):%d %b}", f"{s0:,.0f} GWh", cls0,
+                          f'<div class="kpi-delta {"kpi-delta-down" if s_a0 >= 0 else "kpi-delta-up"}">{"▲" if s_a0 >= 0 else "▼"} {abs(s_a0):,.0f} GWh vs normal'
+                          f' · {100 * s0 / n0:.0f}% of normal</div>' if n0 else ""))
+    for label, h in RESERVOIR_OUTLOOK_HORIZONS.items():
+        day = issue + pd.Timedelta(days=h - 1)
+        if day not in P.index or "model" not in P or pd.isna(P.loc[day, "model"]):
+            continue
+        m, nrm, base = P.loc[day, "model"], P.loc[day].get("normal"), P.loc[day].get("baseline")
+        anom = (m - nrm) if pd.notna(nrm) else None
+        add = (m - base) if pd.notna(base) else None
+        cls = "kpi-card-neutral" if anom is None else ("kpi-card-cool" if anom >= 0 else ("kpi-card-critical" if nrm and m / nrm < 0.7 else "kpi-card-warm"))
+        delta = (f'<div class="kpi-delta {"kpi-delta-down" if anom >= 0 else "kpi-delta-up"}">{"▲" if anom >= 0 else "▼"} {abs(anom):,.0f} GWh vs normal'
+                 f' · {100 * m / nrm:.0f}% of normal</div>') if anom is not None and nrm else ""
+        rank = f'<div class="kpi-rank">{add:+,.0f} GWh vs seasonal path</div>' if add is not None else ""
+        lo, hi = P.loc[day].get("model_p10"), P.loc[day].get("model_p90")
+        rank += f'<div class="kpi-rank">P10–P90 {lo:,.0f} – {hi:,.0f}</div>' if pd.notna(lo) and pd.notna(hi) else ""
+        cards.append(kpi_card(f"Model · {label} ({day:%d %b})", f"{m:,.0f} GWh", cls, delta, rank))
+    return cards
+
+
+def _skill_table_html(model: dict) -> str:
+    """The leave-one-year-out scores stored with the fitted model: the weather term by horizon
+    (weekly issues 2023→) and the state term by start season at 13 / 26 weeks (2014→)."""
+    w = model.get("weather", {}); st_ = model.get("state", {})
+    head = ("<tr><th style='text-align:left'>Weather term · horizon</th>" + "".join(f"<th class='hy-layer'>{h} d</th>" for h in w.get("h_days", [])) + "</tr>")
+    rows = []
+    for key, lbl in (("rmse_normal", "Normal path RMSE (GWh)"), ("rmse_model", "Model RMSE (GWh)")):
+        rows.append(f"<tr><td class='mc-region'>{lbl}</td>" + "".join(f"<td>{w['scores'][str(h)][key]:,.0f}</td>" for h in w.get("h_days", [])) + "</tr>")
+    rows.append("<tr><td class='mc-region'>Gain</td>" + "".join(
+        f"<td class='{'hy-high' if w['scores'][str(h)]['rmse_model'] < w['scores'][str(h)]['rmse_normal'] else ''}'>"
+        f"{100 * (w['scores'][str(h)]['rmse_model'] / w['scores'][str(h)]['rmse_normal'] - 1):+.0f}%</td>" for h in w.get("h_days", [])) + "</tr>")
+    rows.append("<tr><td class='mc-region'>k (GWh per GWh precip anomaly)</td>" + "".join(f"<td>{w['k'][str(h)]['all']:.2f}</td>" for h in w.get("h_days", [])) + "</tr>")
+    t1 = f"<table class='mc-table hy-table'><thead>{head}</thead><tbody>{''.join(rows)}</tbody></table>"
+    head2 = ("<tr><th style='text-align:left'>State term · start season</th>"
+             + "".join(f"<th class='hy-layer' colspan='3'>{hw} weeks</th>" for hw in (13, 26)) + "</tr>"
+             "<tr><th></th>" + "".join("<th class='hy-sub hy-first'>Normal</th><th class='hy-sub'>Level</th><th class='hy-sub'>+ SWE</th>" for _ in (13, 26)) + "</tr>")
+    rows2 = []
+    for sea in ("DJF", "MAM", "JJA", "SON"):
+        cells = []
+        for hw in (13, 26):
+            b = st_["beta"][str(hw)][sea]
+            on = b.get("use_level", True)
+            cells.append(f"<td class='hy-first'>{b['rmse_normal']:,.0f}</td>")
+            cells.append(f"<td class='{'hy-high' if on and b['rmse_model'] < b['rmse_normal'] else ''}'>{b['rmse_model']:,.0f}{'' if on else ' <span class=hy-agg>off</span>'}</td>")
+            cells.append(f"<td class='{'hy-high' if b.get('use_swe') else ''}'>{b['rmse_model_swe']:,.0f}{' <span class=hy-agg>used</span>' if b.get('use_swe') else ''}</td>"
+                         if b.get("rmse_model_swe") else "<td class='hy-na'>—</td>")
+        rows2.append(f"<tr><td class='mc-region'>{sea}</td>{''.join(cells)}</tr>")
+    t2 = f"<table class='mc-table hy-table'><thead>{head2}</thead><tbody>{''.join(rows2)}</tbody></table>"
+    return f"<div class='mc-block'>{t1}</div><div class='mc-block'>{t2}</div>"
+
+
+def _render_reservoir_outlook():
+    model = load_reservoir_model()
+    area_code = next(iter(RESERVOIR_OUTLOOK_AREAS))
+    country = RESERVOIR_OUTLOOK_AREAS[area_code]
+    st.caption(f"{country}: where the reservoir stock goes from here. The Volue normal path from the latest level, moved by a "
+               "**weather term** — the precipitation-energy ensemble's cumulative anomaly over 46 days × a season-specific response "
+               "(the direct rain → reservoir relation, which absorbs the production response) — and, from 2–8 weeks on, a **state term** — "
+               "the mean reversion of the level anomaly and the snowpack (Exolabs SWE) anomaly from December to June. The band is the "
+               "members' spread plus the state regression's residual. Volue's own reservoir forecast and the nearest **analogue years** "
+               "(level and snow anomaly at this week, their actual path re-anchored on today's level) are context, not the forecast.")
+    try:
+        paths, runs = load_reservoir_outlook(area_code, RESERVOIR_OUTLOOK_PAST_ISSUES)
+    except Exception as e:
+        st.error(f"Cannot read {RESERVOIR_OUTLOOK_TABLE} ({e}). Has pipeline/run_daily.py --only reservoir run?")
+        return
+    if paths.empty or runs.empty:
+        st.info(f"No outlook in {RESERVOIR_OUTLOOK_TABLE} yet — run `pipeline/run_daily.py --only reservoir`.")
+        return
+    issue = paths["issue_date"].max()
+    latest = paths[paths["issue_date"] == issue]
+    run = runs.sort_values("issue_date").iloc[-1]
+    P = latest.pivot(index="day", columns="series", values="value").sort_index()
+    try:
+        observed, normal = load_hydro_series(country, "Reservoir levels")
+    except Exception:
+        observed, normal = pd.Series(dtype=float), None
+    since = issue - pd.Timedelta(days=RESERVOIR_OUTLOOK_HISTORY_DAYS)
+    obs = observed[observed.index >= since] if not observed.empty else observed
+    nrm_past = normal[(normal.index >= since) & (normal.index < issue)] if normal is not None else pd.Series(dtype=float)
+    nrm = pd.concat([nrm_past, P["normal"].dropna()]) if "normal" in P else nrm_past
+
+    kpi_row(_outlook_kpis(P, run, issue), max_cols=5)
+    years = str(run.get("analogue_years") or "").replace(",", ", ")
+    swe_txt = (f"SWE anomaly {run['swe_a0']:+.1f} mm ({pd.Timestamp(run['swe_day']):%d %b})" if pd.notna(run.get("swe_a0")) else "SWE not available")
+    st.caption(f"Issued {pd.Timestamp(issue):%d %b %Y} · season {run['season']} · precipitation-energy anomaly of the ensemble mean "
+               f"{run['precip_anom_16d']:+,.0f} GWh over 16 days, {run['precip_anom_46d']:+,.0f} GWh over 46 · {int(run['n_members'])} members · "
+               f"{swe_txt} · analogue years {years} · model {run['model_version']}"
+               + (f", fitted {model.get('fitted_at')}" if model else ""))
+
+    c1, c2, c3 = st.columns(3)
+    show_volue = c1.checkbox("Volue forecast", True, key="hy_res_volue")
+    show_anal = c2.checkbox("Analogue years", True, key="hy_res_anal")
+    show_band = c3.checkbox("Uncertainty band", True, key="hy_res_band")
+    st.plotly_chart(make_reservoir_outlook_chart(obs, nrm, latest, issue, f"{country} — reservoir level outlook",
+                                                 show_volue, show_anal, show_band), use_container_width=True, key="hy_res_main")
+    st.plotly_chart(make_reservoir_terms_chart(latest, issue, "What moves the model away from the seasonal path"),
+                    use_container_width=True, key="hy_res_terms")
+
+    with st.expander("Model skill — leave-one-year-out backtest stored with the fit"):
+        if model:
+            st.markdown(_skill_table_html(model), unsafe_allow_html=True)
+            st.caption(f"Weather term fitted on {model['issues']['n']} weekly issues {model['issues']['from']} → {model['issues']['to']}; state term "
+                       f"on the weekly history {model['history']['from']} → {model['history']['to']} (SWE years from 2017). In the same study "
+                       "Volue's own reservoir forecast was worse than the normal path at every horizon (45 monthly issues 2023–2026), because "
+                       "inflow and turbining co-move and the inflow forecast error exceeds the reservoir signal — hence a reduced form on "
+                       "precipitation energy rather than an inflow − production balance.")
+        else:
+            st.info("reservoir_model_fr.json not found next to the app.")
+    past = paths[paths["issue_date"] < issue]
+    if not past.empty:
+        with st.expander(f"Verification — the last {past['issue_date'].nunique()} issues against the observed level"):
+            first = past["issue_date"].min() - pd.Timedelta(days=14)
+            obs_v = observed[observed.index >= first] if not observed.empty else observed
+            cut = past[past["day"] <= issue + pd.Timedelta(days=30)]
+            st.plotly_chart(make_reservoir_verification_chart(obs_v, cut, "Earlier issues — model (solid) and seasonal path (dotted) vs observed"),
+                            use_container_width=True, key="hy_res_verif")
+    table = P.reset_index()
+    st.download_button("Download outlook CSV", table.to_csv(index=False).encode(), f"reservoir_outlook_{area_code}_{pd.Timestamp(issue):%Y%m%d}.csv",
+                       "text/csv", key="hy_res_dl")
+
+
 def render_hydro():
     st.markdown("#### HYDRO MONITORING")
     st.caption("The hydro outlook on a map of Europe — reservoirs, snow water equivalent, groundwater, hydro balance "
@@ -1029,11 +1173,13 @@ def render_hydro():
         st.caption(f"Latest hydro observation: {pd.Timestamp(last):%d %b %Y}")
     for k, v in (("hy_dd_area", None), ("hy_dd_station", None)):
         st.session_state.setdefault(k, v)
-    tabs = st.tabs(["Overview", "Production"] + list(HYDRO_FAMILIES.keys()))
+    tabs = st.tabs(["Overview", "Production", "Reservoir outlook"] + list(HYDRO_FAMILIES.keys()))
     with tabs[0]:
         _render_overview(avail)
     with tabs[1]:
         _render_production()
-    for tab, family in zip(tabs[2:], HYDRO_FAMILIES.keys()):
+    with tabs[2]:
+        _render_reservoir_outlook()
+    for tab, family in zip(tabs[3:], HYDRO_FAMILIES.keys()):
         with tab:
             _render_family(family, avail)

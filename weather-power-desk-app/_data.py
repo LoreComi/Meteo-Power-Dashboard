@@ -919,6 +919,48 @@ def load_hydro_prod(areas: tuple[str, ...]) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def load_reservoir_outlook(area: str, n_issues: int = 1) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The last n issues of the reservoir outlook (pipeline/volue_reservoir_outlook.py):
+    (paths, runs). paths: issue_date, series, day, value — every series of those issues
+    (normal, baseline, weather, state, model, model_p10..p90, volue, analogue_<year>);
+    runs: the inputs of each issue. Both empty until the pipeline has run."""
+    from _config import RESERVOIR_OUTLOOK_TABLE, RESERVOIR_OUTLOOK_RUNS_TABLE
+    paths = run_query(f"""
+        WITH issues AS (
+            SELECT DISTINCT issue_date FROM {SBX_SCHEMA}.{RESERVOIR_OUTLOOK_TABLE}
+            WHERE area = '{area}' ORDER BY issue_date DESC LIMIT {int(n_issues)}
+        )
+        SELECT o.issue_date, o.series, o.day, o.value
+        FROM {SBX_SCHEMA}.{RESERVOIR_OUTLOOK_TABLE} o JOIN issues i ON i.issue_date = o.issue_date
+        WHERE o.area = '{area}' ORDER BY o.issue_date, o.series, o.day
+    """)
+    runs = run_query(f"""
+        SELECT * FROM {SBX_SCHEMA}.{RESERVOIR_OUTLOOK_RUNS_TABLE}
+        WHERE area = '{area}' ORDER BY issue_date DESC LIMIT {int(n_issues)}
+    """)
+    if not paths.empty:
+        paths = _dt(paths, ["issue_date", "day"])
+        paths = _num(paths, ["value"])
+    if not runs.empty:
+        runs = _dt(runs, ["issue_date", "s0_day", "swe_day"])
+        runs = _num(runs, ["s0", "s_a0", "swe_a0", "n_members", "precip_anom_16d", "precip_anom_46d", "volue_offset"])
+    return paths, runs
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_reservoir_model() -> dict:
+    """reservoir_model_fr.json shipped with the app — the fitted coefficients and their
+    leave-one-year-out scores (for the skill panel). {} when the file is missing."""
+    import json
+    from pathlib import Path
+    from _config import RESERVOIR_MODEL_FILE
+    p = Path(__file__).resolve().parent / RESERVOIR_MODEL_FILE
+    if not p.exists():
+        return {}
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_swe_country_daily() -> pd.DataFrame:
     """The internal Exolabs SWE model per Alpine country (mean mm, daily) from

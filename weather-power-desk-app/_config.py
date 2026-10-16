@@ -869,6 +869,21 @@ HYDRO_PROD_PRECIP_PATTERNS = ["ec00ens", "ec12ens", "gfs00ens"]   # first = the 
 HYDRO_PROD_LOOKBACK_DAYS = 10                                # forecast issues read from the table
 HYDRO_PROD_HISTORY_DAYS = 120                                # actual / normal days read from the table
 
+# ── Reservoir outlook tab — hydro_reservoir_outlook (pipeline/volue_reservoir_outlook.py) ─
+# The French reservoir model (pipeline/fit_reservoir_model.py → reservoir_model_fr.json,
+# shipped with the app like curve_models.json): the Volue normal path from the latest
+# level, plus a weather term (k × the precipitation-energy ensemble's cumulative anomaly,
+# 46 days), plus a state term (mean reversion of the level anomaly and the SWE anomaly
+# Dec–Jun, ramped in from 2 to 8 weeks). Volue's own reservoir forecast and the nearest
+# analogue years are drawn as context. One row per (issue_date, series, day).
+RESERVOIR_OUTLOOK_TABLE = "hydro_reservoir_outlook"
+RESERVOIR_OUTLOOK_RUNS_TABLE = "hydro_reservoir_outlook_runs"
+RESERVOIR_MODEL_FILE = "reservoir_model_fr.json"
+RESERVOIR_OUTLOOK_AREAS: dict[str, str] = {"fr": "France"}          # model area code -> hydro_daily country (HYDRO_AREA_CODES key)
+RESERVOIR_OUTLOOK_HISTORY_DAYS = 420                                # observed level drawn before the issue
+RESERVOIR_OUTLOOK_PAST_ISSUES = 6                                   # earlier issues in the verification panel
+RESERVOIR_OUTLOOK_HORIZONS: dict[str, int] = {"2 weeks": 14, "1 month": 30, "3 months": 91, "6 months": 182}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LIVE VOLUE ACCESS (bypass sandbox, query the delta-share tables directly)

@@ -32,6 +32,12 @@ RIVER_FORECAST_RUNS=1
 # HYDRO_PROD_FORECAST_DAYS=45        days kept of each Volue production issue
 # HYDRO_PROD_RETENTION_DAYS=21       forecast issues older than this are pruned
 
+# ── French reservoir outlook (volue_reservoir_outlook.py; the fitted model is weather-power-desk-app/reservoir_model_fr.json) ──
+# RESERVOIR_MODEL_JSON=P:\QFA\TonyWeather\Power_dashboard\weather-power-desk-app\reservoir_model_fr.json
+# RESERVOIR_HORIZON_DAYS=365
+# RESERVOIR_ANALOGUES=5
+# RESERVOIR_RETENTION_DAYS=60
+
 # ── SWE model ──
 SWE_ROOT=P:\QFA\TonyWeather\Hydro_Report\SWE_Exolabs
 SWE_REFRESH_DAYS=30

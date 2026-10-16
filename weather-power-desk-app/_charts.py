@@ -1371,3 +1371,122 @@ def make_hydro_production_chart(s: dict, title: str, window: int, precip_pattern
                      hoverformat="%a %d %b %Y", showgrid=False)
     fig.update_yaxes(rangemode="tozero", tickformat=",.0f", gridcolor=GRIDLINE)
     return fig
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HYDRO — reservoir outlook (the model's path, its band, Volue's forecast, analogue years)
+# ══════════════════════════════════════════════════════════════════════════════
+
+RESERVOIR_MODEL_COLOR = CAT_BLUE
+RESERVOIR_VOLUE_COLOR = CAT_ORANGE
+RESERVOIR_WEATHER_COLOR = CAT_AQUA
+RESERVOIR_STATE_COLOR = CAT_VIOLET
+
+
+def make_reservoir_outlook_chart(observed: pd.Series, normal: pd.Series, paths: pd.DataFrame, issue: pd.Timestamp,
+                                 title: str, show_volue: bool = True, show_analogues: bool = True, show_band: bool = True,
+                                 height: int = 460) -> go.Figure:
+    """The reservoir level: observed (to the issue), the Volue normal, the model path with its
+    P10–P90 and P25–P75 band, Volue's own forecast and the analogue years' re-anchored paths.
+    `paths` is the latest issue's frame (series, day, value); one GWh axis for everything."""
+    fig = _base_fig(title, height=height)
+    P = paths.pivot(index="day", columns="series", values="value").sort_index() if not paths.empty else pd.DataFrame()
+    obs = observed.dropna()
+    if not obs.empty:
+        fig.add_trace(go.Scatter(x=obs.index, y=obs.values, mode="lines", name="Observed", line=dict(color=INK_PRIMARY, width=2),
+                                 hovertemplate="observed %{y:,.0f} GWh<extra></extra>"))
+    nrm = normal.dropna()
+    if not nrm.empty:
+        fig.add_trace(go.Scatter(x=nrm.index, y=nrm.values, mode="lines", name="Normal", line=dict(color=INK_MUTED, width=1.6, dash="dash"),
+                                 hovertemplate="normal %{y:,.0f} GWh<extra></extra>"))
+    if P.empty:
+        return fig
+    if show_analogues:
+        years = sorted([c for c in P.columns if c.startswith("analogue_")], key=lambda c: int(c.split("_")[1]))
+        for i, c in enumerate(years):
+            s = P[c].dropna()
+            fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name="Analogue years" if i == 0 else c.split("_")[1],
+                                     legendgroup="analogues", showlegend=(i == 0), line=dict(color=HYDRO_HIST_GREY, width=1.1),
+                                     hovertemplate=c.split("_")[1] + " %{y:,.0f} GWh<extra></extra>"))
+            fig.add_annotation(x=s.index[-1].isoformat(), y=float(s.values[-1]), text=c.split("_")[1], showarrow=False, xanchor="left",
+                               xshift=4, font=dict(size=9, color=INK_MUTED))
+    if "baseline" in P:
+        s = P["baseline"].dropna()
+        fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name="Seasonal path from today", line=dict(color=INK_MUTED, width=1.2, dash="dot"),
+                                 hovertemplate="seasonal path %{y:,.0f} GWh<extra></extra>"))
+    if show_band and {"model_p10", "model_p90"} <= set(P.columns):
+        for lo, hi, a, nm in (("model_p10", "model_p90", 0.12, "P10–P90"), ("model_p25", "model_p75", 0.22, "P25–P75")):
+            if lo in P and hi in P:
+                l, h = P[lo].dropna(), P[hi].dropna()
+                fig.add_trace(go.Scatter(x=h.index, y=h.values, mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"))
+                fig.add_trace(go.Scatter(x=l.index, y=l.values, mode="lines", line=dict(width=0), fill="tonexty",
+                                         fillcolor=hex_to_rgba(RESERVOIR_MODEL_COLOR, a), name=f"Model {nm}", hoverinfo="skip"))
+    if show_volue and "volue" in P:
+        s = P["volue"].dropna()
+        fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name="Volue forecast", line=dict(color=RESERVOIR_VOLUE_COLOR, width=1.8, dash="dash"),
+                                 hovertemplate="Volue %{y:,.0f} GWh<extra></extra>"))
+    if "model" in P:
+        s = P["model"].dropna()
+        fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name="Model", line=dict(color=RESERVOIR_MODEL_COLOR, width=2.6),
+                                 hovertemplate="model %{y:,.0f} GWh<extra></extra>"))
+    split = pd.Timestamp(issue).isoformat()
+    fig.add_shape(type="line", x0=split, x1=split, y0=0, y1=1, xref="x", yref="paper", line=dict(color=BASELINE, width=1, dash="dot"))
+    fig.add_annotation(x=split, y=1, xref="x", yref="paper", text=f"issued {pd.Timestamp(issue):%d %b}", showarrow=False,
+                       xanchor="left", yanchor="bottom", font=dict(size=10, color=INK_MUTED))
+    fig.update_xaxes(tickformat="%b %y", tickformatstops=_DAY_TICKS, hoverformat="%a %d %b %Y")
+    fig.update_yaxes(title_text="GWh", tickformat=",.0f", rangemode="tozero")
+    fig.update_layout(hovermode="x unified", legend=dict(orientation="h", yanchor="top", y=-0.12, x=0, font=dict(size=10)))
+    return fig
+
+
+def make_reservoir_terms_chart(paths: pd.DataFrame, issue: pd.Timestamp, title: str, height: int = 260) -> go.Figure:
+    """What moves the model away from the seasonal path: the weather term (precipitation-energy
+    ensemble) and the state term (mean reversion + snowpack), in GWh, over the horizon."""
+    fig = _base_fig(title, height=height)
+    P = paths.pivot(index="day", columns="series", values="value").sort_index() if not paths.empty else pd.DataFrame()
+    if P.empty:
+        return fig
+    for col, name, color in (("weather", "Weather · precipitation energy", RESERVOIR_WEATHER_COLOR), ("state", "State · mean reversion + snow", RESERVOIR_STATE_COLOR)):
+        if col in P:
+            s = P[col].dropna()
+            fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name=name, line=dict(color=color, width=2),
+                                     hovertemplate=name + " %{y:+,.0f} GWh<extra></extra>"))
+    if "weather" in P and "state" in P:
+        s = (P["weather"] + P["state"]).dropna()
+        fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name="Total vs seasonal path", line=dict(color=INK_PRIMARY, width=1.4, dash="dot"),
+                                 hovertemplate="total %{y:+,.0f} GWh<extra></extra>"))
+    fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
+    fig.update_xaxes(tickformat="%b %y", tickformatstops=_DAY_TICKS, hoverformat="%a %d %b %Y")
+    fig.update_yaxes(title_text="GWh vs seasonal path", tickformat="+,.0f")
+    fig.update_layout(hovermode="x unified", legend=dict(orientation="h", yanchor="top", y=-0.18, x=0, font=dict(size=10)))
+    return fig
+
+
+def make_reservoir_verification_chart(observed: pd.Series, issues: pd.DataFrame, title: str, height: int = 320) -> go.Figure:
+    """Earlier issues' model paths against what the level then did — the live check of the
+    model. `issues`: issue_date, series, day, value for several issues; older issues fade."""
+    fig = _base_fig(title, height=height)
+    obs = observed.dropna()
+    if not obs.empty:
+        fig.add_trace(go.Scatter(x=obs.index, y=obs.values, mode="lines", name="Observed", line=dict(color=INK_PRIMARY, width=2),
+                                 hovertemplate="observed %{y:,.0f} GWh<extra></extra>"))
+    if issues.empty:
+        return fig
+    dates = sorted(issues["issue_date"].unique())
+    n = len(dates)
+    for i, d in enumerate(dates):
+        g = issues[(issues["issue_date"] == d) & (issues["series"] == "model")].sort_values("day")
+        b = issues[(issues["issue_date"] == d) & (issues["series"] == "baseline")].sort_values("day")
+        alpha = 0.35 + 0.65 * (i + 1) / n
+        lbl = f"{pd.Timestamp(d):%d %b}"
+        fig.add_trace(go.Scatter(x=g["day"], y=g["value"], mode="lines", name=f"Model · {lbl}", legendgroup=lbl,
+                                 line=dict(color=hex_to_rgba(RESERVOIR_MODEL_COLOR, alpha), width=1.8),
+                                 hovertemplate=f"model {lbl} %{{y:,.0f}} GWh<extra></extra>"))
+        if not b.empty:
+            fig.add_trace(go.Scatter(x=b["day"], y=b["value"], mode="lines", name=f"Seasonal · {lbl}", legendgroup=lbl, showlegend=False,
+                                     line=dict(color=hex_to_rgba(INK_MUTED, alpha), width=1, dash="dot"),
+                                     hovertemplate=f"seasonal {lbl} %{{y:,.0f}} GWh<extra></extra>"))
+    fig.update_xaxes(tickformat="%d %b", tickformatstops=_DAY_TICKS, hoverformat="%a %d %b %Y")
+    fig.update_yaxes(title_text="GWh", tickformat=",.0f")
+    fig.update_layout(hovermode="x unified", legend=dict(orientation="h", yanchor="top", y=-0.15, x=0, font=dict(size=10)))
+    return fig
