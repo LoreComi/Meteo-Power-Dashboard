@@ -415,9 +415,12 @@ sup.mcg-n {{
     font-size: 0.56rem; color: var(--text-muted); font-weight: 500; margin-left: 2px;
     font-family: 'Inter', sans-serif;
 }}
-/* "Change · anomaly" cells: the two deltas as shaded pills (Δ run | Δ norm), the
-   absolute value small beneath — the move and the anomaly are what the eye lands on. */
-.mcg-pair {{ display: flex; gap: 3px; justify-content: center; align-items: center; }}
+/* "Change · anomaly" cells: the anomaly (Δ norm) as a shaded pill, the move since the
+   previous run as a small coloured arrow after it, the absolute value small beneath. */
+.mcg-pair {{ display: flex; gap: 4px; justify-content: center; align-items: center; }}
+.mcg-move {{ font-size: 0.66rem; font-weight: 600; line-height: 1.2; white-space: nowrap; }}
+.mcg-move-v {{ margin-left: 1px; }}
+.mcg-move-flat {{ color: var(--text-muted) !important; font-weight: 500; }}
 .mcg-pill {{
     display: inline-block; min-width: 46px; padding: 2px 5px; border-radius: 5px;
     font-weight: 600; font-size: 0.8rem; line-height: 1.25; color: var(--text-primary);

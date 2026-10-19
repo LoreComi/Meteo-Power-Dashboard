@@ -15,8 +15,8 @@ departure from normal — are read first, and the absolute values second:
                       previous run stood, the bar between them the change; the other
                       runs as small diamonds.
   Grid                rows = the report's regions per block, columns = window → run. By
-                      default every cell shows the two deltas as shaded pills (Δ run |
-                      Δ norm) with the absolute value small beneath; the other views
+                      default every cell shows the anomaly (Δ norm) as a shaded pill, the
+                      Δ run as a coloured ▲/▼ after it, the value small beneath; the other views
                       put the report's triple, or a single shaded quantity, in the cell.
   Windows             weekday-dependent, taken from the reference run's init day
         Mon, Tue      this week (Mon–Sun)              | next week
@@ -353,6 +353,20 @@ def _pill(v: float, block: dict) -> str:
     return f'<span class="mcg-pill" style="{bg}">{_signed(v, block["fmt"])}</span>'
 
 
+def _move(v: float, block: dict) -> str:
+    """The change vs the previous run as a small arrow after the anomaly pill — ▲/▼ coloured
+    on the same diverging pair as the shading (warm/less red, cold/more blue), = when flat."""
+    if v is None or np.isnan(v):
+        return '<span class="mcg-move mc-muted">n/a</span>'
+    r = round(v, 1)
+    if r == 0:
+        return '<span class="mcg-move mcg-move-flat">= 0</span>'
+    color = DIV_POS if (r > 0) == block["warm_is_positive"] else DIV_NEG
+    arrow = "▲" if r > 0 else "▼"
+    return (f'<span class="mcg-move" style="color:{color};">{arrow}'
+            f'<span class="mcg-move-v">{_signed(v, block["fmt"])}</span></span>')
+
+
 def _tip(lines: list[str]) -> str:
     return html.escape("\n".join(lines), quote=True).replace("\n", "&#10;")
 
@@ -454,8 +468,8 @@ def _cell_html(r: pd.Series, c: RunCol, region: str, wtitle: str, block: dict, s
     sup = f'<sup class="mcg-n">{n_days}d</sup>' if span and 0 < n_days < span else ""
     tip = _cell_tip(c, region, wtitle, r, block, span)
     if view_key == "pair":
-        return (f'<td class="{cls}" title="{tip}"><div class="mcg-pair">{_pill(float(r["d_run"]), block)}'
-                f'{_pill(float(r["d_norm"]), block)}</div><div class="mcg-abs">{fmt.format(v)}{sup}</div></td>')
+        return (f'<td class="{cls}" title="{tip}"><div class="mcg-pair">{_pill(float(r["d_norm"]), block)}'
+                f'{_move(float(r["d_run"]), block)}</div><div class="mcg-abs">{fmt.format(v)}{sup}</div></td>')
     if view_key is None:
         return (f'<td class="{cls}" title="{tip}"><div class="mcg-v">{fmt.format(v)}{sup}</div>'
                 f'<div class="mcg-d">{_fmt_delta(r["d_run"], fmt)}<span class="mcg-sep">·</span>'
@@ -482,7 +496,7 @@ def _grid_block_html(cells: pd.DataFrame, name: str, block: dict, cols: list[Run
     windows = [("w1", win["t1"], win["w1"]), ("w2", win["t2"], win["w2"])]
 
     colgroup = '<colgroup><col class="mcg-c0">' + "<col>" * (2 * per_win) + "</colgroup>"
-    corner_sub = {"pair": f"{delta_label} | Δ norm · abs", None: f"abs · {delta_label} · Δ norm", "d_norm": "Δ norm",
+    corner_sub = {"pair": f"Δ norm ▲▼ {delta_label} · abs", None: f"abs · {delta_label} · Δ norm", "d_norm": "Δ norm",
                   "d_run": delta_label, "d_ref": "Δ vs reference run", "value": "abs. value"}[view_key]
     short = name.split(" (")[0]          # "Precip (sum of coming 2 weeks)" → "Precip"; the group header says the rest
     head1 = (f'<tr><th class="mcg-corner" rowspan="2"><div><span class="mcg-corner-name">{short}</span> '
@@ -584,8 +598,8 @@ def _grid_block_html_phone(cells: pd.DataFrame, name: str, block: dict, cols: li
 def _legend_html(delta_label: str, view_key: str | None) -> str:
     scales = " · ".join(f"±{b['heat_scale']:g} {b['unit']} {n.split(' ')[0].lower()}"
                         for n, b in MORNING_BLOCKS.items())
-    what = {"pair": f"left pill = {delta_label} (change vs the model's earlier run) · right pill = Δ norm · "
-                    "abs. value beneath",
+    what = {"pair": f"pill = Δ norm (anomaly) · ▲/▼ = {delta_label} (change vs the model's earlier run, "
+                    "same colours; = when flat) · abs. value beneath",
             "d_norm": "Δ norm", "d_run": f"{delta_label}", "d_ref": "Δ vs the reference run"}.get(view_key, "")
     return (f'<div class="mcg-legend"><span>{what}</span><span>colder · more wind, solar, precipitation'
             f'<span class="mcg-swatch" style="background:linear-gradient(90deg,{DIV_NEG},{DIV_MID},{DIV_POS});"></span>'
@@ -910,7 +924,7 @@ def render_morning_call():
                                          "'Previous run of the same model' is the previous cycle (6 or 12 h).")
         with c4:
             view = st.radio("Cells show", list(VIEWS), horizontal=True, key="mcg_view",
-                            help="Change · anomaly: the two deltas as shaded pills, the value small beneath. "
+                            help="Change · anomaly: Δ norm as a shaded pill, Δ run as a coloured ▲/▼ after it, the value small beneath. "
                                  "Detail: the report's triple. The other views put one shaded quantity per cell.")
         with c5:
             show_chart = st.toggle("Chart", value=False, key="mcg_chart", help="The arrow chart above the grid — off by default.")
