@@ -767,19 +767,30 @@ def load_hist_monthly_all(metric: str, areas: tuple[str, ...], source: str | Non
     return _num(df, ["year", "month", "actual", "normal", "anomaly", "anomaly_pct", "n_days"])
 
 
+def _table_missing(e: Exception) -> bool:
+    """True when `e` says the table is not there (benign: the loader job has not run yet) — as
+    opposed to a timeout, a permission or a warehouse error, which must not look like 'no data'."""
+    m = str(e).upper()
+    return any(k in m for k in ("TABLE_OR_VIEW_NOT_FOUND", "CANNOT BE FOUND", "DOES NOT EXIST", "NOT FOUND"))
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_index_monthly() -> pd.DataFrame:
     """Monthly mean of every teleconnection index with the number of days behind it
     (index_name, year, month, value, n_days), from the daily weather_indexes table that
     pipeline/indices_upload.py loads. Aggregated in SQL — the daily table is ~580 k rows.
-    Empty (never raises) until the pipeline has run."""
+    Empty only when the table does not exist yet. Any other failure (warehouse cold start,
+    timeout, permission) is RAISED, which st.cache_data does not cache — swallowing it would
+    cache an empty frame for an hour and show 'not loaded yet' over data that is there."""
     try:
         df = run_query(f"""
             SELECT index_name, YEAR(date) AS year, MONTH(date) AS month, AVG(value) AS value, COUNT(value) AS n_days
             FROM {SBX_SCHEMA}.weather_indexes WHERE value IS NOT NULL
             GROUP BY index_name, YEAR(date), MONTH(date) ORDER BY index_name, year, month
         """)
-    except Exception:
+    except Exception as e:
+        if not _table_missing(e):
+            raise
         df = pd.DataFrame()
     if df.empty:
         return pd.DataFrame(columns=["index_name", "year", "month", "value", "n_days"])
@@ -796,7 +807,9 @@ def load_index_recent(days: int = 45) -> pd.DataFrame:
             WHERE value IS NOT NULL AND date >= current_date() - INTERVAL {int(days)} DAYS
             ORDER BY index_name, date
         """)
-    except Exception:
+    except Exception as e:
+        if not _table_missing(e):
+            raise
         df = pd.DataFrame()
     if df.empty:
         return pd.DataFrame(columns=["index_name", "date", "value"])
@@ -808,7 +821,7 @@ def load_reanalysis_monthly(metric: str, areas: tuple[str, ...]) -> pd.DataFrame
     """Meteologica ERA5 reanalysis generation (reanalysis_daily, built by the notebook's cell
     5b from the latest vintage of dna_prod_silver.meteologica.reanalysis) as monthly means
     per country: area, year, month, value_mw, capacity_mw, n_days. Wind and Solar only.
-    Empty (never raises) until the notebook has built the table."""
+    Empty only until the notebook has built the table; other failures are raised (not cached)."""
     from _config import TELE_REANALYSIS_TABLE
     cols = ["area", "year", "month", "value_mw", "capacity_mw", "n_days"]
     if metric not in ("Wind", "Solar") or not areas:
@@ -820,7 +833,9 @@ def load_reanalysis_monthly(metric: str, areas: tuple[str, ...]) -> pd.DataFrame
             WHERE metric = '{metric}' AND area IN ({_sql_list(areas)})
             GROUP BY area, year, month ORDER BY area, year, month
         """)
-    except Exception:
+    except Exception as e:
+        if not _table_missing(e):
+            raise
         df = pd.DataFrame()
     if df.empty:
         return pd.DataFrame(columns=cols)

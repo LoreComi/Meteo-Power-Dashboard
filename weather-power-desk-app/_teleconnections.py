@@ -55,8 +55,11 @@ def _available_sources(metric: str) -> list[str]:
     out = []
     for s in TELE_SOURCES[metric]:
         if s == "Reanalysis":
-            if not load_reanalysis_monthly(metric, ("DE",)).empty:
-                out.append(s)
+            try:
+                if not load_reanalysis_monthly(metric, ("DE",)).empty:
+                    out.append(s)
+            except Exception:       # not cached; a rerun retries — the other sources stay usable meanwhile
+                pass
         elif s in avail.get(metric, []) or (not avail and s == HIST_DEFAULT_SOURCE):
             out.append(s)
     return out
@@ -107,7 +110,13 @@ def _grid(long: pd.DataFrame, labels: dict, value: str) -> np.ndarray:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def render_teleconnections():
-    raw = load_index_monthly()
+    try:
+        raw = load_index_monthly()
+    except Exception as e:      # a real failure, not 'not loaded yet' — say what it was and let a rerun retry
+        st.error(f"Could not read {SBX_SCHEMA}.weather_indexes: {e}")
+        if st.button("Retry", key="tc_retry"):
+            st.rerun()
+        return
     raw = raw[raw["index_name"].isin(TELE_INDICES)] if not raw.empty else raw
     if raw.empty:
         status_banner(f"The weather indices are not loaded yet. This tab reads {SBX_SCHEMA}.weather_indexes "
@@ -246,7 +255,11 @@ def render_teleconnections():
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _render_indices(sel, raw, all_frames, focus, focus_f, focus_m, period, plabel, thr, years):
-    recent = load_index_recent(45)
+    try:
+        recent = load_index_recent(45)
+    except Exception as e:
+        st.warning(f"Daily index values unavailable: {e}")
+        recent = pd.DataFrame(columns=["index_name", "date", "value"])
     cards = []
     for n in sel:
         d = recent[recent["index_name"] == n].sort_values("date") if not recent.empty else recent
