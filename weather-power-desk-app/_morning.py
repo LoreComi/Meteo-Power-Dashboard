@@ -884,11 +884,14 @@ def render_morning_call():
     for k in keys:
         latest_by_pattern.setdefault(run_map[k][0], k)
     ref_default = latest_by_pattern.get(src["reference"], keys[0])
-    if st.session_state.get("mc_source_last") != source:
-        # a new source has other run keys: forget the previous selections
+    # The grid always opens on the latest run of every model (12z once it is in, 00z until then).
+    # Widgets keep their selection in session state, so forget it whenever the source changes or a
+    # newer run has landed — otherwise a tab opened before the 12z load keeps showing the 00z.
+    latest_sig = (source, tuple(sorted(latest_by_pattern.values())))
+    if st.session_state.get("mc_latest_sig") != latest_sig:
         for k in ("mcg_ref", "mcg_cols", "mcp_ref", "mcp_cmp"):
             st.session_state.pop(k, None)
-        st.session_state["mc_source_last"] = source
+        st.session_state["mc_latest_sig"] = latest_sig
 
     # --- controls: reference run · compare columns · Δ pairing · what the cells show · chart ---
     if phone:
