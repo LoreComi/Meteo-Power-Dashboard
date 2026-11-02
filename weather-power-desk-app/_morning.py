@@ -880,14 +880,22 @@ def render_morning_call():
         return
     run_map = {_run_label(p, t): (p, t) for p, t in runs}
     keys = list(run_map)
-    latest_by_pattern: dict[str, str] = {}
+    # One model = one label (ec00ens and ec12ens are both "EC-ENS"): the defaults take the newest run
+    # of each model, whichever cycle that is — 12z once it is in, 00z until then. keys are newest first.
+    def model_of(pattern: str) -> str:
+        return MORNING_MODEL_LABELS.get(pattern, pattern)
+
+    latest_by_model: dict[str, str] = {}
     for k in keys:
-        latest_by_pattern.setdefault(run_map[k][0], k)
-    ref_default = latest_by_pattern.get(src["reference"], keys[0])
+        latest_by_model.setdefault(model_of(run_map[k][0]), k)
+    ref_default = latest_by_model.get(model_of(src["reference"]), keys[0])
+    cmp_models = list(dict.fromkeys(model_of(p) for p in src["compare"]))
+    cmp_default_all = [latest_by_model[m] for m in cmp_models
+                       if m in latest_by_model and latest_by_model[m] != ref_default]
     # The grid always opens on the latest run of every model (12z once it is in, 00z until then).
     # Widgets keep their selection in session state, so forget it whenever the source changes or a
     # newer run has landed — otherwise a tab opened before the 12z load keeps showing the 00z.
-    latest_sig = (source, tuple(sorted(latest_by_pattern.values())))
+    latest_sig = (source, tuple(sorted(latest_by_model.values())))
     if st.session_state.get("mc_latest_sig") != latest_sig:
         for k in ("mcg_ref", "mcg_cols", "mcp_ref", "mcp_cmp"):
             st.session_state.pop(k, None)
@@ -898,8 +906,7 @@ def render_morning_call():
         with st.expander("Settings", expanded=False):
             ref_key = st.selectbox("Reference run", keys, index=keys.index(ref_default), key="mcp_ref")
             ref_pat, ref_init = run_map[ref_key]
-            cmp_default = [latest_by_pattern[p] for p in src["compare"]
-                           if p in latest_by_pattern and p != ref_pat][:MORNING_PHONE_MAX_COMPARE]
+            cmp_default = [k for k in cmp_default_all if k != ref_key][:MORNING_PHONE_MAX_COMPARE]
             cmp_keys = st.multiselect(f"Compare (max {MORNING_PHONE_MAX_COMPARE})", keys, default=cmp_default,
                                       key="mcp_cmp", max_selections=MORNING_PHONE_MAX_COMPARE)
             rule_key = st.selectbox("Δ run vs", list(MORNING_PREV_RULES), key="mcg_prev")
@@ -913,7 +920,7 @@ def render_morning_call():
                                         "the Δ pairing; the chips, the chart, the commentary and the CSV are built "
                                         "on it. Defaults to the latest issue of the reference model.")
         ref_pat, ref_init = run_map[ref_key]
-        cmp_default = [latest_by_pattern[p] for p in src["compare"] if p in latest_by_pattern and p != ref_pat]
+        cmp_default = [k for k in cmp_default_all if k != ref_key]
         with c2:
             cmp_keys = st.multiselect("Compare columns", keys, default=cmp_default, key="mcg_cols",
                                       help="Any runs — other models' latest, or earlier cycles of the same model. "
