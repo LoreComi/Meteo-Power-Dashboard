@@ -73,7 +73,7 @@ from _config import (
 from _charts import make_morning_anomaly_chart
 from _data import load_morning_daily
 from _style import BRIEF_CSS, PHONE_CSS, INK_MUTED, CAT_BLUE, STATUS_CRITICAL, DIV_NEG, DIV_MID, DIV_POS
-from _ui import status_banner
+from _ui import status_banner, icon_button
 
 # What a cell shows. "pair" = the two deltas as shaded pills with the value beneath (default);
 # None = the report's triple; otherwise the grid column to put in the cell, shaded.
@@ -851,9 +851,9 @@ def render_morning_call():
         st.markdown(PHONE_CSS, unsafe_allow_html=True)
         # the phone layout hides the sidebar, so its two jobs (go home, switch layout) sit here
         b1, b2 = st.columns(2)
-        b1.button("Home", icon=":material/home:", key="mcp_home", use_container_width=True,
+        icon_button(b1, "Home", ":material/home:", key="mcp_home", use_container_width=True,
                   on_click=lambda: st.session_state.update(section="Home"))
-        b2.button("Desktop view", icon=":material/computer:", key="mcp_pc", use_container_width=True,
+        icon_button(b2, "Desktop view", ":material/computer:", key="mcp_pc", use_container_width=True,
                   on_click=lambda: st.session_state.update(device="PC"))
     try:
         df = load_morning_daily(source)

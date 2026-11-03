@@ -47,7 +47,8 @@ from _scenarios import (
     describe_scenario, silhouette_for_k,
 )
 from _regimes import render_regimes
-from _ui import (anomaly_kpi, kpi_card, kpi_row, status_banner, page_header, sec_header, tile, tiles, note)
+from _ui import (anomaly_kpi, kpi_card, kpi_row, status_banner, page_header, sec_header, tile, tiles, note,
+                 keyed)
 from _style import PAGE_CSS
 
 
@@ -99,7 +100,7 @@ def _value_tile(a: str, metric: str, m: dict, mean, anom, sd, a_unit: str) -> st
 
 
 def _render_values(runs: pd.DataFrame):
-    with st.container(key="tb_fv"):
+    with keyed("tb_fv"):
         c1, c2, c3, c4 = st.columns([1.2, 1.1, 3, 1.4])
         with c1:
             metric = st.selectbox("Metric", list(METRICS.keys()), index=list(METRICS).index(DEFAULT_METRIC), key="fv_metric")
@@ -219,7 +220,7 @@ def _ratio_tile(a: str, metric: str, r: float, max_lead: int) -> str:
 
 
 def _render_uncertainty(runs: pd.DataFrame):
-    with st.container(key="tb_fu"):
+    with keyed("tb_fu"):
         c1, c2, c3 = st.columns([1.2, 3, 1.4])
         with c1:
             metric = st.selectbox("Metric", [k for k in METRICS if k != "Precipitation energy"], key="fu_metric")
@@ -570,7 +571,7 @@ def _render_scenarios(runs: pd.DataFrame):
                       f"another field).", "warning")
 
     keys = list(opts.keys())
-    with st.container(key="tb_fs"):
+    with keyed("tb_fs"):
         c1, c2, c3, c4 = st.columns([1.6, 3.0, 1.0, 2.2])
         with c1:
             source = st.selectbox("Ensemble", keys, index=keys.index(SCENARIO_DEFAULT_SOURCE) if SCENARIO_DEFAULT_SOURCE in keys else 0,
@@ -627,7 +628,7 @@ def _render_scenarios(runs: pd.DataFrame):
 
 def render_forecast():
     st.markdown(PAGE_CSS, unsafe_allow_html=True)
-    with st.container(key="pg_forecast"):
+    with keyed("pg_forecast"):
         page_header("forecast", "Section 01", "Forecast",
                     "Volue ensembles by country · spread against the normal spread · scenarios from the Z500 field · "
                     "European weather regimes")

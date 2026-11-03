@@ -22,6 +22,7 @@ import streamlit as st
 
 from _config import SECTIONS
 from _style import CUSTOM_CSS
+from _ui import keyed, icon_button
 from _morning import render_morning_call
 from _forecast import render_forecast
 from _historical import render_historical
@@ -85,7 +86,7 @@ def _set_device(device: str) -> None:
 
 if "device" not in st.session_state:
     _l, _mid, _r = st.columns([1, 2.2, 1])
-    with _mid, st.container(key="welcome"):
+    with _mid, keyed("welcome"):
         st.markdown('<div class="wl-logo"><svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.2" '
                     'stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>'
                     '<div class="wl-title">Welcome to Power Desk</div>'
@@ -93,9 +94,9 @@ if "device" not in st.session_state:
                     'time, with one compare column and big type. You can switch any time in the sidebar.</div>',
                     unsafe_allow_html=True)
         _c1, _c2 = st.columns(2)
-        _c1.button("Desktop", icon=":material/computer:", use_container_width=True, on_click=_set_device,
+        icon_button(_c1, "Desktop", ":material/computer:", use_container_width=True, on_click=_set_device,
                    args=("PC",), key="device_pc", type="primary")
-        _c2.button("Phone", icon=":material/smartphone:", use_container_width=True, on_click=_set_device,
+        icon_button(_c2, "Phone", ":material/smartphone:", use_container_width=True, on_click=_set_device,
                    args=("Phone",), key="device_phone")
         st.markdown('<div class="wl-hint">Tip: open the app with ?layout=phone or ?layout=pc to skip this question.</div>',
                     unsafe_allow_html=True)
@@ -116,16 +117,16 @@ with st.sidebar:
     st.markdown(f'<div class="pd-brand"><div class="pd-logo">{_LOGO}</div><div><div class="pd-brand-name">Power Desk'
                 f'</div><div class="pd-brand-sub">Weather Intelligence</div></div></div>', unsafe_allow_html=True)
     st.markdown('<div class="nav-label">Sections</div>', unsafe_allow_html=True)
-    with st.container(key="nav"):
+    with keyed("nav"):
         for name in [HOME] + list(SECTIONS.keys()):
-            st.button(name, key=f"nav_{name}", icon=NAV_ICONS.get(name),
+            icon_button(st, name, NAV_ICONS.get(name), key=f"nav_{name}",
                       type="primary" if st.session_state["section"] == name else "secondary",
                       use_container_width=True, on_click=go, args=(name,))
     st.markdown('<div class="nav-label">View</div>', unsafe_allow_html=True)
-    with st.container(key="view"):
+    with keyed("view"):
         _v1, _v2 = st.columns(2, gap="small")
         for _col, _dev, _ico in ((_v1, "PC", ":material/computer:"), (_v2, "Phone", ":material/smartphone:")):
-            _col.button(_dev, key=f"view_{_dev}", icon=_ico, use_container_width=True, on_click=_set_device,
+            icon_button(_col, _dev, _ico, key=f"view_{_dev}", use_container_width=True, on_click=_set_device,
                         args=(_dev,), type="primary" if st.session_state["device"] == _dev else "secondary")
     st.markdown('<div class="nav-foot">Volue (sandbox) · Meteomatics · Hydro Report methodology. '
                 'Morning Call and Gas Demand read the sandbox tables, 5-min cache.</div>', unsafe_allow_html=True)

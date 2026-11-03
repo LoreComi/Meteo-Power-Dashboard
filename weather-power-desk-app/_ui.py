@@ -91,12 +91,26 @@ def icon_box(name: str, box_cls: str) -> str:
             f'{_SVG.format(c=c, p=_ICONS.get(name, ""))}</div>')
 
 
+def keyed(key: str, **kw):
+    """st.container(key=...) — the key gives the container the `st-key-<key>` class the CSS
+    styles. Streamlit before 1.42 has no container keys: a plain container then, unstyled but working."""
+    try:
+        return st.container(key=key, **kw)
+    except TypeError:
+        return st.container(**kw)
+
+
+def icon_button(target, label: str, icon: str | None = None, **kw):
+    """`target`.button with a Material icon; on a Streamlit without button icons, the label alone."""
+    try:
+        return target.button(label, icon=icon, **kw)
+    except TypeError:
+        return target.button(label, **kw)
+
+
 def section(key: str):
     """A white card around one section (keyed so the CSS can find it)."""
-    try:
-        return st.container(border=True, key=key)
-    except TypeError:                                   # Streamlit without container keys
-        return st.container(border=True)
+    return keyed(key, border=True)
 
 
 def sec_header(icon: str, title: str, sub: str = "") -> None:
