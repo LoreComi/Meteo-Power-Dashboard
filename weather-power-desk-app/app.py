@@ -58,17 +58,13 @@ if "device" not in st.session_state:
 
 def go(section: str) -> None:
     st.session_state["section"] = section
-    st.session_state["nav_radio"] = section
 
 
 # ─── Header ──────────────────────────────────────────────────────────────────────
 _now = datetime.now(timezone.utc)
 st.markdown(f"""
 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
-    <div>
-        <span style="font-size:1.7rem; font-weight:800; letter-spacing:-0.03em; color:var(--text-primary);">Power Desk</span>
-        <span style="font-size:1.7rem; font-weight:300; letter-spacing:-0.03em; color:var(--text-muted); margin-left:8px;">Weather Intelligence</span>
-    </div>
+    <div></div>
     <div style="display:flex; align-items:center; gap:12px;">
         <span style="display:inline-flex; align-items:center; gap:6px; padding:4px 12px; background:#e9f7e9;
             border:1px solid rgba(12,163,12,0.28); border-radius:999px; font-size:0.72rem; font-weight:600; color:#0f5c0f;">
@@ -88,32 +84,51 @@ def _set_device(device: str) -> None:
 
 
 if "device" not in st.session_state:
-    st.markdown("#### HOW ARE YOU VIEWING THE DASHBOARD?")
-    st.caption("Phone shows the Morning Call one window at a time, with one compare column and big type. "
-               "You can switch later in the sidebar. Open the app with ?layout=phone to skip this question.")
-    _c1, _c2, _ = st.columns([1, 1, 3])
-    _c1.button("💻  PC", use_container_width=True, on_click=_set_device, args=("PC",), key="device_pc")
-    _c2.button("📱  Phone", use_container_width=True, on_click=_set_device, args=("Phone",), key="device_phone")
+    _l, _mid, _r = st.columns([1, 2.2, 1])
+    with _mid, st.container(key="welcome"):
+        st.markdown('<div class="wl-logo"><svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.2" '
+                    'stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>'
+                    '<div class="wl-title">Welcome to Power Desk</div>'
+                    '<div class="wl-sub">How are you viewing the dashboard? Phone shows the Morning Call one window at a '
+                    'time, with one compare column and big type. You can switch any time in the sidebar.</div>',
+                    unsafe_allow_html=True)
+        _c1, _c2 = st.columns(2)
+        _c1.button("Desktop", icon=":material/computer:", use_container_width=True, on_click=_set_device,
+                   args=("PC",), key="device_pc", type="primary")
+        _c2.button("Phone", icon=":material/smartphone:", use_container_width=True, on_click=_set_device,
+                   args=("Phone",), key="device_phone")
+        st.markdown('<div class="wl-hint">Tip: open the app with ?layout=phone or ?layout=pc to skip this question.</div>',
+                    unsafe_allow_html=True)
     st.stop()
 
 
 # ─── Sidebar navigation ─────────────────────────────────────────────────────────
+NAV_ICONS = {
+    HOME: ":material/home:", "Morning Call": ":material/wb_sunny:", "Forecast": ":material/insights:",
+    "Historical & Analysis": ":material/history:", "Hydro Monitoring": ":material/water_drop:",
+    "Gas Demand": ":material/local_fire_department:", "Strategy": ":material/lock:",
+}
+_LOGO = ('<svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" '
+         'stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>')
+
+
 with st.sidebar:
-    st.markdown("### Sections")
-    options = [HOME] + list(SECTIONS.keys())
-    if "nav_radio" not in st.session_state:
-        st.session_state["nav_radio"] = st.session_state["section"]
-    picked = st.radio("Sections", options, key="nav_radio", label_visibility="collapsed",
-                      format_func=lambda s: s if s == HOME or not SECTIONS[s]["locked"] else f"{s}  🔒")
-    if picked != st.session_state["section"]:
-        st.session_state["section"] = picked
-    st.divider()
-    st.radio("Layout", DEVICES, horizontal=True, index=DEVICES.index(st.session_state["device"]),
-             key="device_radio", on_change=lambda: _set_device(st.session_state["device_radio"]),
-             help="Phone: the Morning Call one window at a time, one compare column, big type.")
-    st.divider()
-    st.caption("Data: Volue (sandbox) · Meteomatics · Hydro Report methodology. "
-               "Morning Call and Gas Demand read the sandbox tables (5-min cache).")
+    st.markdown(f'<div class="pd-brand"><div class="pd-logo">{_LOGO}</div><div><div class="pd-brand-name">Power Desk'
+                f'</div><div class="pd-brand-sub">Weather Intelligence</div></div></div>', unsafe_allow_html=True)
+    st.markdown('<div class="nav-label">Sections</div>', unsafe_allow_html=True)
+    with st.container(key="nav"):
+        for name in [HOME] + list(SECTIONS.keys()):
+            st.button(name, key=f"nav_{name}", icon=NAV_ICONS.get(name),
+                      type="primary" if st.session_state["section"] == name else "secondary",
+                      use_container_width=True, on_click=go, args=(name,))
+    st.markdown('<div class="nav-label">View</div>', unsafe_allow_html=True)
+    with st.container(key="view"):
+        _v1, _v2 = st.columns(2, gap="small")
+        for _col, _dev, _ico in ((_v1, "PC", ":material/computer:"), (_v2, "Phone", ":material/smartphone:")):
+            _col.button(_dev, key=f"view_{_dev}", icon=_ico, use_container_width=True, on_click=_set_device,
+                        args=(_dev,), type="primary" if st.session_state["device"] == _dev else "secondary")
+    st.markdown('<div class="nav-foot">Volue (sandbox) · Meteomatics · Hydro Report methodology. '
+                'Morning Call and Gas Demand read the sandbox tables, 5-min cache.</div>', unsafe_allow_html=True)
 
 
 # ─── Landing page ────────────────────────────────────────────────────────────────

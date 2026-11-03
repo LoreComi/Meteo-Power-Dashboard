@@ -191,6 +191,60 @@ p, .stMarkdown, span, label {{ color: var(--text-primary); }}
     font-weight: 600 !important;
 }}
 
+/* Sidebar: brand, nav buttons, view switch */
+.pd-brand {{ display: flex; align-items: center; gap: 11px; padding: 2px 6px 10px; }}
+.pd-logo {{ width: 36px; height: 36px; border-radius: 11px; flex: none; display: flex; align-items: center;
+    justify-content: center; background: linear-gradient(135deg, {CAT_BLUE}, {CAT_VIOLET});
+    box-shadow: 0 4px 12px rgba(42,120,214,0.30); }}
+.pd-logo svg {{ width: 19px; height: 19px; }}
+.pd-brand-name {{ font-size: 1rem; font-weight: 800; letter-spacing: -0.02em; color: var(--text-primary) !important; line-height: 1.1; }}
+.pd-brand-sub {{ font-size: 0.7rem; color: var(--text-muted) !important; }}
+.nav-label {{ font-size: 0.62rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--text-muted) !important; margin: 14px 8px 6px; }}
+.nav-foot {{ font-size: 0.7rem; color: var(--text-muted) !important; line-height: 1.45; margin: 18px 8px 0; }}
+.st-key-nav {{ gap: 2px !important; }}
+.st-key-nav .stButton > button {{ justify-content: flex-start !important; border: none !important;
+    background: transparent !important; box-shadow: none !important; padding: 7px 12px !important;
+    border-radius: 10px !important; min-height: 38px; }}
+.st-key-nav .stButton > button > div {{ justify-content: flex-start !important; gap: 10px; }}
+.st-key-nav .stButton > button p {{ font-size: 0.9rem !important; font-weight: 500 !important; color: var(--text-secondary) !important; }}
+.st-key-nav .stButton > button [data-testid="stIconMaterial"] {{ color: var(--text-muted) !important; font-size: 1.15rem; }}
+.st-key-nav .stButton > button:hover {{ background: rgba(20,20,15,0.05) !important; }}
+.st-key-nav .stButton > button[kind="primary"], .st-key-nav .stButton > button[data-testid="stBaseButton-primary"] {{
+    background: rgba(42,120,214,0.11) !important; }}
+.st-key-nav .stButton > button[kind="primary"] p, .st-key-nav .stButton > button[data-testid="stBaseButton-primary"] p,
+.st-key-nav .stButton > button[kind="primary"] [data-testid="stIconMaterial"],
+.st-key-nav .stButton > button[data-testid="stBaseButton-primary"] [data-testid="stIconMaterial"] {{
+    color: {CAT_BLUE} !important; font-weight: 650 !important; }}
+.st-key-view {{ background: #e9ebee; padding: 3px; border-radius: 12px; margin: 0 4px; }}
+.st-key-view [data-testid="stHorizontalBlock"] {{ gap: 3px !important; }}
+.st-key-view .stButton > button {{ border: none !important; background: transparent !important; box-shadow: none !important;
+    border-radius: 9px !important; min-height: 34px; padding: 4px 8px !important; }}
+.st-key-view .stButton > button p {{ font-weight: 600 !important; font-size: 0.85rem !important; color: var(--text-secondary) !important; }}
+.st-key-view .stButton > button [data-testid="stIconMaterial"] {{ color: var(--text-muted) !important; }}
+.st-key-view .stButton > button[kind="primary"], .st-key-view .stButton > button[data-testid="stBaseButton-primary"] {{
+    background: #ffffff !important; box-shadow: 0 1px 4px rgba(20,20,15,0.12) !important; }}
+.st-key-view .stButton > button[kind="primary"] p, .st-key-view .stButton > button[data-testid="stBaseButton-primary"] p,
+.st-key-view .stButton > button[kind="primary"] [data-testid="stIconMaterial"],
+.st-key-view .stButton > button[data-testid="stBaseButton-primary"] [data-testid="stIconMaterial"] {{ color: {CAT_BLUE} !important; }}
+
+/* first open: welcome card */
+.st-key-welcome {{ background: #ffffff; border-radius: 20px; padding: 36px 36px 26px; margin-top: 8vh;
+    box-shadow: 0 12px 40px rgba(20,20,15,0.08); border: 1px solid rgba(20,20,15,0.06); text-align: center; }}
+.wl-logo {{ width: 56px; height: 56px; border-radius: 16px; margin: 0 auto 16px; display: flex; align-items: center;
+    justify-content: center; background: linear-gradient(135deg, {CAT_BLUE}, {CAT_VIOLET});
+    box-shadow: 0 8px 22px rgba(42,120,214,0.35); }}
+.wl-logo svg {{ width: 28px; height: 28px; }}
+.wl-title {{ text-align: center; font-size: 1.6rem; font-weight: 800; letter-spacing: -0.03em; color: var(--text-primary) !important; }}
+.wl-sub {{ text-align: center; font-size: 0.9rem; color: var(--text-secondary) !important; margin: 8px auto 22px; max-width: 460px; line-height: 1.5; }}
+.wl-hint {{ text-align: center; font-size: 0.74rem; color: var(--text-muted) !important; margin-top: 14px; }}
+.st-key-welcome .stButton > button {{ min-height: 64px; border-radius: 14px !important; }}
+.st-key-welcome .stButton > button p {{ font-size: 1rem !important; font-weight: 650 !important; }}
+.st-key-welcome .stButton > button [data-testid="stIconMaterial"] {{ font-size: 1.4rem; }}
+.st-key-welcome .stButton > button[kind="primary"] p, .st-key-welcome .stButton > button[data-testid="stBaseButton-primary"] p,
+.st-key-welcome .stButton > button[kind="primary"] [data-testid="stIconMaterial"],
+.st-key-welcome .stButton > button[data-testid="stBaseButton-primary"] [data-testid="stIconMaterial"] {{ color: #ffffff !important; }}
+
 /* Landing page — four big section tiles. The tile is a styled block; the
    real click target is the full-width st.button rendered right under it. */
 .section-tile {{
@@ -615,8 +669,40 @@ PLOTLY_LAYOUT = dict(
 # ══════════════════════════════════════════════════════════════════════════════
 DD_WARM = "#e5484d"       # warm side: warmer, or less wind / solar / precipitation
 DD_COOL = "#2a78d6"       # cool side: colder, or more
-DEEP_DIVE_CSS = f"""
+PAGE_CSS = f"""
 <style>
+/* page header */
+.pg-head {{ display: flex; align-items: center; gap: 16px; margin: 4px 0 18px; }}
+.pg-ico {{ width: 48px; height: 48px; border-radius: 14px; display: flex; align-items: center; justify-content: center;
+    flex: none; box-shadow: 0 6px 16px rgba(42,120,214,0.25); }}
+.pg-ico svg {{ width: 24px; height: 24px; }}
+.pg-eyebrow {{ font-size: 0.64rem; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--text-muted) !important; }}
+.pg-title {{ font-size: 1.75rem; font-weight: 800; letter-spacing: -0.035em; line-height: 1.1;
+    color: var(--text-primary) !important; }}
+.pg-sub {{ font-size: 0.82rem; color: var(--text-secondary) !important; margin-top: 3px; }}
+
+/* toolbar: the controls of a tab grouped in one soft card */
+div[class*="st-key-tb_"] {{ background: #f7f8fa; border: 1px solid rgba(20,20,15,0.06); border-radius: 14px;
+    padding: 10px 16px 2px; margin-bottom: 14px; }}
+div[class*="st-key-tb_"] label p {{ font-size: 0.72rem !important; font-weight: 650 !important;
+    color: var(--text-muted) !important; text-transform: uppercase; letter-spacing: 0.06em; }}
+
+/* pill tabs inside a page container */
+div[class*="st-key-pg_"] [data-baseweb="tab-list"] {{ gap: 4px; background: #eef0f3; padding: 4px; border-radius: 12px;
+    width: fit-content; margin-bottom: 14px; }}
+div[class*="st-key-pg_"] [data-baseweb="tab-list"] button[role="tab"] {{ padding: 7px 18px; border-radius: 9px;
+    height: auto; background: transparent; }}
+div[class*="st-key-pg_"] [data-baseweb="tab-list"] button[role="tab"] p {{ font-size: 0.86rem !important;
+    font-weight: 600 !important; color: var(--text-secondary) !important; }}
+div[class*="st-key-pg_"] [data-baseweb="tab-list"] button[role="tab"][aria-selected="true"] {{ background: #ffffff;
+    box-shadow: 0 1px 4px rgba(20,20,15,0.10); }}
+div[class*="st-key-pg_"] [data-baseweb="tab-list"] button[role="tab"][aria-selected="true"] p {{ color: var(--accent) !important; }}
+div[class*="st-key-pg_"] [data-baseweb="tab-highlight"], div[class*="st-key-pg_"] [data-baseweb="tab-border"] {{ display: none; }}
+/* softer multiselect chips */
+div[class*="st-key-pg_"] [data-baseweb="tag"] {{ background: rgba(42,120,214,0.10) !important; border-radius: 8px !important; }}
+div[class*="st-key-pg_"] [data-baseweb="tag"] span {{ color: {CAT_BLUE} !important; font-weight: 600; }}
+div[class*="st-key-pg_"] [data-baseweb="tag"] svg {{ fill: {CAT_BLUE} !important; }}
 .dd-hero {{
     position: relative; overflow: hidden;
     background: radial-gradient(120% 140% at 100% 0%, #2c4f86 0%, rgba(44,79,134,0) 55%),
@@ -704,3 +790,5 @@ div[class*="st-key-dd_sec_"] {{
 .kpi-value {{ font-family: 'Inter', sans-serif; font-weight: 750; letter-spacing: -0.03em; }}
 </style>
 """
+
+DEEP_DIVE_CSS = PAGE_CSS          # the Morning Call deep dive and the section pages share one sheet

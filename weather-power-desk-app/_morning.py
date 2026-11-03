@@ -849,6 +849,12 @@ def render_morning_call():
     blocks = {n: b for n, b in MORNING_BLOCKS.items() if not src.get("families") or b["family"] in src["families"]}
     if phone:
         st.markdown(PHONE_CSS, unsafe_allow_html=True)
+        # the phone layout hides the sidebar, so its two jobs (go home, switch layout) sit here
+        b1, b2 = st.columns(2)
+        b1.button("Home", icon=":material/home:", key="mcp_home", use_container_width=True,
+                  on_click=lambda: st.session_state.update(section="Home"))
+        b2.button("Desktop view", icon=":material/computer:", key="mcp_pc", use_container_width=True,
+                  on_click=lambda: st.session_state.update(device="PC"))
     try:
         df = load_morning_daily(source)
     except Exception as e:

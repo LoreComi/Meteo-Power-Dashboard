@@ -47,7 +47,8 @@ from _scenarios import (
     describe_scenario, silhouette_for_k,
 )
 from _regimes import render_regimes
-from _ui import anomaly_kpi, kpi_card, kpi_row, status_banner
+from _ui import (anomaly_kpi, kpi_card, kpi_row, status_banner, page_header, sec_header, tile, tiles, note)
+from _style import PAGE_CSS
 
 
 # ─── shared controls ─────────────────────────────────────────────────────────────
@@ -70,28 +71,56 @@ def _horizon_mean(df: pd.DataFrame, col: str, max_lead: int) -> pd.Series:
 # TAB 1 — VALUES
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _render_values(runs: pd.DataFrame):
-    c1, c2, c3, c4 = st.columns([1.2, 1.1, 3, 1.4])
-    with c1:
-        metric = st.selectbox("Metric", list(METRICS.keys()), index=list(METRICS).index(DEFAULT_METRIC), key="fv_metric")
-    with c2:
-        family = st.selectbox("Model", list(VOLUE_MODELS.keys()), index=list(VOLUE_MODELS).index(DEFAULT_MODEL), key="fv_model")
-    with c3:
-        areas = _area_picker("fv_areas", [a for a in ANOMALY_VIEW_DEFAULT_AREAS if a in AREAS])
-    fam_runs = _runs_for(runs, family)
-    with c4:
-        run_opts = fam_runs["run_display"].tolist() if not fam_runs.empty else ["Latest"]
-        run_pick = st.selectbox("Run", run_opts, key="fv_run")
-    run_rank = int(fam_runs.loc[fam_runs["run_display"] == run_pick, "run_rank"].iloc[0]) if not fam_runs.empty else 1
+_METRIC_ICON = {"Temperature": "tt", "Wind": "wnd", "Solar": "spv", "Precipitation energy": "rre"}
+_GAUGE_FULL = {"diff": 3.0, "pct": 40.0}        # the anomaly that fills a tile's gauge (°C, or % of normal)
 
-    o1, o2, _ = st.columns([1.2, 1.6, 4])
-    with o1:
-        show_prev = st.checkbox("Earlier runs", value=True, key="fv_prev", help="Faded ensemble-mean lines of the previous runs")
-    with o2:
-        show_mm = st.checkbox("Meteomatics EC / AIFS means", value=(metric == "Temperature"), key="fv_mm",
-                              disabled=(metric != "Temperature"),
-                              help="Population-weighted country mean of the Meteomatics ensemble MEAN (silver tables; "
-                                   "weights from GHS-POP, see pop_weights_0p5.csv)")
+
+def _value_tile(a: str, metric: str, m: dict, mean, anom, sd, a_unit: str) -> str:
+    """Days 1–14 mean of one country: value, anomaly on a gauge (red = warmer / less wind,
+    solar, precipitation; blue = colder / more) and the mean member spread."""
+    def num(x):
+        try:
+            x = float(x)
+            return None if np.isnan(x) else x
+        except (TypeError, ValueError):
+            return None
+    mean, anom, sd = num(mean), num(anom), num(sd)
+    if mean is None:
+        return tile(_METRIC_ICON.get(metric, "forecast"), area_label(a), "days 1–14 · ensemble mean", "n/a", "",
+                    None, "flat", "no data")
+    tone, pill, gauge = "flat", "no normal", None
+    if anom is not None:
+        tone = "flat" if round(anom, 1) == 0 else ("warm" if (anom > 0) == m["warm_is_positive"] else "cool")
+        pill = (f"{anom:+.1f} {m['unit']} vs normal" if a_unit != "%" else f"{anom:+.0f}% vs normal")
+        gauge = anom / _GAUGE_FULL[m["anomaly_kind"]]
+    foot = f"σ {sd:.1f} {m['unit']}" if sd is not None else ""
+    return tile(_METRIC_ICON.get(metric, "forecast"), area_label(a), "days 1–14 · ensemble mean",
+                f"{mean:.1f}", m["unit"], gauge, tone, pill, foot)
+
+
+def _render_values(runs: pd.DataFrame):
+    with st.container(key="tb_fv"):
+        c1, c2, c3, c4 = st.columns([1.2, 1.1, 3, 1.4])
+        with c1:
+            metric = st.selectbox("Metric", list(METRICS.keys()), index=list(METRICS).index(DEFAULT_METRIC), key="fv_metric")
+        with c2:
+            family = st.selectbox("Model", list(VOLUE_MODELS.keys()), index=list(VOLUE_MODELS).index(DEFAULT_MODEL), key="fv_model")
+        with c3:
+            areas = _area_picker("fv_areas", [a for a in ANOMALY_VIEW_DEFAULT_AREAS if a in AREAS])
+        fam_runs = _runs_for(runs, family)
+        with c4:
+            run_opts = fam_runs["run_display"].tolist() if not fam_runs.empty else ["Latest"]
+            run_pick = st.selectbox("Run", run_opts, key="fv_run")
+        run_rank = int(fam_runs.loc[fam_runs["run_display"] == run_pick, "run_rank"].iloc[0]) if not fam_runs.empty else 1
+
+        o1, o2, _ = st.columns([1.2, 1.6, 4])
+        with o1:
+            show_prev = st.checkbox("Earlier runs", value=True, key="fv_prev", help="Faded ensemble-mean lines of the previous runs")
+        with o2:
+            show_mm = st.checkbox("Meteomatics EC / AIFS means", value=(metric == "Temperature"), key="fv_mm",
+                                  disabled=(metric != "Temperature"),
+                                  help="Population-weighted country mean of the Meteomatics ensemble MEAN (silver tables; "
+                                       "weights from GHS-POP, see pop_weights_0p5.csv)")
     if not areas:
         st.info("Select at least one country.")
         return
@@ -113,22 +142,21 @@ def _render_values(runs: pd.DataFrame):
     ref = cur["reference_date"].max()
     init_hour = int(cur["init_hour"].dropna().iloc[0]) if cur["init_hour"].notna().any() else \
         (12 if "12" in str(cur["pattern"].iloc[0]) else 0)
-    st.caption(f"Volue · {family} · run {format_run(volue_init_time(ref, init_hour))} · "
+    run_txt = (f"Volue · {family} · run {format_run(volue_init_time(ref, init_hour))} · "
                f"{int(cur['n_members'].max() or 0)} members · normal = Volue 30-yr normal")
 
     anom_col = "anomaly" if m["anomaly_kind"] == "diff" else "anomaly_pct"
     a_unit = m["unit"] if m["anomaly_kind"] == "diff" else "%"
     h_mean = _horizon_mean(cur, "ens_mean", 14)
     h_anom = _horizon_mean(cur, anom_col, 14)
-    a_suffix = "%" if a_unit == "%" else f" {m['unit']}"
-    kpi_row([anomaly_kpi(f"{area_label(a)} · d1–14 mean", h_mean.get(a), m["unit"], h_anom.get(a),
-                         anomaly_unit=a_suffix, warm_is_positive=m["warm_is_positive"]) for a in areas])
-
-    st.divider()
+    h_sd = _horizon_mean(cur, "spread_std", 14)
+    sec_header(_METRIC_ICON.get(metric, "forecast"), f"{metric} · days 1–14", run_txt)
+    tiles([_value_tile(a, metric, m, h_mean.get(a), h_anom.get(a), h_sd.get(a), a_unit) for a in areas])
     st.plotly_chart(make_anomaly_heatmap(cur, anom_col, a_unit, title=f"{metric} — daily anomaly vs normal ({a_unit})"),
                     use_container_width=True)
 
-    st.markdown("##### Ensemble distribution by country")
+    sec_header("spread", "Ensemble distribution by country",
+               "P10–P90 and P25–P75 bands · ensemble mean, median and normal · earlier runs faded")
     cols = st.columns(2)
     for i, a in enumerate(areas):
         with cols[i % 2]:
@@ -175,14 +203,30 @@ def _ratio_verdict(r: float) -> tuple[str, str]:
     return f"{r:.2f}× · normal", "kpi-card-neutral"
 
 
+def _ratio_tile(a: str, metric: str, r: float, max_lead: int) -> str:
+    """Spread ratio of one country: × the normal spread on a gauge centred on 1 (orange = wider
+    than usual, blue = tighter)."""
+    icon = _METRIC_ICON.get(metric, "spread")
+    if np.isnan(r):
+        return tile(icon, area_label(a), f"spread, days 1–{max_lead}", "n/a", "", None, "flat", "no baseline")
+    if r >= SPREAD_RATIO_HIGH:
+        tone, pill = "warm", "more uncertain than usual"
+    elif r <= SPREAD_RATIO_LOW:
+        tone, pill = "cool", "more confident than usual"
+    else:
+        tone, pill = "flat", "a typical spread"
+    return tile(icon, area_label(a), f"spread, days 1–{max_lead}", f"{r:.2f}", "× normal", (r - 1) / 0.5, tone, pill)
+
+
 def _render_uncertainty(runs: pd.DataFrame):
-    c1, c2, c3 = st.columns([1.2, 3, 1.4])
-    with c1:
-        metric = st.selectbox("Metric", [k for k in METRICS if k != "Precipitation energy"], key="fu_metric")
-    with c2:
-        areas = _area_picker("fu_areas", DEFAULT_AREAS)
-    with c3:
-        max_lead = st.slider("Lead days for the verdict", 3, 15, 10, key="fu_lead")
+    with st.container(key="tb_fu"):
+        c1, c2, c3 = st.columns([1.2, 3, 1.4])
+        with c1:
+            metric = st.selectbox("Metric", [k for k in METRICS if k != "Precipitation energy"], key="fu_metric")
+        with c2:
+            areas = _area_picker("fu_areas", DEFAULT_AREAS)
+        with c3:
+            max_lead = st.slider("Lead days for the verdict", 3, 15, 10, key="fu_lead")
     if not areas:
         st.info("Select at least one country.")
         return
@@ -205,15 +249,12 @@ def _render_uncertainty(runs: pd.DataFrame):
         status_banner("No spread climatology yet — fcst_spread_clim is built by the refresh job from the "
                       "last 365 days of EC-ENS 00z runs.", "warning")
     else:
-        st.caption(f"Baseline: mean across-member σ per lead day from the last year of EC-ENS 00z runs "
-                   f"({ratio['baseline'].iloc[0]} baseline). Ratio > {SPREAD_RATIO_HIGH} = more uncertain than "
-                   f"usual; < {SPREAD_RATIO_LOW} = more confident than usual.")
+        sec_header("spread", f"Spread vs normal · days 1–{max_lead}",
+                   f"this run's across-member σ against the last year of EC-ENS 00z runs "
+                   f"({ratio['baseline'].iloc[0]} baseline) · above {SPREAD_RATIO_HIGH}× = more uncertain than usual, "
+                   f"below {SPREAD_RATIO_LOW}× = more confident")
         rr = ratio[(ratio["lead_day"] >= 1) & (ratio["lead_day"] <= max_lead)].groupby("area")["ratio"].mean()
-        cards = []
-        for a in areas:
-            txt, cls = _ratio_verdict(float(rr.get(a, np.nan)))
-            cards.append(kpi_card(f"{area_label(a)} · spread d1–{max_lead}", txt, cls))
-        kpi_row(cards)
+        tiles([_ratio_tile(a, metric, float(rr.get(a, np.nan)), max_lead) for a in areas])
         high = [area_label(a) for a in areas if rr.get(a, 0) >= SPREAD_RATIO_HIGH]
         low = [area_label(a) for a in areas if 0 < rr.get(a, 9) <= SPREAD_RATIO_LOW]
         if high:
@@ -221,10 +262,10 @@ def _render_uncertainty(runs: pd.DataFrame):
                           f"uncertainty than a typical run at these lead times.", "warning")
         if low:
             status_banner(f"Ensemble spread is unusually tight for {', '.join(low)} — higher-than-usual confidence.", "good")
-        st.divider()
         st.plotly_chart(make_spread_ratio_heatmap(ratio), use_container_width=True)
 
-    st.markdown("##### Spread of the distribution — country detail")
+    sec_header("members", "Spread of the distribution · country detail",
+               "this run's spread by lead day against the normal spread, then every member day by day")
     d1, _ = st.columns([1.4, 3])
     with d1:
         focus = st.selectbox("Country", areas, format_func=area_label, key="fu_focus")
@@ -377,7 +418,8 @@ def scenario_cards(res: dict, info: dict, weeks: list[pd.Timestamp]) -> list[str
             desc = describe_scenario(nwe_read(tagged_t, tagged_w, s, weeks))
         cards.append(
             f'<div class="kpi-card" style="border-top:3px solid {scenario_color(s)}; text-align:left;">'
-            f'<div class="kpi-label" style="font-size:0.95rem;color:var(--text-primary);font-weight:600;">{title}</div>'
+            f'<div class="kpi-label" style="font-size:0.95rem;color:var(--text-primary) !important;font-weight:700;'
+            f'text-transform:none;letter-spacing:-0.01em;">{title}</div>'
             f'<div class="kpi-delta kpi-delta-flat">{desc or "&nbsp;"}</div></div>')
     return cards
 
@@ -466,8 +508,7 @@ def _render_week(info: dict, res: dict, wk: pd.Series, tagged: dict[str, pd.Data
     paths per country in an expander, the diagnostics in another."""
     ws = pd.Timestamp(wk["week_start"]).normalize()
     scen_ids = scenario_ids(res)
-    st.markdown(f"##### Scenarios for {week_title(wk)}")
-    st.caption(week_caption(info, res))
+    sec_header("scen", f"Scenarios · {week_title(wk)}", week_caption(info, res))
     kpi_row(scenario_cards(res, info, [ws]), max_cols=4)
     tagged_w = {m: apply_scenarios(t, res["assign"]) for m, t in tagged.items() if not t.empty}
     if not tagged_w or all(t.empty for t in tagged_w.values()):
@@ -529,31 +570,32 @@ def _render_scenarios(runs: pd.DataFrame):
                       f"another field).", "warning")
 
     keys = list(opts.keys())
-    c1, c2, c3, c4 = st.columns([1.6, 3.0, 1.0, 2.2])
-    with c1:
-        source = st.selectbox("Ensemble", keys, index=keys.index(SCENARIO_DEFAULT_SOURCE) if SCENARIO_DEFAULT_SOURCE in keys else 0,
-                              format_func=lambda k: opts[k]["label"], key="fs_source",
-                              help="Each trading week's members are clustered on their weekly-mean 500 hPa geopotential "
-                                   "height field of that week; temperature, wind and solar are then read per scenario on "
-                                   "the same member IDs.")
-    info = opts[source]
-    weeks_all = spatial_weeks(info)
-    usable = weeks_all[weeks_all["usable"]]
-    if usable.empty:
-        status_banner("The run does not cover enough days of any trading week to form weekly fields.", "warning")
-        return
-    wk_idx = usable.set_index("week_start")
-    with c2:
-        weeks_pick = st.multiselect(
-            "Trading weeks (Mon–Sun), each clustered on its own", list(usable["week_start"]), default_weeks(usable),
-            key=f"fs_weeks_{source}",
-            format_func=lambda w: f"{wk_idx.loc[w, 'week_label']}  {pd.Timestamp(w):%d %b}–{pd.Timestamp(w) + pd.Timedelta(days=6):%d %b}"
-                                  f"{'' if wk_idx.loc[w, 'full'] else '  (partial, %d d)' % wk_idx.loc[w, 'n_days']}")
-    with c3:
-        k = st.number_input("Scenarios", 2, SCENARIO_K_MAX, SCENARIO_K_DEFAULT, key="fs_k")
-    with c4:
-        out_areas = st.multiselect("Countries shown", list(AREAS.keys()),
-                                   [a for a in SCENARIO_OUTPUT_AREAS if a in AREAS], format_func=area_label, key="fs_out")
+    with st.container(key="tb_fs"):
+        c1, c2, c3, c4 = st.columns([1.6, 3.0, 1.0, 2.2])
+        with c1:
+            source = st.selectbox("Ensemble", keys, index=keys.index(SCENARIO_DEFAULT_SOURCE) if SCENARIO_DEFAULT_SOURCE in keys else 0,
+                                  format_func=lambda k: opts[k]["label"], key="fs_source",
+                                  help="Each trading week's members are clustered on their weekly-mean 500 hPa geopotential "
+                                       "height field of that week; temperature, wind and solar are then read per scenario on "
+                                       "the same member IDs.")
+        info = opts[source]
+        weeks_all = spatial_weeks(info)
+        usable = weeks_all[weeks_all["usable"]]
+        if usable.empty:
+            status_banner("The run does not cover enough days of any trading week to form weekly fields.", "warning")
+            return
+        wk_idx = usable.set_index("week_start")
+        with c2:
+            weeks_pick = st.multiselect(
+                "Trading weeks (Mon–Sun), each clustered on its own", list(usable["week_start"]), default_weeks(usable),
+                key=f"fs_weeks_{source}",
+                format_func=lambda w: f"{wk_idx.loc[w, 'week_label']}  {pd.Timestamp(w):%d %b}–{pd.Timestamp(w) + pd.Timedelta(days=6):%d %b}"
+                                      f"{'' if wk_idx.loc[w, 'full'] else '  (partial, %d d)' % wk_idx.loc[w, 'n_days']}")
+        with c3:
+            k = st.number_input("Scenarios", 2, SCENARIO_K_MAX, SCENARIO_K_DEFAULT, key="fs_k")
+        with c4:
+            out_areas = st.multiselect("Countries shown", list(AREAS.keys()),
+                                       [a for a in SCENARIO_OUTPUT_AREAS if a in AREAS], format_func=area_label, key="fs_out")
     if not weeks_pick:
         st.info("Pick at least one week.")
         return
@@ -568,8 +610,6 @@ def _render_scenarios(runs: pd.DataFrame):
             tagged_src[metric] = pm
 
     for i, (_, wk) in enumerate(weeks_sel.iterrows()):
-        if i:
-            st.divider()
         try:
             res = cluster_spatial(source, (str(pd.Timestamp(wk["week_start"]).date()),), int(k), str(info["reference_date"]))
         except Exception as e:
@@ -586,24 +626,25 @@ def _render_scenarios(runs: pd.DataFrame):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def render_forecast():
-    st.markdown("#### FORECAST")
-    st.caption("Volue ensemble forecasts by country · distribution spread vs normal · member scenarios from the "
-               "Z500 field · European weather regimes. "
-               "Source: Volue delta share, Meteomatics silver layer and API, via power_desk_refresh.py and the pipeline.")
-    # Weather Regimes reads its own table, so a failure of the Volue run list
-    # must not take it down with the other three tabs.
-    runs, runs_error = None, None
-    try:
-        runs = load_runs()
-    except Exception as e:
-        runs_error = f"Cannot read the run list ({e}). Has power_desk_refresh.py run?"
+    st.markdown(PAGE_CSS, unsafe_allow_html=True)
+    with st.container(key="pg_forecast"):
+        page_header("forecast", "Section 01", "Forecast",
+                    "Volue ensembles by country · spread against the normal spread · scenarios from the Z500 field · "
+                    "European weather regimes")
+        # Weather Regimes reads its own table, so a failure of the Volue run list
+        # must not take it down with the other three tabs.
+        runs, runs_error = None, None
+        try:
+            runs = load_runs()
+        except Exception as e:
+            runs_error = f"Cannot read the run list ({e}). Has power_desk_refresh.py run?"
 
-    tabs = st.tabs(["Values", "Uncertainty", "Scenarios", "Weather Regimes"])
-    for tab, render in zip(tabs[:3], (_render_values, _render_uncertainty, _render_scenarios)):
-        with tab:
-            if runs_error:
-                st.error(runs_error)
-            else:
-                render(runs)
-    with tabs[3]:
-        render_regimes()
+        tabs = st.tabs(["Values", "Uncertainty", "Scenarios", "Weather Regimes"])
+        for tab, render in zip(tabs[:3], (_render_values, _render_uncertainty, _render_scenarios)):
+            with tab:
+                if runs_error:
+                    st.error(runs_error)
+                else:
+                    render(runs)
+        with tabs[3]:
+            render_regimes()

@@ -49,7 +49,7 @@ def make_fan_chart(df: pd.DataFrame, area: str, unit: str, color: str = CAT_BLUE
                    title: str | None = None) -> go.Figure:
     """Ensemble fan for one area: P10-P90 and P25-P75 bands, median, mean, normal,
     earlier runs' means (faded), and other providers' means (their fixed hue)."""
-    fig = _base_fig(title or f"{_area_name(area)} — ensemble forecast", height=380)
+    fig = _base_fig(title or f"{_area_name(area)} — ensemble forecast", height=430)
     d = df.sort_values("day")
     if d.empty:
         return fig
@@ -78,10 +78,10 @@ def make_fan_chart(df: pd.DataFrame, area: str, unit: str, color: str = CAT_BLUE
                                  hovertemplate="Normal %{y:.1f}<extra></extra>"))
 
     if prev_runs is not None and not prev_runs.empty:
-        for rank, rdf in prev_runs.sort_values("run_rank").groupby("run_rank"):
+        for i, (rank, rdf) in enumerate(prev_runs.sort_values("run_rank").groupby("run_rank")):
             rdf = rdf.sort_values("day")
             fig.add_trace(go.Scatter(x=rdf["day"], y=rdf["ens_mean"], mode="lines",
-                                     name=str(rdf["run_label"].iloc[0]),
+                                     name="Earlier runs", legendgroup="prev", showlegend=i == 0,
                                      line=dict(color=INK_MUTED, width=1.2),
                                      opacity=RUN_OPACITY.get(int(rank), 0.15),
                                      hovertemplate=f"{rdf['run_label'].iloc[0]} %{{y:.1f}}<extra></extra>"))
@@ -95,6 +95,11 @@ def make_fan_chart(df: pd.DataFrame, area: str, unit: str, color: str = CAT_BLUE
                                      hovertemplate=f"{fam} %{{y:.1f}}<extra></extra>"))
 
     fig.update_yaxes(title_text=unit)
+    # the legend sits under the axis, never over the fan: compact, no box, room kept for it
+    fig.update_layout(margin=dict(l=50, r=12, t=46, b=118),
+                      legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="left", x=0,
+                                  bgcolor="rgba(0,0,0,0)", borderwidth=0, font=dict(size=10), itemwidth=30,
+                                  tracegroupgap=0))
     return fig
 
 
