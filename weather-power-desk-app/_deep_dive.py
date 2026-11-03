@@ -390,6 +390,14 @@ def _render_hydro(country: str, cfg: dict, hy: dict) -> None:
 # SCENARIOS — the Forecast section's defaults, read for this country
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _load_scenarios() -> tuple:
+    """The Forecast tab's default scenarios: (results per week, info, weeks_sel, weeks_all, error)."""
+    try:
+        return (*default_scenarios(SCENARIO_DEFAULT_SOURCE), None)
+    except Exception as e:
+        return None, None, None, None, f"Scenario inputs unavailable: {e}"
+
+
 def _render_scenarios(country: str, cfg: dict, scen: tuple) -> None:
     results, info, weeks_sel, weeks_all, err = scen
     if results and info is not None:
@@ -416,8 +424,6 @@ def _render_scenarios(country: str, cfg: dict, scen: tuple) -> None:
         pm = aggregate_members(pm, areas, country, "mean" if metric == "Temperature" else "sum") if not pm.empty else pm
         if not pm.empty:
             land[metric] = pm
-    if len(areas) > 1:
-        pass
     for i, (_, wk) in enumerate(weeks_sel.iterrows()):
         ws = pd.Timestamp(wk["week_start"]).normalize()
         res = results.get(ws)
