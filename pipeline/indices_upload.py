@@ -50,7 +50,15 @@ def index_name(column: str) -> str:
 def read_indices_csv(path: Path, start_year: int = 1979) -> pd.DataFrame:
     """The CSV as a long frame (index_name, date, value, source), no missing values."""
     wide = pd.read_csv(path, na_values=["M"])
-    wide["Date"] = pd.to_datetime(wide["Date"], format="%m/%d/%Y")
+    # the file has come both as ISO (2026-11-01) and US (11/01/2026) dates — accept either
+    raw = wide["Date"].astype(str).str.strip()
+    d = pd.to_datetime(raw, format="%Y-%m-%d", errors="coerce")
+    d = d.fillna(pd.to_datetime(raw, format="%m/%d/%Y", errors="coerce"))
+    if d.isna().any():
+        log.warning("%d rows of %s have an unreadable Date and are dropped (e.g. %r)",
+                    int(d.isna().sum()), path, raw[d.isna()].iloc[0])
+    wide["Date"] = d
+    wide = wide.dropna(subset=["Date"])
     wide = wide[wide["Date"].dt.year >= start_year].set_index("Date")
     wide.columns = [index_name(c) for c in wide.columns]
     wide = wide.apply(pd.to_numeric, errors="coerce")
