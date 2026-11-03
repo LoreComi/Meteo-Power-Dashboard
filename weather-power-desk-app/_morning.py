@@ -41,6 +41,11 @@ shows. Week 3 is still reached: it is handed to the agents whenever the
 reference run has enough days in it, which is normal for EC-Extended and rare
 for EC-ENS.
 
+Country deep dive (second tab, _deep_dive.py): one country on the same reference run,
+compare columns and Δ pairing — its variables as rows of one grid, the daily series run
+against run, the hydro state and two-week outlook, and the Forecast section's scenarios
+read for that country.
+
 Data (MORNING_SOURCES): by default {SBX_SCHEMA}.morning_daily_eq — Energy
 Quantified, every model EQ has and every cycle (00/06/12/18), with the EQ
 normal, refreshed every couple of hours by Power_dashboard/pipeline/run_morning.bat,
@@ -354,17 +359,18 @@ def _pill(v: float, block: dict) -> str:
 
 
 def _move(v: float, block: dict) -> str:
-    """The change vs the previous run as a small arrow after the anomaly pill — ▲/▼ coloured
+    """The change vs the previous run in brackets after the anomaly pill — ▲/▼ coloured
     on the same diverging pair as the shading (warm/less red, cold/more blue), = when flat."""
     if v is None or np.isnan(v):
-        return '<span class="mcg-move mc-muted">n/a</span>'
+        return '<span class="mcg-move mc-muted"><span class="mcg-br">(</span>n/a<span class="mcg-br">)</span></span>'
     r = round(v, 1)
     if r == 0:
-        return '<span class="mcg-move mcg-move-flat">= 0</span>'
+        return '<span class="mcg-move mcg-move-flat"><span class="mcg-br">(</span>= 0<span class="mcg-br">)</span></span>'
     color = DIV_POS if (r > 0) == block["warm_is_positive"] else DIV_NEG
     arrow = "▲" if r > 0 else "▼"
-    return (f'<span class="mcg-move" style="color:{color};">{arrow}'
-            f'<span class="mcg-move-v">{_signed(v, block["fmt"])}</span></span>')
+    return (f'<span class="mcg-move" style="color:{color};"><span class="mcg-br">(</span>'
+            f'<span class="mcg-move-a">{arrow}</span><span class="mcg-move-v">{_signed(v, block["fmt"])}</span>'
+            f'<span class="mcg-br">)</span></span>')
 
 
 def _tip(lines: list[str]) -> str:
@@ -598,7 +604,7 @@ def _grid_block_html_phone(cells: pd.DataFrame, name: str, block: dict, cols: li
 def _legend_html(delta_label: str, view_key: str | None) -> str:
     scales = " · ".join(f"±{b['heat_scale']:g} {b['unit']} {n.split(' ')[0].lower()}"
                         for n, b in MORNING_BLOCKS.items())
-    what = {"pair": f"pill = Δ norm (anomaly) · ▲/▼ = {delta_label} (change vs the model's earlier run, "
+    what = {"pair": f"pill = Δ norm (anomaly) · (▲/▼) = {delta_label} (change vs the model's earlier run, "
                     "same colours; = when flat) · abs. value beneath",
             "d_norm": "Δ norm", "d_run": f"{delta_label}", "d_ref": "Δ vs the reference run"}.get(view_key, "")
     return (f'<div class="mcg-legend"><span>{what}</span><span>colder · more wind, solar, precipitation'
@@ -970,47 +976,53 @@ def render_morning_call():
 
     cells = compute_grid(cols, win, blocks)
 
-    if phone:
-        # --- phone: the reference run's issue up front, one window at a time ---
-        st.markdown(f"<div class='mc-sub'><b>{ref.model}</b> {ref.init:%a %d %b} · {delta_label} vs {ref.prev_label}"
-                    f"{'' if ref.prev_exact else ' (nearest earlier run)'}</div>", unsafe_allow_html=True)
-        wkey = st.radio("Window", ["w1", "w2"], horizontal=True, key="mcp_win", label_visibility="collapsed",
-                        format_func=lambda k: _window_title(win, k))
-        st.markdown(_glance_html(cells, ref, win, delta_label, (wkey,), len(cols)), unsafe_allow_html=True)
-        if show_chart:
-            st.plotly_chart(make_morning_anomaly_chart(cells, blocks, [(wkey, _window_title(win, wkey))],
-                                                       col_labels, compact=True),
-                            use_container_width=True, config={"displayModeBar": False})
-        for name, block in blocks.items():
-            st.markdown(_grid_block_html_phone(cells[cells["block"] == name], name, block, cols, win, wkey, delta_label),
-                        unsafe_allow_html=True)
-        st.caption(f"{source} · shaded cells: red = warmer / less wind, solar, precipitation, blue = colder / more · "
-                   f"Δ norm = vs the {source} normal · {len(runs)} runs in the table, latest "
-                   f"{runs[0][1]:%a %d %b %H}z ({MORNING_MODEL_LABELS.get(runs[0][0], runs[0][0])}).")
-    else:
-        span1 = "weekend" if win["kind1"] == "weekend" else "weekly"
-        st.markdown(f'<div class="mc-sub">Windows follow the reference run\'s init day ({today:%A %d %b}): '
-                    f'<b>{win["t1"]}</b> {win["w1"][0]:%d %b} – {win["w1"][1]:%d %b} ({span1} average) · '
-                    f'<b>{win["t2"]}</b> {win["w2"][0]:%d %b} – {win["w2"][1]:%d %b} (weekly average) · '
-                    f'precipitation = sum of the first {MORNING_PRECIP_SUM_DAYS} forecast days · '
-                    f'{delta_label} = change vs each model\'s own earlier run · superscript = days of the window '
-                    f'the run covers, when not all · hover a cell or a chip for every number.</div>', unsafe_allow_html=True)
-        st.markdown(_glance_html(cells, ref, win, delta_label, ("w1", "w2"), len(cols)), unsafe_allow_html=True)
-        if show_chart:
-            st.plotly_chart(make_morning_anomaly_chart(cells, blocks,
-                                                       [("w1", _window_title(win, "w1")), ("w2", _window_title(win, "w2"))],
-                                                       col_labels),
-                            use_container_width=True, config={"displayModeBar": False})
-        for name, block in blocks.items():
-            st.markdown(_grid_block_html(cells[cells["block"] == name], name, block, cols, win, view_key, delta_label),
-                        unsafe_allow_html=True)
-        st.markdown(_grid_footer(cols, delta_label, view_key), unsafe_allow_html=True)
-    st.download_button("Download grid (CSV)", _grid_csv(cells, delta_label),
-                       f"morning_call_{source.lower()}_{today:%Y%m%d}.csv", "text/csv", key="mcg_dl",
-                       help="Every cell of every column: value, Δ run, Δ norm, Δ vs reference, spread.")
+    # --- the report, and one country at a time on the same runs ---
+    from _deep_dive import render_country_deep_dive     # local: _deep_dive imports this module's grid helpers
+    tab_report, tab_dd = st.tabs(["Morning Report", "Country deep dive"])
+    with tab_report:
+        if phone:
+            # --- phone: the reference run's issue up front, one window at a time ---
+            st.markdown(f"<div class='mc-sub'><b>{ref.model}</b> {ref.init:%a %d %b} · {delta_label} vs {ref.prev_label}"
+                        f"{'' if ref.prev_exact else ' (nearest earlier run)'}</div>", unsafe_allow_html=True)
+            wkey = st.radio("Window", ["w1", "w2"], horizontal=True, key="mcp_win", label_visibility="collapsed",
+                            format_func=lambda k: _window_title(win, k))
+            st.markdown(_glance_html(cells, ref, win, delta_label, (wkey,), len(cols)), unsafe_allow_html=True)
+            if show_chart:
+                st.plotly_chart(make_morning_anomaly_chart(cells, blocks, [(wkey, _window_title(win, wkey))],
+                                                           col_labels, compact=True),
+                                use_container_width=True, config={"displayModeBar": False})
+            for name, block in blocks.items():
+                st.markdown(_grid_block_html_phone(cells[cells["block"] == name], name, block, cols, win, wkey, delta_label),
+                            unsafe_allow_html=True)
+            st.caption(f"{source} · shaded cells: red = warmer / less wind, solar, precipitation, blue = colder / more · "
+                       f"Δ norm = vs the {source} normal · {len(runs)} runs in the table, latest "
+                       f"{runs[0][1]:%a %d %b %H}z ({MORNING_MODEL_LABELS.get(runs[0][0], runs[0][0])}).")
+        else:
+            span1 = "weekend" if win["kind1"] == "weekend" else "weekly"
+            st.markdown(f'<div class="mc-sub">Windows follow the reference run\'s init day ({today:%A %d %b}): '
+                        f'<b>{win["t1"]}</b> {win["w1"][0]:%d %b} – {win["w1"][1]:%d %b} ({span1} average) · '
+                        f'<b>{win["t2"]}</b> {win["w2"][0]:%d %b} – {win["w2"][1]:%d %b} (weekly average) · '
+                        f'precipitation = sum of the first {MORNING_PRECIP_SUM_DAYS} forecast days · '
+                        f'{delta_label} = change vs each model\'s own earlier run · superscript = days of the window '
+                        f'the run covers, when not all · hover a cell or a chip for every number.</div>', unsafe_allow_html=True)
+            st.markdown(_glance_html(cells, ref, win, delta_label, ("w1", "w2"), len(cols)), unsafe_allow_html=True)
+            if show_chart:
+                st.plotly_chart(make_morning_anomaly_chart(cells, blocks,
+                                                           [("w1", _window_title(win, "w1")), ("w2", _window_title(win, "w2"))],
+                                                           col_labels),
+                                use_container_width=True, config={"displayModeBar": False})
+            for name, block in blocks.items():
+                st.markdown(_grid_block_html(cells[cells["block"] == name], name, block, cols, win, view_key, delta_label),
+                            unsafe_allow_html=True)
+            st.markdown(_grid_footer(cols, delta_label, view_key), unsafe_allow_html=True)
+        st.download_button("Download grid (CSV)", _grid_csv(cells, delta_label),
+                           f"morning_call_{source.lower()}_{today:%Y%m%d}.csv", "text/csv", key="mcg_dl",
+                           help="Every cell of every column: value, Δ run, Δ norm, Δ vs reference, spread.")
 
-    # --- commentary on the reference run (its latest issue by default) ---
-    st.divider()
-    ctx = build_brief_context(ref.rows, ref.prev_rows, win, ref.model, ref.init, ref.prev_init, delta_label, today, blocks)
-    gas_runs = tuple((c.pattern, c.init.isoformat()) for c in cols)
-    _render_ai_brief(ctx, today, phone, source, gas_runs)
+        # --- commentary on the reference run (its latest issue by default) ---
+        st.divider()
+        ctx = build_brief_context(ref.rows, ref.prev_rows, win, ref.model, ref.init, ref.prev_init, delta_label, today, blocks)
+        gas_runs = tuple((c.pattern, c.init.isoformat()) for c in cols)
+        _render_ai_brief(ctx, today, phone, source, gas_runs)
+    with tab_dd:
+        render_country_deep_dive(cols, win, delta_label, view_key, blocks, source)

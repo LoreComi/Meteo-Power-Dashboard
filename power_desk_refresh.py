@@ -25,6 +25,12 @@ Tables written (all read by weather-power-desk-app/_data.py):
   fcst_members          latest EC-ENS run, per member daily values (Volue) and
                         Meteomatics EC-ENS / AIFS-ENS members as population-
                         weighted country means
+  fcst_member_spatial   the AIFS-ENS 500 hPa geopotential height members on the
+                        scenario grid (2°, 30–74 N / 30 W–40 E), departure from the
+                        ensemble mean — the EC-AI field the Scenarios tab clusters.
+                        (The EC-ENS field, fcst_member_spatial_ecens, and the AIFS-ENS
+                        country members, fcst_members_eq, are written by pipeline/:
+                        the silver layer has no ecmwf-ens Z500 members)
   hist_daily            actual + normal + anomaly per metric/area/day, with a
                         `source` column: Volue ('AF' / 'N') for every metric since
                         2013, and Meteomatics for temperature — the gold-layer ERA5
@@ -490,51 +496,65 @@ count("fcst_members")
 
 # COMMAND ----------
 
-# DBTITLE 1,4b. Gridded member spatial anomaly (for spatial k-means clustering)
+# DBTITLE 1,4b. Gridded AIFS-ENS Z500 members (the EC-AI scenario field)
 # ---------------------------------------------------------------------------
-# Gridded per-member temperature anomaly for spatial k-means clustering.
+# The Forecast → Scenarios tab clusters the members of an ensemble on their
+# weekly-mean 500 hPa geopotential height field — the spatial pattern that
+# sets a week's weather — and reads temperature, wind and solar per scenario
+# off the member IDs afterwards. This cell writes that field for the AI
+# ensemble, ecmwf-aifs-ens, whose per-member Z500 the silver layer carries
+# (cell 7c projects the same rows onto the weather regimes). The standard
+# ecmwf-ens has no Z500 members in Databricks: the local pipeline fetches it
+# from the Meteomatics API into fcst_member_spatial_ecens, in this very
+# layout (pipeline/mm_z500_members.py). The app reads both through
+# SCENARIO_SPATIAL_SOURCES in _config.py; the grid below MUST stay equal to
+# SPATIAL_GRID_RES / SPATIAL_BBOX there and to Z500_GRID_RES / Z500_LAT /
+# Z500_LON in the pipeline, or the two ensembles land on different points.
 #
-# TODO(lorenzo): Switch to geopotential_height_forecast (Z500) when ecmwf-ens
-# gets geopotential members. Currently only ecmwf-aifs-ens has Z500; the
-# standard ecmwf-ens (whose 50 perturbations match Volue member IDs) does not.
-# Using temperature spatial anomaly as a proxy until then.
+# `anomaly` is the departure from the ensemble mean (a constant per grid
+# point and day, so it cannot change the clusters — it makes the scenario
+# centroid maps readable). The 0.5° silver cells are averaged into 2° bins.
 # ---------------------------------------------------------------------------
-SPATIAL_MODEL = "ecmwf-ens"
-SPATIAL_CURVE = "t_mean_2m_24h_c_ecmwf_ens_p1d"
-BB_LAT = (35, 72)
-BB_LON = (-12, 35)
-GRID_RES = 1.0  # coarsen from native 0.5° to 1° for manageable feature space
+SPATIAL_MODEL = "ecmwf-aifs-ens"
+SPATIAL_CURVE = "geopotential_height_500hpa_m_ecmwf_aifs_ens_p1d"
+SPATIAL_METRIC = "Z500"
+BB_LAT = (30, 74)          # _config.SPATIAL_BBOX
+BB_LON = (-30, 40)
+GRID_RES = 2.0             # _config.SPATIAL_GRID_RES — Z500 is smooth, 2° resolves every ridge and trough
 
-spark.sql(f"""
-CREATE OR REPLACE TABLE {SBX}.fcst_member_spatial AS
+
+def spatial_member_sql(src_table: str, model: str, curve: str, metric: str, bb_lat, bb_lon, res: float) -> str:
+    """The gridded member field of the latest load of one curve, binned to `res`°."""
+    snap_lat = f"ROUND(CAST(latitude AS DOUBLE) / {res}) * {res}"
+    snap_lon = f"ROUND(CAST(longitude AS DOUBLE) / {res}) * {res}"
+    return f"""
 WITH latest AS (
   SELECT MAX(created_at) AS max_ca
-  FROM {MM}.temperature_forecast
-  WHERE model = '{SPATIAL_MODEL}' AND curve_name = '{SPATIAL_CURVE}'
+  FROM {src_table}
+  WHERE model = '{model}' AND curve_name = '{curve}'
+    AND curve_member IS NOT NULL AND CAST(curve_member AS STRING) != ''
 ),
 raw AS (
-  SELECT curve_member AS member,
+  SELECT CAST(curve_member AS STRING) AS member,
          DATE(delivery_start) AS day,
-         ROUND(CAST(latitude AS DOUBLE) / {GRID_RES}) * {GRID_RES} AS latitude,
-         ROUND(CAST(longitude AS DOUBLE) / {GRID_RES}) * {GRID_RES} AS longitude,
+         {snap_lat} AS latitude,
+         {snap_lon} AS longitude,
          AVG(value) AS value
-  FROM {MM}.temperature_forecast, latest
-  WHERE model = '{SPATIAL_MODEL}' AND curve_name = '{SPATIAL_CURVE}'
+  FROM {src_table}, latest
+  WHERE model = '{model}' AND curve_name = '{curve}'
     AND created_at = latest.max_ca
-    AND latitude BETWEEN {BB_LAT[0]} AND {BB_LAT[1]}
-    AND longitude BETWEEN {BB_LON[0]} AND {BB_LON[1]}
-    AND curve_member IS NOT NULL AND curve_member != ''
-  GROUP BY curve_member, DATE(delivery_start),
-           ROUND(CAST(latitude AS DOUBLE) / {GRID_RES}) * {GRID_RES},
-           ROUND(CAST(longitude AS DOUBLE) / {GRID_RES}) * {GRID_RES}
+    AND latitude BETWEEN {bb_lat[0]} AND {bb_lat[1]}
+    AND longitude BETWEEN {bb_lon[0]} AND {bb_lon[1]}
+    AND curve_member IS NOT NULL AND CAST(curve_member AS STRING) != ''
+  GROUP BY CAST(curve_member AS STRING), DATE(delivery_start), {snap_lat}, {snap_lon}
 ),
 ens_mean AS (
   SELECT day, latitude, longitude, AVG(value) AS ens_mean
   FROM raw GROUP BY day, latitude, longitude
 )
-SELECT 'Meteomatics' AS provider, '{SPATIAL_MODEL}' AS model,
+SELECT 'Meteomatics' AS provider, '{model}' AS model,
        (SELECT max_ca FROM latest) AS reference_date,
-       'Temperature' AS metric,
+       '{metric}' AS metric,
        r.member, r.day,
        DATEDIFF(r.day, DATE((SELECT max_ca FROM latest))) AS lead_day,
        r.latitude, r.longitude, r.value,
@@ -542,8 +562,18 @@ SELECT 'Meteomatics' AS provider, '{SPATIAL_MODEL}' AS model,
        current_timestamp() AS snapshot_ts
 FROM raw r
 JOIN ens_mean e ON e.day = r.day AND e.latitude = r.latitude AND e.longitude = r.longitude
-""")
+"""
+
+
+spark.sql(f"CREATE OR REPLACE TABLE {SBX}.fcst_member_spatial AS "
+          + spatial_member_sql(f"{MM}.geopotential_height_forecast", SPATIAL_MODEL, SPATIAL_CURVE, SPATIAL_METRIC,
+                               BB_LAT, BB_LON, GRID_RES))
 count("fcst_member_spatial")
+_sp = spark.sql(f"""SELECT COUNT(DISTINCT member) AS members, COUNT(DISTINCT day) AS days,
+                           COUNT(DISTINCT latitude, longitude) AS points, MAX(reference_date) AS run
+                    FROM {SBX}.fcst_member_spatial""").first()
+print(f"fcst_member_spatial: {SPATIAL_MODEL} Z500 — {_sp['members']} members × {_sp['days']} days × "
+      f"{_sp['points']} grid points ({GRID_RES:g}°), load {_sp['run']}")
 
 # COMMAND ----------
 

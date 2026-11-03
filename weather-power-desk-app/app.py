@@ -2,7 +2,8 @@
 
 Landing page with the Morning Call tile plus a grid of section tiles; the
 sidebar mirrors them and adds a Home button. Sections:
-  0. Morning Call           — the Morning Report table, live, with two agent families commenting
+  0. Morning Call           — the Morning Report table, live, with two agent families commenting,
+                              and a country deep dive on the same runs (forecast · hydro · scenarios)
   1. Forecast               — Volue ensemble values, spread vs normal spread, member scenarios
   2. Historical & Analysis  — monthly / weekly history by country, anomalies, index analogues
   3. Hydro Monitoring       — Hydro Report quantify_* figures and stats, live

@@ -416,17 +416,21 @@ sup.mcg-n {{
     font-family: 'Inter', sans-serif;
 }}
 /* "Change · anomaly" cells: the anomaly (Δ norm) as a shaded pill, the move since the
-   previous run as a small coloured arrow after it, the absolute value small beneath. */
-.mcg-pair {{ display: flex; gap: 4px; justify-content: center; align-items: center; }}
-.mcg-move {{ font-size: 0.66rem; font-weight: 600; line-height: 1.2; white-space: nowrap; }}
+   previous run in brackets after it — arrow and number as large as the pill's — and the
+   absolute value beneath in dark ink. */
+.mcg-pair {{ display: flex; gap: 6px; justify-content: center; align-items: center; }}
+.mcg-move {{ font-size: 0.82rem; font-weight: 700; line-height: 1.2; white-space: nowrap; }}
+.mcg-move-a {{ font-size: 0.95rem; margin-right: 1px; }}
 .mcg-move-v {{ margin-left: 1px; }}
+.mcg-move-a, .mcg-move-v {{ color: inherit; }}          /* the global `span` colour would otherwise win over the cell's red / blue */
+.mcg-br {{ color: var(--text-secondary); font-weight: 500; }}
 .mcg-move-flat {{ color: var(--text-muted) !important; font-weight: 500; }}
 .mcg-pill {{
     display: inline-block; min-width: 46px; padding: 2px 5px; border-radius: 5px;
     font-weight: 600; font-size: 0.8rem; line-height: 1.25; color: var(--text-primary);
 }}
 .mcg-pill-na {{ color: var(--text-muted) !important; font-weight: 500; }}
-.mcg-abs {{ font-size: 0.66rem; color: var(--text-muted); margin-top: 2px; line-height: 1.1; }}
+.mcg-abs {{ font-size: 0.74rem; color: var(--text-primary); font-weight: 600; margin-top: 3px; line-height: 1.1; }}
 
 /* At a glance — the reference run's biggest moves and anomalies as chips, ranked
    across blocks on each block's own scale, shaded on the same diverging pair. */

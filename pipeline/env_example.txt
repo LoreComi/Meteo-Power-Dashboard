@@ -38,6 +38,23 @@ RIVER_FORECAST_RUNS=1
 # RESERVOIR_ANALOGUES=5
 # RESERVOIR_RETENTION_DAYS=60
 
+# ── Scenario inputs (run_scenarios.bat: --only z500 --only eq-members) ──
+# Meteomatics is reached through the DSL gateway (mm_z500_members.py): the OAuth client secret must be in the
+# MDS_SECRET environment variable of the account that runs the task (as CLIMATOLOGIES/update_climp.py needs it).
+# It can also be put here as MDS_SECRET=… since this file is loaded into the environment.
+# DSL_SECRET_ENV=MDS_SECRET   DSL_APP_ID=5a838d41-4163-42ef-8479-48fe7db6d547   DSL_SSL_VERIFY=false
+# Z500_MEMBERS_PER_CALL=10               members per gateway call
+# Z500_MODEL=ecmwf-ens                   Meteomatics model; Z500_MEMBERS=50 perturbed members m1..m50
+# Z500_DAYS=15                           forecast days after the init day
+# Z500_TIME_STEP=PT6H                    samples per day averaged into the daily mean (P1D = 12 UTC only)
+# Z500_GRID_RES=2.0  Z500_LAT=30,74  Z500_LON=-30,40     must equal SPATIAL_GRID_RES / SPATIAL_BBOX in the app's _config.py
+# Z500_MIN_AGE_HOURS=7                   the cycle fetched is the latest 00z/12z at least this old
+# Z500_RETENTION_RUNS=2
+# EQ_MEMBERS_MODELS=aifs-ens             EQ tags whose scenarios (members) are loaded (eq_members.py); add ec-ens if wanted
+# EQ_MEMBERS_AREAS=DE,FR,IT,ES,UK,NL,BE,PL,CZ,HU,NO,SE,FI,DK,PT,SI,SK,HR,EE,LV,LT
+# EQ_MEMBERS_RETENTION_DAYS=7
+# INSERT_CHUNK_ROWS=6000                 rows per INSERT statement for the whole-run snapshot tables
+
 # ── SWE model ──
 SWE_ROOT=P:\QFA\TonyWeather\Hydro_Report\SWE_Exolabs
 SWE_REFRESH_DAYS=30

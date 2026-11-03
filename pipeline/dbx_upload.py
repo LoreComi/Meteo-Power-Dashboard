@@ -103,6 +103,15 @@ def merge_statement(table: str, df: pd.DataFrame, keys: Sequence[str], dialect: 
     return stmt
 
 
+def insert_statement(table: str, df: pd.DataFrame, dialect: str = "spark",
+                     types: dict[str, str] | None = None) -> str:
+    """INSERT INTO table (cols) SELECT * FROM (inline VALUES) — for snapshot tables whose
+    rows are never revised (a whole model run at once); several times faster than a
+    MERGE per chunk because nothing is matched. NULLs are typed as in merge_statement."""
+    cols = ", ".join(df.columns)
+    return f"INSERT INTO {table} ({cols})\n{_values_source(df, dialect, types)}"
+
+
 def create_table_statement(table: str, columns: Sequence[tuple[str, str]], comment: str = "",
                            dialect: str = "spark") -> str:
     cols = ",\n  ".join(f"{n} {t}" for n, t in columns)
@@ -131,15 +140,18 @@ def prepare_frame(df: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
 
 class DatabricksWriter:
     def __init__(self, host: str, http_path: str, token: str = "", auth_type: str = "",
-                 tls_no_verify: bool = False, chunk_rows: int = 2000, dialect: str = "spark"):
+                 tls_no_verify: bool = False, chunk_rows: int = 2000, dialect: str = "spark",
+                 insert_chunk_rows: int = 6000):
         self.host, self.http_path, self.token, self.auth_type = host, http_path, token, auth_type
         self.tls_no_verify, self.chunk_rows, self.dialect = tls_no_verify, chunk_rows, dialect
+        self.insert_chunk_rows = insert_chunk_rows
         self._conn = None
         self._types: dict[str, dict[str, str]] = {}
 
     @classmethod
     def from_settings(cls, s) -> "DatabricksWriter":
-        return cls(s.dbx_host, s.dbx_http_path, s.dbx_token, s.dbx_auth_type, s.dbx_tls_no_verify, s.merge_chunk_rows)
+        return cls(s.dbx_host, s.dbx_http_path, s.dbx_token, s.dbx_auth_type, s.dbx_tls_no_verify, s.merge_chunk_rows,
+                   insert_chunk_rows=getattr(s, "insert_chunk_rows", 6000))
 
     # -- connection ----------------------------------------------------------
     def connect(self):
@@ -203,6 +215,21 @@ class DatabricksWriter:
             log.info("%s: chunk %d — %d rows merged (%d so far)", table, i, len(part), n)
         return n
 
+    def insert(self, table: str, df: pd.DataFrame) -> int:
+        """Append the frame in large chunks (no matching) — for a whole run written at
+        once; the caller prunes the older runs afterwards. Returns the rows sent."""
+        if df is None or df.empty:
+            log.info("%s: nothing to insert", table)
+            return 0
+        clean = df.reset_index(drop=True).astype(object).where(pd.notna(df.reset_index(drop=True)), None)
+        n = 0
+        for i, part in enumerate(_chunks(clean, self.insert_chunk_rows), 1):
+            self.execute(insert_statement(table, part, self.dialect, self._types.get(table)))
+            n += len(part)
+            if i % 10 == 0 or n == len(clean):
+                log.info("%s: %d rows inserted (%d chunks)", table, n, i)
+        return n
+
     def prune(self, table: str, where: str) -> None:
         """DELETE rows matching `where` (Delta supports it) — keeps fast-growing tables bounded."""
         try:
@@ -251,6 +278,19 @@ class DryRunWriter:
         self.statements.append(merge_statement(table, first, keys, "spark", self._types.get(table)))
         (self.out_dir / f"{table.split('.')[-1]}_merge_example.sql").write_text(self.statements[-1], encoding="utf-8")
         log.info("[dry-run] %s: %d rows -> %s (first MERGE %d chars)", table, len(clean), path.name, len(self.statements[-1]))
+        return len(clean)
+
+    def insert(self, table, df) -> int:
+        if df is None or df.empty:
+            log.info("[dry-run] %s: nothing to insert", table)
+            return 0
+        clean = df.reset_index(drop=True).astype(object).where(pd.notna(df.reset_index(drop=True)), None)
+        path = self.out_dir / f"{table.split('.')[-1]}_{dt.datetime.now():%Y%m%d_%H%M%S}.csv"
+        clean.to_csv(path, index=False, encoding="utf-8")
+        first = next(_chunks(clean, min(self.chunk_rows, 200)))
+        self.statements.append(insert_statement(table, first, "spark", self._types.get(table)))
+        (self.out_dir / f"{table.split('.')[-1]}_insert_example.sql").write_text(self.statements[-1], encoding="utf-8")
+        log.info("[dry-run] %s: %d rows -> %s (first INSERT %d chars)", table, len(clean), path.name, len(self.statements[-1]))
         return len(clean)
 
     def table_max(self, *a, **k):

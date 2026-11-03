@@ -1,35 +1,39 @@
-"""Scenario engine — cluster ensemble members into weather scenarios.
+"""Scenario engine — cluster ensemble members into weather scenarios on their Z500 field.
 
 Method (trading-week version)
 -----------------------------
-1. Feature matrix: one row per ensemble member, one column per (country × ISO
-   week) WEEKLY-MEAN temperature anomaly. Weeks are real Monday–Sunday weeks —
-   the products the desk trades — not rolling lead-day windows. A week enters
-   the feature space only if the forecast covers >= SCENARIO_MIN_WEEK_DAYS of
-   it. Columns are standardised so every country/week weighs the same.
+1. Feature matrix: one row per ensemble member, one column per (trading week ×
+   grid point) WEEKLY-MEAN 500 hPa geopotential height departure from the
+   ensemble mean, on the 2° grid over Europe and the near Atlantic of
+   SPATIAL_BBOX (the tables fcst_member_spatial_ecens — EC-ENS, from the
+   Meteomatics API via the pipeline — and fcst_member_spatial — AIFS-ENS, from
+   the silver layer via the notebook). Weeks are real Monday–Sunday weeks — the
+   products the desk trades — not rolling lead-day windows. The ~830 points ×
+   weeks are reduced with PCA to SPATIAL_N_PCA scores; the scores are NOT
+   standardised, because their variance ordering is the signal.
 2. K-means (n_init=20) with a FIXED k — 2 scenarios by default, the way the
    Morning Report frames "the scenario" and "the alternative scenario". No
    silhouette-driven k selection. Clusters are relabelled by size, largest
    first, so Scenario 1 is always the consensus one; clusters smaller than
    SCENARIO_MIN_MEMBERS fold into "Other".
-3. The member → scenario map is then applied to any provider's members with
-   the same member IDs (Volue wind / solar / temperature, Meteologica) to read
-   each scenario's power-relevant weekly values. All ECMWF-ENS-derived
-   products share the same 50 perturbed members, so member 07 is the same
-   atmosphere in each.
+3. Each scenario is NAMED from its centroid map (its members' mean Z500
+   departure from the ensemble mean, averaged over the clustered weeks): where
+   its ridge and its trough sit (NAMED_REGIONS) and, when it resembles one of
+   the 7 regimes of the Weather Regimes tab (cos-lat weighted pattern
+   correlation on the common grid points ≥ SCENARIO_NAME_REGIME_MIN_R), that
+   regime — "Ridge over Scandinavia, trough over Iberia ≈ Scandinavian Blocking".
+4. The member → scenario map is then applied to the LAND variables of the same
+   member IDs — temperature, wind, solar per country (the Volue EC-ENS members
+   for EC-ENS, the AIFS-ENS member rows the pipeline writes for EC-AI) — to
+   read each scenario's weekly values. Everything downstream of
+   cluster_members() is provider-agnostic.
 
-Spatial variant: spatial_member_matrix() builds the same member × feature
-matrix from the gridded Meteomatics member anomaly (fcst_member_spatial),
-weekly-averaged per grid point, reduced with PCA. The proper input is 500 hPa
-geopotential members (regime clustering); only ecmwf-aifs-ens carries Z500
-members today, so temperature is the proxy (SCENARIO_USE_GEOPOTENTIAL flag).
-Everything downstream of cluster_members() is provider-agnostic.
-
-Member ID normalisation: 'M07' / '07' / 7 / 'ens07' / 'pf07' -> 7.
+Member ID normalisation: 'M07' / '07' / 7 / 'ens07' / 'pf07' / 'm7' / 'e07' -> 7.
 """
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -37,15 +41,47 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
-from _config import SCENARIO_K_DEFAULT, SCENARIO_MIN_MEMBERS, SCENARIO_MIN_WEEK_DAYS, SPATIAL_N_PCA
+from _config import (
+    SCENARIO_K_DEFAULT, SCENARIO_MIN_MEMBERS, SCENARIO_MIN_WEEK_DAYS, SPATIAL_N_PCA,
+    SCENARIO_NAME_MIN_AMPLITUDE_M, SCENARIO_NAME_REGIME_MIN_R, WR_REGIMES, WR_REGIME_LONG,
+)
 
 OTHER_LABEL = 0   # scenario id reserved for the "Other" fold
+WR_PATTERNS_FILE = Path(__file__).resolve().parent / "wr_patterns.npz"
+
+# Where a ridge or a trough is said to sit: (name, lat_min, lat_max, lon_min, lon_max),
+# scanned in this order so the specific regions come before the broad ones.
+NAMED_REGIONS: list[tuple[str, float, float, float, float]] = [
+    ("Iceland",                       62, 68, -26, -12),
+    ("the Norwegian Sea",             62, 74, -12, 4),
+    ("the Barents Sea",               68, 74, 15, 40),
+    ("the British Isles",             49.5, 61, -11, 2),
+    ("the North Sea",                 53, 62, 2, 8),
+    ("Scandinavia",                   58, 72, 4, 32),
+    ("the Baltic",                    53, 58, 8, 30),
+    ("the Alps",                      45, 48, 6, 16),
+    ("France",                        43, 51, -5, 8),
+    ("Iberia",                        36, 44, -10, 4),
+    ("Italy",                         37, 45, 7, 19),
+    ("Central Europe",                47, 55, 5, 19),
+    ("the Balkans",                   39, 47, 18, 29),
+    ("the Black Sea",                 40, 47, 27, 42),
+    ("Turkey",                        36, 42, 26, 42),
+    ("the eastern Mediterranean",     30, 40, 22, 36),
+    ("the central Mediterranean",     32, 40, 8, 22),
+    ("the western Mediterranean",     35, 43, -2, 10),
+    ("Eastern Europe",                45, 60, 19, 40),
+    ("North Africa",                  30, 36, -10, 30),
+    ("the Atlantic west of Iberia",   30, 45, -30, -10),
+    ("the Atlantic west of Ireland",  45, 62, -30, -11),
+    ("the North Atlantic",            30, 74, -30, 40),
+]
 
 
 # ─── member ids ─────────────────────────────────────────────────────────────────
 
 def normalise_member(m) -> int | None:
-    """'M07' / 'ens07' / '7' / 7.0 -> 7. Control ('Ctrl', 'M00', 0) -> 0. None if unparseable."""
+    """'M07' / 'ens07' / 'm7' / 'e07' / '7' / 7.0 -> 7. Control ('Ctrl', 'M00', 0) -> 0. None if unparseable."""
     if m is None:
         return None
     if isinstance(m, (int, float, np.integer, np.floating)):
@@ -82,52 +118,46 @@ def add_week(df: pd.DataFrame, day_col: str = "day") -> pd.DataFrame:
     return out
 
 
-def available_weeks(members: pd.DataFrame, min_days: int = SCENARIO_MIN_WEEK_DAYS) -> pd.DataFrame:
-    """Weeks the forecast covers, with how many days of each are available.
+def available_weeks(days: pd.DataFrame, min_days: int = SCENARIO_MIN_WEEK_DAYS) -> pd.DataFrame:
+    """Weeks a forecast covers, with how many days of each are available. `days` is any
+    frame with a `day` column (member rows, or the day range of a spatial table).
 
     Returns DataFrame(week_start, week_label, n_days, first_day, last_day, full)
     sorted by week_start; `usable` = n_days >= min_days.
     """
-    if members.empty:
+    if days.empty:
         return pd.DataFrame(columns=["week_start", "week_label", "n_days", "first_day", "last_day", "full", "usable"])
-    d = add_week(members[["day"]].drop_duplicates())
+    d = add_week(days[["day"]].drop_duplicates())
     g = d.groupby(["week_start", "week_label"])["day"].agg(n_days="nunique", first_day="min", last_day="max").reset_index()
     g["full"] = g["n_days"] >= 7
     g["usable"] = g["n_days"] >= min_days
     return g.sort_values("week_start").reset_index(drop=True)
 
 
-def weekly_member_matrix(members: pd.DataFrame, areas: list[str], weeks: list[pd.Timestamp],
-                         value_col: str = "anomaly", min_days: int = SCENARIO_MIN_WEEK_DAYS) -> pd.DataFrame:
-    """Pivot members -> one row per member, one column per (area, week_start) weekly mean.
-
-    Uses `anomaly` when present so the clustering is about departure from
-    normal, not the seasonal cycle. Members missing any feature are dropped.
-    """
-    if members.empty or not weeks:
-        return pd.DataFrame()
-    df = add_week(_with_ids(members))
-    weeks = [pd.Timestamp(w).normalize() for w in weeks]
-    df = df[df["area"].isin(areas) & df["week_start"].isin(weeks)]
-    col = value_col if value_col in df.columns and df[value_col].notna().any() else "value"
-    g = df.groupby(["member_id", "area", "week_start"])[col].agg(["mean", "count"]).reset_index()
-    g = g[g["count"] >= min_days]
-    wide = g.pivot_table(index="member_id", columns=["area", "week_start"], values="mean")
-    wide = wide.dropna(axis=1, how="all").dropna(axis=0, how="any")
-    wide.index = wide.index.astype(int)
-    return wide
+def default_weeks(usable: pd.DataFrame, n: int = 2, today: pd.Timestamp | None = None) -> list[pd.Timestamp]:
+    """The next n usable trading weeks after the current one (the current week itself
+    when nothing lies beyond it)."""
+    today = (today or pd.Timestamp.today()).normalize()
+    this_week = today - pd.Timedelta(days=today.weekday())
+    nxt = [w for w in usable["week_start"] if w > this_week][:n]
+    return nxt or list(usable["week_start"][:n])
 
 
-def spatial_member_matrix(grid_by_week: dict, n_components: int = SPATIAL_N_PCA) -> pd.DataFrame:
-    """PCA-reduced member × feature matrix from gridded member anomalies, per trading week.
+# ─── the spatial feature matrix ─────────────────────────────────────────────────
+
+def spatial_member_matrix(grid_by_week: dict, n_components: int = SPATIAL_N_PCA) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """PCA-reduced member × feature matrix from the gridded member fields, per trading week.
 
     `grid_by_week` maps week_start -> DataFrame(member, latitude, longitude, anomaly)
     already averaged over that week's days (load_member_spatial_days). Each week's
-    grid becomes a block of columns; the blocks are concatenated so a member's
-    row is its weekly anomaly map for every clustered week, then PCA keeps the
-    dominant spatial modes (~1 800 grid points at 1° would otherwise swamp
-    k-means). Returns DataFrame(member_id × PC1..PCn) with attrs
-    explained_variance_pct and n_grid_points.
+    grid is a block of columns; the blocks are concatenated so a member's row is its
+    weekly field for every clustered week, then PCA keeps the dominant spatial
+    modes (~830 grid points × weeks would otherwise swamp k-means).
+
+    Returns (scores, grid): scores = DataFrame(member_id × PC1..PCn) with attrs
+    explained_variance_pct / n_grid_points; grid = the un-reduced member × (week_start,
+    latitude, longitude) matrix the centroid maps are drawn from. Both empty when
+    fewer than 4 complete members exist.
     """
     from sklearn.decomposition import PCA
 
@@ -138,39 +168,41 @@ def spatial_member_matrix(grid_by_week: dict, n_components: int = SPATIAL_N_PCA)
         d = g.copy()
         d["member_id"] = d["member"].map(normalise_member)
         d = d.dropna(subset=["member_id"])
-        d["gp"] = pd.Timestamp(ws).strftime("%Y%m%d") + "_" + d["latitude"].astype(str) + "_" + d["longitude"].astype(str)
-        wide = d.pivot_table(index="member_id", columns="gp", values="anomaly")
+        d["member_id"] = d["member_id"].astype(int)
+        d["week_start"] = pd.Timestamp(ws).normalize()
+        wide = d.pivot_table(index="member_id", columns=["week_start", "latitude", "longitude"], values="anomaly")
         blocks.append(wide.dropna(axis=1, how="all"))
     if not blocks:
-        return pd.DataFrame()
-    wide = pd.concat(blocks, axis=1, join="inner").dropna(axis=0, how="any")
-    if wide.empty or wide.shape[0] < 4:
-        return pd.DataFrame()
-    n_comp = int(min(n_components, wide.shape[0] - 1, wide.shape[1]))
+        return pd.DataFrame(), pd.DataFrame()
+    grid = pd.concat(blocks, axis=1, join="inner").dropna(axis=0, how="any")
+    if grid.empty or grid.shape[0] < 4:
+        return pd.DataFrame(), pd.DataFrame()
+    grid.index = grid.index.astype(int)
+    grid.index.name = "member_id"
+    grid.columns.names = ["week_start", "latitude", "longitude"]
+    n_comp = int(min(n_components, grid.shape[0] - 1, grid.shape[1]))
     pca = PCA(n_components=n_comp)
-    pcs = pca.fit_transform(wide.values)
-    out = pd.DataFrame(pcs, index=wide.index.astype(int), columns=[f"PC{i + 1}" for i in range(pcs.shape[1])])
-    out.index.name = "member_id"
-    out.attrs["explained_variance_pct"] = float(pca.explained_variance_ratio_.sum() * 100)
-    out.attrs["n_grid_points"] = int(wide.shape[1] // max(1, len(blocks)))
-    return out
+    pcs = pca.fit_transform(grid.values)
+    scores = pd.DataFrame(pcs, index=grid.index, columns=[f"PC{i + 1}" for i in range(pcs.shape[1])])
+    scores.attrs["explained_variance_pct"] = float(pca.explained_variance_ratio_.sum() * 100)
+    scores.attrs["n_grid_points"] = int(grid.shape[1] // max(1, len(blocks)))
+    return scores, grid
 
 
 # ─── clustering ─────────────────────────────────────────────────────────────────
 
 def cluster_members(features: pd.DataFrame, k: int = SCENARIO_K_DEFAULT, seed: int = 42,
-                    min_members: int = SCENARIO_MIN_MEMBERS, scale: bool = True) -> dict:
+                    min_members: int = SCENARIO_MIN_MEMBERS, scale: bool = False) -> dict:
     """K-means with a fixed k on the member feature matrix.
 
-    `scale=True` standardises each column (country × week anomalies in °C, so
-    every feature weighs the same). Use `scale=False` for PCA scores: their
-    variance ordering IS the signal, and standardising would give the noise
-    components the same weight as the leading mode.
+    `scale=False` (the default, for PCA scores) keeps the columns as they are: their
+    variance ordering IS the signal, and standardising would give the noise components
+    the same weight as the leading mode. `scale=True` standardises each column.
 
     Returns dict with:
       assignments  DataFrame(member_id, scenario, raw_label)
       k, silhouette (reported, not used to choose k)
-      centroids    DataFrame(scenario × feature) in original (anomaly) units
+      centroids    DataFrame(scenario × feature)
       sizes        {scenario: n_members}
     Scenario ids are 1..k ordered by size (largest first); 0 = 'Other'.
     """
@@ -194,7 +226,6 @@ def cluster_members(features: pd.DataFrame, k: int = SCENARIO_K_DEFAULT, seed: i
     scen = np.array([remap[l] for l in labels])
 
     assignments = pd.DataFrame({"member_id": features.index.values, "raw_label": labels, "scenario": scen})
-    # groupby on a plain array keeps the (area, week_start) MultiIndex columns intact
     centroids = features.groupby(pd.Series(scen, index=features.index, name="scenario")).mean()
     return {
         "assignments": assignments, "k": k, "silhouette": sil,
@@ -209,6 +240,171 @@ def apply_scenarios(members: pd.DataFrame, assignments: pd.DataFrame) -> pd.Data
         return pd.DataFrame()
     df = _with_ids(members)
     return add_week(df.merge(assignments[["member_id", "scenario"]], on="member_id", how="inner"))
+
+
+# ─── centroid maps and names ────────────────────────────────────────────────────
+
+def centroid_maps(grid: pd.DataFrame, assignments: pd.DataFrame) -> pd.DataFrame:
+    """Per scenario, its members' mean field averaged over the clustered weeks:
+    DataFrame(scenario, latitude, longitude, anomaly) — the Z500 departure from the
+    ensemble mean (m) that names and draws the scenario."""
+    if grid.empty or assignments is None or assignments.empty:
+        return pd.DataFrame(columns=["scenario", "latitude", "longitude", "anomaly"])
+    out = []
+    for s, members in assignments.groupby("scenario")["member_id"]:
+        ids = [m for m in members if m in grid.index]
+        if not ids:
+            continue
+        mean = grid.loc[ids].mean(axis=0)            # MultiIndex (week_start, latitude, longitude)
+        m = mean.reset_index()
+        m.columns = ["week_start", "latitude", "longitude", "anomaly"]
+        m = m.groupby(["latitude", "longitude"], as_index=False)["anomaly"].mean()
+        m.insert(0, "scenario", int(s))
+        out.append(m)
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame(columns=["scenario", "latitude", "longitude", "anomaly"])
+
+
+def region_name(lat: float, lon: float) -> str:
+    for name, la0, la1, lo0, lo1 in NAMED_REGIONS:
+        if la0 <= lat <= la1 and lo0 <= lon <= lo1:
+            return name
+    return f"{abs(lat):.0f}°{'N' if lat >= 0 else 'S'} {abs(lon):.0f}°{'E' if lon >= 0 else 'W'}"
+
+
+_PATTERN_CACHE: dict[tuple, pd.DataFrame | None] = {}
+
+
+def regime_patterns_on(points: pd.DataFrame) -> pd.DataFrame | None:
+    """The 7 fixed regime patterns (wr_patterns.npz, 0.5° on 30–90 N / 80 W–40 E) on
+    the grid points given (latitude, longitude): DataFrame(latitude, longitude,
+    w_<regime>…). None when the file is missing or the grids do not meet."""
+    key = (round(float(points["latitude"].min()), 2), round(float(points["latitude"].max()), 2),
+           round(float(points["longitude"].min()), 2), round(float(points["longitude"].max()), 2), len(points))
+    if key in _PATTERN_CACHE:
+        return _PATTERN_CACHE[key]
+    result = None
+    try:
+        z = np.load(WR_PATTERNS_FILE)
+        pat, lats, lons = z["patterns"], z["lats"], z["lons"]
+        rows = {"latitude": np.repeat(lats, len(lons)), "longitude": np.tile(lons, len(lats))}
+        for k, name in enumerate(WR_REGIMES):
+            rows[f"w_{name}"] = pat[k].ravel()
+        full = pd.DataFrame(rows)
+        full["latitude"] = full["latitude"].round(2)
+        full["longitude"] = full["longitude"].round(2)
+        pts = points[["latitude", "longitude"]].drop_duplicates().copy()
+        pts["latitude"] = pts["latitude"].astype(float).round(2)
+        pts["longitude"] = pts["longitude"].astype(float).round(2)
+        merged = pts.merge(full, on=["latitude", "longitude"], how="inner")
+        if len(merged) >= 0.8 * len(pts) and len(merged) >= 50:
+            result = merged
+    except Exception:
+        result = None
+    _PATTERN_CACHE[key] = result
+    return result
+
+
+def regime_similarity(cmap: pd.DataFrame) -> dict[str, float]:
+    """cos(lat)-weighted pattern correlation of one centroid map with each regime."""
+    pats = regime_patterns_on(cmap)
+    if pats is None:
+        return {}
+    d = cmap[["latitude", "longitude", "anomaly"]].copy()
+    d["latitude"] = d["latitude"].astype(float).round(2)
+    d["longitude"] = d["longitude"].astype(float).round(2)
+    d = d.merge(pats, on=["latitude", "longitude"], how="inner")
+    if len(d) < 50:
+        return {}
+    w = np.cos(np.deg2rad(d["latitude"].values))
+    x = d["anomaly"].values.astype(float)
+    xm = np.average(x, weights=w)
+    sx = np.sqrt(np.average((x - xm) ** 2, weights=w))
+    out = {}
+    for name in WR_REGIMES:
+        p = d[f"w_{name}"].values.astype(float)
+        pm = np.average(p, weights=w)
+        sp = np.sqrt(np.average((p - pm) ** 2, weights=w))
+        if sx > 0 and sp > 0:
+            out[name] = float(np.average((x - xm) * (p - pm), weights=w) / (sx * sp))
+    return out
+
+
+def name_cluster(cmap: pd.DataFrame, min_amplitude: float = SCENARIO_NAME_MIN_AMPLITUDE_M,
+                 min_r: float = SCENARIO_NAME_REGIME_MIN_R) -> dict:
+    """A name for one scenario from its centroid map.
+
+    Returns dict(name, ridge, trough, regime, regime_label, r, amplitude): `name` is
+    "Ridge over X, trough over Y" (one side alone when the other is weak, "Close to
+    the ensemble mean" when both are), `regime` the most similar regime when its
+    pattern correlation reaches min_r, else None.
+    """
+    if cmap is None or cmap.empty:
+        return {"name": "", "ridge": None, "trough": None, "regime": None, "regime_label": "", "r": np.nan, "amplitude": np.nan}
+    d = cmap.dropna(subset=["anomaly"])
+    hi, lo = d.loc[d["anomaly"].idxmax()], d.loc[d["anomaly"].idxmin()]
+    ridge = {"region": region_name(float(hi["latitude"]), float(hi["longitude"])), "value": float(hi["anomaly"]),
+             "latitude": float(hi["latitude"]), "longitude": float(hi["longitude"])}
+    trough = {"region": region_name(float(lo["latitude"]), float(lo["longitude"])), "value": float(lo["anomaly"]),
+              "latitude": float(lo["latitude"]), "longitude": float(lo["longitude"])}
+    parts = []
+    if ridge["value"] >= min_amplitude:
+        parts.append(f"ridge over {ridge['region']}")
+    if -trough["value"] >= min_amplitude:
+        parts.append(f"trough over {trough['region']}")
+    name = ", ".join(parts) if parts else "close to the ensemble mean"
+    name = name[0].upper() + name[1:]
+    sim = regime_similarity(d)
+    regime, r = None, np.nan
+    if sim:
+        best = max(sim, key=sim.get)
+        if sim[best] >= min_r:
+            regime, r = best, sim[best]
+        else:
+            r = sim[best]
+    return {"name": name, "ridge": ridge, "trough": trough, "regime": regime,
+            "regime_label": WR_REGIME_LONG.get(regime, "") if regime else "", "r": r,
+            "amplitude": float(max(ridge["value"], -trough["value"])), "similarity": sim}
+
+
+def scenario_name(s: int, names: dict | None = None) -> str:
+    """'Scenario 2' — or 'Scenario 2 · Ridge over Scandinavia, trough over Iberia' when
+    the cluster names are given."""
+    s = int(s)
+    if s == OTHER_LABEL:
+        return "Other"
+    base = f"Scenario {s}"
+    n = (names or {}).get(s)
+    return f"{base} · {n['name']}" if n and n.get("name") else base
+
+
+def temperature_read(tagged_t: pd.DataFrame, scenario: int, weeks: list[pd.Timestamp]) -> dict:
+    """How a scenario reads in the land temperature anomaly: mean over its members,
+    countries and the clustered weeks, the coldest and warmest country, and a tone."""
+    if tagged_t is None or tagged_t.empty:
+        return {}
+    weeks = [pd.Timestamp(w).normalize() for w in weeks]
+    st_ = tagged_t[(tagged_t["scenario"] == scenario) & tagged_t["week_start"].isin(weeks)]
+    col = "anomaly" if "anomaly" in st_.columns and st_["anomaly"].notna().any() else None
+    if st_.empty or col is None:
+        return {}
+    by_area = st_.groupby("area")[col].mean().sort_values()
+    ma = float(st_[col].mean())
+    tone = "warm" if ma > 0.75 else ("cold" if ma < -0.75 else "near-normal")
+    return {"mean": ma, "tone": tone, "coldest": (by_area.index[0], float(by_area.iloc[0])),
+            "warmest": (by_area.index[-1], float(by_area.iloc[-1]))}
+
+
+def describe_scenario(share: float, read: dict, name: dict | None = None) -> str:
+    """One line for the scenario card: the regime it resembles, the share of members
+    and the temperature read."""
+    bits = []
+    if name and name.get("regime"):
+        bits.append(f"≈ {name['regime_label']} (r {name['r']:.2f})")
+    bits.append(f"{share:.0%} of members")
+    if read:
+        bits.append(f"{read['tone']} on average ({read['mean']:+.1f}°C) · coldest {read['coldest'][0]} "
+                    f"({read['coldest'][1]:+.1f}), warmest {read['warmest'][0]} ({read['warmest'][1]:+.1f})")
+    return " · ".join(bits)
 
 
 # ─── outputs ────────────────────────────────────────────────────────────────────
@@ -253,7 +449,8 @@ def scenario_weekly_values(tagged: pd.DataFrame, weeks: list[pd.Timestamp],
     return out.sort_values(["area", "week_start", "scenario"])
 
 
-def scenario_table(tagged: pd.DataFrame, weeks: list[pd.Timestamp], value_col: str = "anomaly") -> pd.DataFrame:
+def scenario_table(tagged: pd.DataFrame, weeks: list[pd.Timestamp], value_col: str = "anomaly",
+                   names: dict | None = None) -> pd.DataFrame:
     """Scenario × country table of the mean value over the selected weeks."""
     if tagged.empty:
         return pd.DataFrame()
@@ -261,31 +458,15 @@ def scenario_table(tagged: pd.DataFrame, weeks: list[pd.Timestamp], value_col: s
     df = tagged[tagged["week_start"].isin(weeks)]
     col = value_col if value_col in df.columns and df[value_col].notna().any() else "value"
     t = df.groupby(["scenario", "area"])[col].mean().unstack("area")
-    t.index = [scenario_name(s) for s in t.index]
+    t.index = [scenario_name(s, names) for s in t.index]
     return t
 
 
-def scenario_name(s: int) -> str:
-    return "Other" if int(s) == OTHER_LABEL else f"Scenario {int(s)}"
-
-
-def describe_scenario(centroid_row: pd.Series, share: float) -> str:
-    """One-line description of a cluster centroid whose index is (area, week_start)."""
-    vals = centroid_row.dropna()
-    if vals.empty:
-        return ""
-    mean_anom = float(vals.mean())
-    by_area = vals.groupby(level=0).mean().sort_values()
-    tone = "warm" if mean_anom > 0.75 else ("cold" if mean_anom < -0.75 else "near-normal")
-    return (f"{share:.0%} of members · {tone} on average ({mean_anom:+.1f}°C) · "
-            f"coldest {by_area.index[0]} ({by_area.iloc[0]:+.1f}), warmest {by_area.index[-1]} ({by_area.iloc[-1]:+.1f})")
-
-
-def silhouette_for_k(features: pd.DataFrame, ks=(2, 3, 4), seed: int = 42) -> dict[int, float]:
+def silhouette_for_k(features: pd.DataFrame, ks=(2, 3, 4), seed: int = 42, scale: bool = False) -> dict[int, float]:
     """Diagnostic only — how separable the members are at each k. Not used to pick k."""
     if features.empty or features.shape[0] < 5:
         return {}
-    X = StandardScaler().fit_transform(features.values)
+    X = StandardScaler().fit_transform(features.values) if scale else features.values.astype(float)
     out = {}
     for k in ks:
         if k >= features.shape[0]:

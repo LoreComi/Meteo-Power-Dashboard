@@ -32,6 +32,16 @@ DEFAULT_HTTP_PATH = "/sql/1.0/warehouses/2f4ff6b7c65abb1a"          # the desk a
 DEFAULT_EQ_FUNDAMENTALS = r"P:\QFA\TonyWeather\Lorenzo_Trainee\EQ_project\eq_fundamentals.py"
 DEFAULT_SWE_ROOT = Path(r"P:\QFA\TonyWeather\Hydro_Report\SWE_Exolabs")
 DEFAULT_INDICES_CSV = HERE.parent / "all_daily_indices.csv"
+# Meteomatics is reached through the desk's DSL gateway (CLIMATOLOGIES/update_climp.py,
+# corso_model_wr/download_forecast_dsl.py): an OAuth client-credential token whose
+# client secret sits in the MDS_SECRET environment variable of the account running the job.
+DEFAULT_DSL_URL = "https://fs-gateway-prod.trd.axusr.net/dsl/v3/meteo"
+DEFAULT_DSL_URL_V1 = "https://fs-gateway-prod.trd.axusr.net/dsl/v1/meteo"
+DEFAULT_DSL_APP_ID = "5a838d41-4163-42ef-8479-48fe7db6d547"
+# The app's country codes (weather-power-desk-app/_config.AREAS) — the EQ member feed
+# loads these; EQ names the UK 'GB'.
+DEFAULT_EQ_MEMBER_AREAS = ["DE", "FR", "IT", "ES", "UK", "NL", "BE", "PL", "CZ", "HU", "NO", "SE", "FI", "DK",
+                           "PT", "SI", "SK", "HR", "EE", "LV", "LT"]
 
 
 def load_env_file(path: Path = ENV_FILE) -> int:
@@ -129,6 +139,41 @@ class Settings:
     indices_refresh_days: int = 90       # days re-sent every run — providers revise recent daily values
     extra: dict = field(default_factory=dict)
 
+    # ── Scenario inputs (mm_z500_members.py, eq_members.py) ──
+    dsl_url: str = DEFAULT_DSL_URL       # the DSL gateway (Meteomatics behind it); the v1 base for get_time_range
+    dsl_url_v1: str = DEFAULT_DSL_URL_V1
+    dsl_app_id: str = DEFAULT_DSL_APP_ID
+    dsl_secret_env: str = "MDS_SECRET"   # environment variable holding the client secret
+    dsl_ssl_verify: bool = False         # the gateway is called with verify=False in the desk's scripts (proxy)
+    z500_table: str = "fcst_member_spatial_ecens"
+    z500_model: str = "ecmwf-ens"        # Meteomatics model name of the ensemble whose Z500 members are fetched
+    z500_members: int = 50               # perturbed members m1..mN (member:1-N; m0 = control, not loaded)
+    z500_members_per_call: int = 10      # members per gateway call (ensembleMemberSelection 'member:a-b')
+    z500_days: int = 15                  # forecast days after the init day (lead 0..15)
+    z500_time_step: str = "PT6H"         # sampling within a day; the values of a day are averaged (P1D = 12 UTC only)
+    z500_grid_res: float = 2.0           # degrees — the app's SPATIAL_GRID_RES
+    z500_lat: tuple = (30.0, 74.0)       # the app's SPATIAL_BBOX
+    z500_lon: tuple = (-30.0, 40.0)
+    z500_min_age_hours: int = 7          # a cycle is complete in Meteomatics about this long after its init
+    z500_min_members: int = 40           # fewer members fetched → the run is not written
+    z500_retention_runs: int = 2         # runs kept in the table (the app reads the latest)
+    eq_members_table: str = "fcst_members_eq"
+    eq_members_models: list[str] = field(default_factory=lambda: ["aifs-ens"])    # EQ ensemble tags with members
+    eq_members_areas: list[str] = field(default_factory=lambda: list(DEFAULT_EQ_MEMBER_AREAS))
+    eq_members_retention_days: int = 7
+    insert_chunk_rows: int = 6000        # rows per INSERT statement (whole-run snapshot tables)
+
+    @property
+    def z500_table_fq(self) -> str:
+        return f"{self.schema}.{self.z500_table}"
+
+    @property
+    def eq_members_table_fq(self) -> str:
+        return f"{self.schema}.{self.eq_members_table}"
+
+    def dsl_ready(self) -> bool:
+        return bool(os.environ.get(self.dsl_secret_env))
+
     @property
     def indices_table_fq(self) -> str:
         return f"{self.schema}.{self.indices_table}"
@@ -209,6 +254,28 @@ def load_settings() -> Settings:
         indices_table=os.environ.get("INDICES_TABLE", "weather_indexes"),
         indices_start_year=_int("INDICES_START_YEAR", 1979),
         indices_refresh_days=_int("INDICES_REFRESH_DAYS", 90),
+        dsl_url=os.environ.get("DSL_URL", DEFAULT_DSL_URL),
+        dsl_url_v1=os.environ.get("DSL_URL_V1", DEFAULT_DSL_URL_V1),
+        dsl_app_id=os.environ.get("DSL_APP_ID", DEFAULT_DSL_APP_ID),
+        dsl_secret_env=os.environ.get("DSL_SECRET_ENV", "MDS_SECRET"),
+        dsl_ssl_verify=_bool("DSL_SSL_VERIFY", False),
+        z500_table=os.environ.get("Z500_TABLE", "fcst_member_spatial_ecens"),
+        z500_model=os.environ.get("Z500_MODEL", "ecmwf-ens"),
+        z500_members=_int("Z500_MEMBERS", 50),
+        z500_members_per_call=_int("Z500_MEMBERS_PER_CALL", 10),
+        z500_days=_int("Z500_DAYS", 15),
+        z500_time_step=os.environ.get("Z500_TIME_STEP", "PT6H"),
+        z500_grid_res=float(os.environ.get("Z500_GRID_RES", "2.0")),
+        z500_lat=tuple(float(x) for x in _list("Z500_LAT", ["30", "74"])),
+        z500_lon=tuple(float(x) for x in _list("Z500_LON", ["-30", "40"])),
+        z500_min_age_hours=_int("Z500_MIN_AGE_HOURS", 7),
+        z500_min_members=_int("Z500_MIN_MEMBERS", 40),
+        z500_retention_runs=_int("Z500_RETENTION_RUNS", 2),
+        eq_members_table=os.environ.get("EQ_MEMBERS_TABLE", "fcst_members_eq"),
+        eq_members_models=_list("EQ_MEMBERS_MODELS", ["aifs-ens"]),
+        eq_members_areas=_list("EQ_MEMBERS_AREAS", list(DEFAULT_EQ_MEMBER_AREAS)),
+        eq_members_retention_days=_int("EQ_MEMBERS_RETENTION_DAYS", 7),
+        insert_chunk_rows=_int("INSERT_CHUNK_ROWS", 6000),
     )
 
 

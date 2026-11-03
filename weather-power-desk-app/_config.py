@@ -34,7 +34,8 @@ METEOMATICS_SCHEMA = os.environ.get("METEOMATICS_SCHEMA", "dna_prod_silver.meteo
 # Optional per-member Meteomatics table. Expected columns:
 #   model STRING ('ecmwf-ens' | 'ecmwf-aifs-ens'), created_at TIMESTAMP,
 #   delivery_start TIMESTAMP, member INT/STRING, latitude, longitude, value
-# Leave empty if none exists — scenarios then cluster on Volue EC-ENS members.
+# Leave empty if none exists — the notebook then reads curve_member of the
+# silver temperature table for the Meteomatics country members.
 METEOMATICS_MEMBER_TABLE = os.environ.get("METEOMATICS_MEMBER_TABLE", "")
 
 # Optional Meteologica table (not in Databricks today). Expected columns:
@@ -131,10 +132,9 @@ AREAS: dict[str, str] = {
     "EE": "Estonia", "LV": "Latvia", "LT": "Lithuania",
 }
 DEFAULT_AREAS = ["DE", "FR", "IT", "ES", "UK", "NL"]
+# The Forecast → Values tab (the anomaly heatmap and the fan charts) opens on these
+ANOMALY_VIEW_DEFAULT_AREAS = ["DE", "FR", "IT"]
 AREA_NAME_TO_CODE = {v: k for k, v in AREAS.items()}
-
-# Core countries used as the default clustering feature space
-SCENARIO_DEFAULT_AREAS = ["DE", "FR", "IT", "ES", "UK", "NL", "BE", "PL"]
 
 # Meteomatics country means are POPULATION-WEIGHTED in the refresh notebook:
 # pop_weights_0p5.csv (built by build_pop_weights.py from GHS-POP 2025 and the
@@ -587,37 +587,58 @@ AI_GAS_AGENTS: list[tuple[str, str, str]] = [
 # ══════════════════════════════════════════════════════════════════════════════
 # SCENARIOS (member clustering)
 # ══════════════════════════════════════════════════════════════════════════════
-# Method: k-means on WEEKLY-MEAN temperature anomaly per country, weeks being
-# real ISO weeks (Mon-Sun) because the desk trades weekly products. Two
-# scenarios by default (the Morning Report's "alternative scenario"). No
-# silhouette-based k selection. The proper method is clustering on 500 hPa
-# geopotential members; that field is not in Databricks yet — when it lands,
-# feed its member matrix into cluster_members() unchanged.
+# Method: k-means on each member's WEEKLY-MEAN 500 hPa geopotential height field
+# over Europe and the near Atlantic (the spatial pattern that sets a week's
+# weather), PCA-reduced, weeks being real ISO weeks (Mon-Sun) because the desk
+# trades weekly products. Two scenarios by default (the Morning Report's
+# "alternative scenario"), no silhouette-based k selection. The member →
+# scenario map is then read on the land variables — temperature, wind, solar
+# per country — of the same member IDs (`land` below). Country-mean clustering
+# is gone: the field is the only feature space.
 SCENARIO_K_DEFAULT = 2
 SCENARIO_K_MAX = 4
 SCENARIO_MIN_MEMBERS = 3             # clusters smaller than this are folded into "Other"
 SCENARIO_MIN_WEEK_DAYS = 4           # a forecast week needs >= this many days to be a feature
-# Regions shown side by side per scenario (Volue area codes present in fcst_members)
+# Regions shown side by side per scenario (country codes present in the land member tables)
 SCENARIO_OUTPUT_AREAS = ["DE", "FR", "UK", "IT", "ES", "NL", "BE", "PL"]
 
 # ---------------------------------------------------------------------------
-# Spatial clustering (gridded member maps)
+# The spatial field and its grid — mirrored by notebook cell 4b (AIFS) and
+# pipeline/mm_z500_members.py (EC-ENS): change all three together.
 # ---------------------------------------------------------------------------
-# TODO(lorenzo): Switch to Z500 geopotential when ecmwf-ens gets Z500 members.
-# Currently only ecmwf-aifs-ens has geopotential_height_500hpa members; the
-# standard ecmwf-ens (whose 50 perturbations match Volue member IDs) does not.
-# Using temperature spatial anomaly as a proxy until geopotential is available.
-SCENARIO_USE_GEOPOTENTIAL = False   # flip to True + update SPATIAL_* when Z500 lands
-SPATIAL_N_PCA = 10                  # PCA components for dimensionality reduction before k-means
-SPATIAL_GRID_RES = 1.0              # degrees (refresh notebook coarsens to this from native 0.5°)
+SPATIAL_METRIC = "Z500"             # the `metric` the spatial tables carry; anything else is stale
+SPATIAL_N_PCA = 10                  # PCA components before k-means (~830 grid points × weeks otherwise)
+SPATIAL_GRID_RES = 2.0              # degrees; Z500 is smooth, 2° resolves every ridge and trough
+SPATIAL_BBOX = {"lat_min": 30, "lat_max": 74, "lon_min": -30, "lon_max": 40}   # Europe + the near Atlantic
 
-# Which member sources the scenario tab can cluster on. `table` is the sandbox
-# table power_desk_refresh.py writes; `available` is resolved at runtime.
-SCENARIO_SOURCES: dict[str, dict] = {
-    "Meteomatics EC-ENS members": {"provider": "Meteomatics", "model": "ecmwf-ens"},
-    "Meteomatics AIFS-ENS members": {"provider": "Meteomatics", "model": "ecmwf-aifs-ens"},
-    "Volue EC-ENS members": {"provider": "Volue", "model": "EC-ENS"},
+# The two ensembles the tab clusters, each with its Z500 member table and the
+# member table its land variables are read from. The member IDs agree across
+# the tables through _scenarios.normalise_member ('m7', '07', 'e07' → 7).
+#   EC-ENS   Z500 from the Meteomatics API (pipeline, reference_date = the init);
+#            land variables = the Volue EC-ENS members of fcst_members
+#   EC-AI    Z500 from the silver AIFS-ENS members (notebook cell 4b, reference_date =
+#            the silver load time, snapped to its cycle); land variables = the AIFS-ENS
+#            members the pipeline writes to fcst_members_eq
+SCENARIO_SPATIAL_SOURCES: dict[str, dict] = {
+    "EC-ENS": {"label": "ECMWF EC-ENS", "model": "ecmwf-ens", "table": "fcst_member_spatial_ecens",
+               "run_is_init": True, "init_hours": [0, 12],
+               "land": {"provider": "Volue", "model": "EC-ENS", "label": "EC-ENS members"}},
+    "EC-AI":  {"label": "ECMWF AIFS-ENS (EC-AI)", "model": "ecmwf-aifs-ens", "table": "fcst_member_spatial",
+               "run_is_init": False, "init_hours": [0, 12],
+               "land": {"provider": "EQ", "model": "aifs-ens", "label": "AIFS-ENS members"}},
 }
+SCENARIO_DEFAULT_SOURCE = "EC-ENS"
+# Member tables other than fcst_members, by provider (written by the pipeline)
+MEMBER_TABLES: dict[str, str] = {"EQ": "fcst_members_eq"}
+
+# Cluster names. A scenario's centroid map — its members' mean Z500 departure from
+# the ensemble mean over the clustered weeks — is named by where its ridge and
+# trough sit (the named regions in _scenarios.NAMED_REGIONS) and, when it
+# resembles one of the 7 North-Atlantic regimes of the Weather Regimes tab
+# (cos-lat weighted pattern correlation on the common grid points ≥ this), by
+# that regime. Below the amplitude the map is "close to the ensemble mean".
+SCENARIO_NAME_MIN_AMPLITUDE_M = 15.0
+SCENARIO_NAME_REGIME_MIN_R = 0.45
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HISTORICAL
@@ -930,6 +951,41 @@ EXPECTED_HORIZON: dict[str, int] = {
     "ecmwf-ens": 15, "ecmwf-aifs-ens": 15, "ncep-gfs-ens": 16,
     "ec-ext": 46, "gfs-ext": 35,
 }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MORNING CALL — COUNTRY DEEP DIVE (_deep_dive.py)
+# ══════════════════════════════════════════════════════════════════════════════
+# One country at a time, every source the desk has on it, read off the grid's own
+# reference run, compare columns and Δ pairing. Per country:
+#   tt / wnd / spv   the Morning Report region whose curves stand for the country
+#                    (morning_daily_volue regions: ib = Iberia, np = Nordic pool, see = SEE)
+#   rre, rre_label   the report's precipitation-energy region (cwe = FR DE AT CH, the Alps' north side)
+#   hydro_prod       the hydro_prod_daily area (pipeline/volue_hydro_prod.py) for the two-week outlook
+#   hydro_level      the hydro_daily area of the reservoir / groundwater / balance series (Hydro overview)
+#   scenario         fcst_members country code(s) the scenarios are read on — several = an
+#                    aggregate: temperature averaged, wind and solar summed, per member
+# A key a country lacks (hydro for the UK, temperature for SEE) is simply not shown.
+DEEP_DIVE_COUNTRIES: dict[str, dict] = {
+    "Germany":     {"tt": "de", "wnd": "de", "spv": "de", "rre": "cwe", "rre_label": "CWE (FR DE AT CH)",
+                    "hydro_prod": "de", "hydro_level": "DE", "scenario": ["DE"]},
+    "France":      {"tt": "fr", "wnd": "fr", "spv": "fr", "rre": "cwe", "rre_label": "CWE (FR DE AT CH)",
+                    "hydro_prod": "fr", "hydro_level": "FR", "scenario": ["FR"]},
+    "Italy":       {"tt": "it", "wnd": "it", "spv": "it", "rre": "it-nord", "rre_label": "Italy North",
+                    "hydro_prod": "it-nord", "hydro_level": "IT", "scenario": ["IT"]},
+    "Iberia":      {"tt": "ib", "wnd": "ib", "spv": "ib", "rre": "ib", "rre_label": "Iberia",
+                    "hydro_prod": "ib", "hydro_level": "ES", "scenario": ["ES", "PT"]},
+    "UK":          {"tt": "uk", "wnd": "uk", "scenario": ["UK"]},
+    "Nordics":     {"tt": "np", "wnd": "np", "spv": "np", "rre": "np", "rre_label": "Nordic pool",
+                    "hydro_prod": "np", "hydro_level": "NP", "scenario": ["NO", "SE", "FI"]},
+    "SEE":         {"wnd": "see", "spv": "see", "rre": "see", "rre_label": "SEE",
+                    "hydro_prod": "see", "hydro_level": "SEE", "scenario": ["SI", "HR"]},
+    "Netherlands": {"tt": "nl", "wnd": "nl", "spv": "nl", "scenario": ["NL"]},
+    "Belgium":     {"tt": "be", "wnd": "be", "spv": "be", "scenario": ["BE"]},
+    "Hungary":     {"tt": "hu", "scenario": ["HU"]},
+}
+DEEP_DIVE_DEFAULT = "Germany"
+DEEP_DIVE_HYDRO_WINDOW_DAYS = HYDRO_PROD_WINDOW_DAYS
 
 
 def area_label(code: str) -> str:

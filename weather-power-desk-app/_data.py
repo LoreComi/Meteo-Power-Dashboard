@@ -20,6 +20,7 @@ from _config import (
     MORNING_CURVES, MORNING_REGION_CODES, MORNING_MODELS, MORNING_VOLUE_TABLES,
     GAS_VOLUE_FAMILIES, GAS_VOLUE_PATTERNS, GAS_VOLUE_AREAS, LIVE_HISTORY_DAYS, EXPECTED_HORIZON,
     DELTASHARE_PATTERN_MAP, hist_source, HIST_DEFAULT_SOURCE,
+    MEMBER_TABLES, SCENARIO_SPATIAL_SOURCES, SPATIAL_METRIC,
 )
 
 # ─── Connection config ───────────────────────────────────────────────────────────
@@ -261,19 +262,34 @@ def load_spread_clim(metric: str, areas: tuple[str, ...]) -> pd.DataFrame:
                      "spread_p90_p10_mean", "n_runs"])
 
 
+def _member_table(provider: str) -> str:
+    """fcst_members for the notebook's providers (Volue, Meteomatics); the pipeline's
+    table for the providers it writes (EQ → fcst_members_eq)."""
+    return f"{SBX_SCHEMA}.{MEMBER_TABLES.get(provider, 'fcst_members')}"
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def load_member_sources() -> pd.DataFrame:
-    """Which (provider, model) member sets exist in fcst_members, with member counts."""
-    df = run_query(f"""
-        SELECT provider, model, MAX(reference_date) AS reference_date,
-               COUNT(DISTINCT member) AS n_members, COUNT(DISTINCT area) AS n_areas,
-               MIN(day) AS first_day, MAX(day) AS last_day
-        FROM {SBX_SCHEMA}.fcst_members
-        WHERE metric = 'Temperature'
-        GROUP BY provider, model
-    """)
-    if df.empty:
-        return df
+    """Which (provider, model) member sets exist, with member counts — fcst_members
+    plus every pipeline member table (a table not written yet is simply absent)."""
+    frames = []
+    for table in dict.fromkeys([f"{SBX_SCHEMA}.fcst_members"] + [f"{SBX_SCHEMA}.{t}" for t in MEMBER_TABLES.values()]):
+        try:
+            df = run_query(f"""
+                SELECT provider, model, MAX(reference_date) AS reference_date,
+                       COUNT(DISTINCT member) AS n_members, COUNT(DISTINCT area) AS n_areas,
+                       MIN(day) AS first_day, MAX(day) AS last_day
+                FROM {table}
+                WHERE metric = 'Temperature'
+                GROUP BY provider, model
+            """)
+        except Exception:
+            continue
+        if not df.empty:
+            frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
     df = _dt(df, ["reference_date"], utc=True)
     df = _dt(df, ["first_day", "last_day"])
     return _num(df, ["n_members", "n_areas"])
@@ -281,14 +297,18 @@ def load_member_sources() -> pd.DataFrame:
 
 @st.cache_data(ttl=900, show_spinner=False)
 def load_members(provider: str, model: str, metric: str, areas: tuple[str, ...]) -> pd.DataFrame:
-    """Per-member daily values (and anomaly) for one member source."""
+    """Per-member daily values (and anomaly) for one member source — its latest run only,
+    so a pipeline table that briefly holds two issues never mixes them."""
     if not areas:
         return pd.DataFrame()
+    table = _member_table(provider)
     df = run_query(f"""
         SELECT provider, model, reference_date, metric, area, day, lead_day, member, value, normal, anomaly
-        FROM {SBX_SCHEMA}.fcst_members
+        FROM {table}
         WHERE provider = '{provider}' AND model = '{model}' AND metric = '{metric}'
           AND area IN ({_sql_list(areas)})
+          AND reference_date = (SELECT MAX(reference_date) FROM {table}
+                                WHERE provider = '{provider}' AND model = '{model}' AND metric = '{metric}')
         ORDER BY area, day, member
     """)
     if df.empty:
@@ -299,41 +319,57 @@ def load_members(provider: str, model: str, metric: str, areas: tuple[str, ...])
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def load_member_spatial(lead_day_min: int = 1, lead_day_max: int = 15) -> pd.DataFrame:
-    """Gridded per-member temperature anomaly for spatial k-means clustering.
-
-    Reads fcst_member_spatial (created by the refresh notebook from Meteomatics
-    ecmwf-ens temperature members, coarsened to 1° over Europe).
-
-    The full table is ~1.4 M rows (50 members × 15 days × 1 824 grid points)
-    which exceeds the 25 MB inline-result limit.  We aggregate across days
-    here in SQL so only ~91 k rows (50 × 1 824) come back.
-    """
-    df = run_query(f"""
-        SELECT provider, model, MAX(reference_date) AS reference_date, metric,
-               member, latitude, longitude,
-               AVG(anomaly) AS anomaly, AVG(value) AS value, AVG(ens_mean) AS ens_mean
-        FROM {SBX_SCHEMA}.fcst_member_spatial
-        WHERE lead_day BETWEEN {int(lead_day_min)} AND {int(lead_day_max)}
-        GROUP BY provider, model, metric, member, latitude, longitude
-    """)
-    if df.empty:
-        return df
-    df = _dt(df, ["reference_date"], utc=True)
-    return _num(df, ["latitude", "longitude", "value", "ens_mean", "anomaly"])
+def load_spatial_sources() -> pd.DataFrame:
+    """The Z500 member fields available for scenario clustering: one row per
+    SCENARIO_SPATIAL_SOURCES key whose table holds the field — its latest run,
+    member count, grid size and the days it covers (the trading weeks on offer).
+    A table that is missing, empty or still carrying another metric is left out."""
+    rows = []
+    for key, cfg in SCENARIO_SPATIAL_SOURCES.items():
+        table = f"{SBX_SCHEMA}.{cfg['table']}"
+        try:
+            df = run_query(f"""
+                SELECT model, MAX(reference_date) AS reference_date, COUNT(DISTINCT member) AS n_members,
+                       COUNT(DISTINCT CONCAT(latitude, '_', longitude)) AS n_points,
+                       MIN(day) AS first_day, MAX(day) AS last_day
+                FROM {table}
+                WHERE model = '{cfg['model']}' AND metric = '{SPATIAL_METRIC}'
+                  AND reference_date = (SELECT MAX(reference_date) FROM {table}
+                                        WHERE model = '{cfg['model']}' AND metric = '{SPATIAL_METRIC}')
+                GROUP BY model
+            """)
+        except Exception:
+            continue
+        if df.empty or pd.isna(df["reference_date"].iloc[0]):
+            continue
+        df = _dt(df, ["reference_date"], utc=True)
+        df = _dt(df, ["first_day", "last_day"])
+        df = _num(df, ["n_members", "n_points"])
+        r = df.iloc[0]
+        if int(r["n_members"]) < 5:
+            continue
+        rows.append({"source": key, **{c: r[c] for c in df.columns}})
+    return pd.DataFrame(rows)
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def load_member_spatial_days(day_min, day_max) -> pd.DataFrame:
-    """Same as load_member_spatial but selected by delivery day — one call per trading
-    week gives the weekly-mean anomaly map per member (~91 k rows per week)."""
+def load_member_spatial_days(source: str, day_min, day_max) -> pd.DataFrame:
+    """The Z500 member field of one source averaged over the days of one trading
+    week (one call per week): DataFrame(member, latitude, longitude, n_days, value,
+    ens_mean, anomaly) on the latest run — ~50 × 830 rows, aggregated in SQL so the
+    full table (× 16 days) never crosses the Statement API's inline-result limit."""
+    cfg = SCENARIO_SPATIAL_SOURCES[source]
+    table = f"{SBX_SCHEMA}.{cfg['table']}"
     d0, d1 = pd.Timestamp(day_min).date(), pd.Timestamp(day_max).date()
     df = run_query(f"""
         SELECT provider, model, MAX(reference_date) AS reference_date, metric,
                member, latitude, longitude, COUNT(DISTINCT day) AS n_days,
                AVG(anomaly) AS anomaly, AVG(value) AS value, AVG(ens_mean) AS ens_mean
-        FROM {SBX_SCHEMA}.fcst_member_spatial
-        WHERE day BETWEEN DATE '{d0}' AND DATE '{d1}'
+        FROM {table}
+        WHERE model = '{cfg['model']}' AND metric = '{SPATIAL_METRIC}'
+          AND reference_date = (SELECT MAX(reference_date) FROM {table}
+                                WHERE model = '{cfg['model']}' AND metric = '{SPATIAL_METRIC}')
+          AND day BETWEEN DATE '{d0}' AND DATE '{d1}'
         GROUP BY provider, model, metric, member, latitude, longitude
     """)
     if df.empty:
