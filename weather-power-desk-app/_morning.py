@@ -42,8 +42,8 @@ reference run has enough days in it, which is normal for EC-Extended and rare
 for EC-ENS.
 
 Country deep dive (second tab, _deep_dive.py): one country on the same reference run,
-compare columns and Δ pairing — its variables as rows of one grid, the daily series run
-against run, the hydro state and two-week outlook, and the Forecast section's scenarios
+compare columns and Δ pairing — its variables as tiles per week and as rows of one grid,
+the hydro state and two-week outlook, and the Forecast section's scenarios
 read for that country.
 
 Data (MORNING_SOURCES): by default {SBX_SCHEMA}.morning_daily_eq — Energy

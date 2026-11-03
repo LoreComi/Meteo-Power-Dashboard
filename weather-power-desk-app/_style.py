@@ -662,7 +662,9 @@ div[class*="st-key-dd_sec_"] {{
 .dd-sec-sub {{ font-size: 0.76rem; color: var(--text-muted) !important; margin-top: 1px; }}
 
 /* stat tiles */
-.dd-tiles {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 4px 0 16px; }}
+.dd-tiles {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 4px 0 16px; }}
+@media (max-width: 1000px) {{ .dd-tiles {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
+@media (max-width: 560px) {{ .dd-tiles {{ grid-template-columns: 1fr; }} }}
 .dd-tile {{ background: #fbfbfa; border: 1px solid rgba(20,20,15,0.07); border-radius: 14px; padding: 14px 16px 13px; }}
 .dd-tile-head {{ display: flex; align-items: center; gap: 9px; }}
 .dd-tile-ico {{ width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex: none; }}
@@ -683,6 +685,15 @@ div[class*="st-key-dd_sec_"] {{
 .dd-move {{ font-size: 0.72rem; font-weight: 600; color: var(--text-muted) !important; }}
 .dd-move-warm {{ color: {DD_WARM} !important; }}
 .dd-move-cool {{ color: {DD_COOL} !important; }}
+.dd-wk {{ display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    margin: 10px 0 8px; padding: 8px 14px; border-radius: 10px; background: #f3f4f7;
+    border-left: 4px solid #4a3aa7; }}
+.dd-wk-title {{ font-size: 0.95rem; font-weight: 800; letter-spacing: -0.01em; color: var(--text-primary) !important; }}
+.dd-wk-dates {{ font-size: 0.76rem; font-weight: 500; color: var(--text-muted) !important; margin-left: 10px; }}
+.dd-wk-out {{ font-size: 0.95rem; font-weight: 800; letter-spacing: -0.01em; }}
+.dd-wk-warm {{ color: {DD_WARM} !important; }}
+.dd-wk-cool {{ color: {DD_COOL} !important; }}
+.dd-wk-flat {{ color: var(--text-secondary) !important; }}
 .dd-week {{ font-size: 0.82rem; font-weight: 700; color: var(--text-primary) !important; margin: 14px 0 8px;
     padding-left: 10px; border-left: 3px solid #c4407a; }}
 .dd-note {{ font-size: 0.74rem; color: var(--text-muted) !important; margin: -4px 0 10px; }}

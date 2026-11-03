@@ -7,11 +7,9 @@ since the paired run, and one signal chip per variable plus hydro and the leadin
 Then three section cards:
 
   Forecast     every variable the report carries for the country — temperature, wind,
-               solar, precipitation energy — as one grid with the variables as rows and
-               the windows × runs as columns (the report's cells), then the daily
-               series: the reference run against the run it is paired with, so what
-               moved in the last 24 h is read day by day, with the normal and the other
-               runs of the grid as thin lines.
+               solar, precipitation energy — as stat tiles per window (the report's
+               first week, then the second, each with its outlook in words), then one
+               grid with the variables as rows and the windows × runs as columns.
   Hydro        the country's hydro state (reservoir levels, snow water, groundwater,
                hydro balance — the Hydro section's own figures) and the two-week
                outlook: production observed and Volue's forecast, precipitation energy
@@ -39,12 +37,12 @@ from _config import (
     HYDRO_PROD_PRECIP_PATTERNS, HYDRO_PROD_TABLE, SCENARIO_DEFAULT_SOURCE, SCENARIO_K_DEFAULT,
 )
 from _data import load_hydro_prod
-from _charts import make_country_run_chart, make_hydro_production_chart, make_country_scenario_panel
+from _charts import make_hydro_production_chart, make_country_scenario_panel
 from _hydro import _overview_metrics, _layer_kpi, _flags, _chips
 from _hydro_quantify import production_series, production_summary
 from _forecast import default_scenarios, land_members, scenario_cards, scenario_ids, week_title, _side_by_side_html, _UNITS
 from _morning import (
-    RunCol, compute_grid, _series, _cell_html, _col_tip, _fmt_val, _signed, _short_title, MORNING_PRECIP_SUM_DAYS,
+    RunCol, compute_grid, _cell_html, _col_tip, _fmt_val, _signed, _short_title, MORNING_PRECIP_SUM_DAYS,
 )
 from _scenarios import apply_scenarios, scenario_daily_summary, scenario_weekly_values, short_name
 from _style import DEEP_DIVE_CSS, DD_WARM, DD_COOL
@@ -263,13 +261,16 @@ def _variables_grid_html(cells: pd.DataFrame, cblocks: dict, cols: list[RunCol],
     return f'<div class="mc-block"><table class="mc-table mcg-table">{colgroup}{head1}{head2}{body}</table></div>'
 
 
-def _variable_tiles(cells: pd.DataFrame, cblocks: dict, win: dict, delta_label: str) -> list[str]:
-    """The reference run's first window per variable: value, Δ norm on a gauge (red = warmer /
-    less wind, solar, precipitation; blue = colder / more) and the change since the paired run."""
+def _variable_tiles(cells: pd.DataFrame, cblocks: dict, win: dict, delta_label: str, wkey: str) -> list[str]:
+    """The reference run's tiles for one window: per variable the value, Δ norm on a gauge
+    (red = warmer / less wind, solar, precipitation; blue = colder / more) and the change since
+    the paired run. Precipitation is a 15-day sum from the init day, so it sits in the first window only."""
     tiles = []
     for name, block in cblocks.items():
         is_sum = block["agg"] == "sum"
-        r = _ref_cell(cells, "w1", name)
+        if is_sum and wkey != "w1":
+            continue
+        r = _ref_cell(cells, wkey, name)
         if r is None or np.isnan(float(r["value"])):
             continue
         fmt, unit = block["fmt"], block["unit"]
@@ -282,32 +283,26 @@ def _variable_tiles(cells: pd.DataFrame, cblocks: dict, win: dict, delta_label: 
         else:
             arrow = "▲" if round(d_run, 1) > 0 else ("▼" if round(d_run, 1) < 0 else "=")
             foot, ftone = f"{arrow} {_signed(d_run, fmt)} {delta_label}", ("" if arrow == "=" else _tone(d_run, block))
-        sub = (f"{MORNING_PRECIP_SUM_DAYS}-day sum" if is_sum else
-               f"{_short_title(win['t1'])} · {win['w1'][0]:%d %b} – {win['w1'][1]:%d %b}")
+        s, e = win[wkey]
+        span = (e - s).days + 1
+        n_days = int(r["n_days"]) if not pd.isna(r["n_days"]) else span
+        sub = (f"{MORNING_PRECIP_SUM_DAYS}-day sum from the init day" if is_sum else
+               "weekly average" + (f" · {n_days} of {span} days covered" if 0 < n_days < span else ""))
         tiles.append(_tile(block["family"], name.split(" (")[0], sub, fmt.format(float(r["value"])), unit,
                            d_norm / block["heat_scale"] if not np.isnan(d_norm) else None, tone, pill, foot, ftone))
     return tiles
 
 
-def _daily_panels(cblocks: dict, cols: list[RunCol]) -> list[dict]:
-    ref = cols[0]
-    panels = []
-    for name, block in cblocks.items():
-        fam, region, scale = block["family"], block["rows"][0][1], block["scale"]
-        f, n = _series(ref.rows, fam, region)
-        if f.empty:
-            continue
-        lo, hi = f.index.min(), f.index.max()          # the paired and compare runs on the reference's days only
-        fp, _ = _series(ref.prev_rows, fam, region)
-        fp = fp.loc[lo:hi]
-        others = {}
-        for c in cols[1:]:
-            fo, _ = _series(c.rows, fam, region)
-            if not fo.empty:
-                others[f"{c.model} {c.init:%d %b}"] = fo.loc[lo:hi] * scale
-        panels.append({"name": name.split(" (")[0], "unit": block["unit"], "ref": f * scale, "prev": fp * scale,
-                       "normal": n * scale, "others": others})
-    return panels
+def _week_band(cells: pd.DataFrame, cblocks: dict, win: dict, wkey: str) -> str:
+    """The heading of one window's tiles: its name and dates, and its outlook in words."""
+    title = win["t1"] if wkey == "w1" else win["t2"]
+    s, e = win[wkey]
+    kind = win.get("kind1") if wkey == "w1" else None
+    out, tone = _outlook(cells, cblocks, wkey, s)
+    return (f'<div class="dd-wk"><div><span class="dd-wk-title">{_short_title(title)}</span>'
+            f'<span class="dd-wk-dates">{s:%a %d %b} – {e:%a %d %b}'
+            + (" · weekend" if kind == "weekend" else "") + "</span></div>"
+            f'<span class="dd-wk-out dd-wk-{tone}">{out}</span></div>')
 
 
 def _render_forecast(country: str, cblocks: dict, cells: pd.DataFrame, cols: list[RunCol], win: dict,
@@ -318,16 +313,13 @@ def _render_forecast(country: str, cblocks: dict, cells: pd.DataFrame, cols: lis
                 f"{ref.model} {ref.init:%a %d %b %H}z · {delta_label} vs {ref.prev_label}"
                 + ("" if ref.prev_exact else " (nearest earlier run)")
                 + (f" · no {', '.join(missing)} for {country} in the report" if missing else ""))
-    _tiles(_variable_tiles(cells, cblocks, win, delta_label))
+    for wkey in ("w1", "w2"):
+        tiles = _variable_tiles(cells, cblocks, win, delta_label, wkey)
+        if not tiles:
+            continue
+        st.markdown(_week_band(cells, cblocks, win, wkey), unsafe_allow_html=True)
+        _tiles(tiles)
     st.markdown(_variables_grid_html(cells, cblocks, cols, win, view_key, delta_label), unsafe_allow_html=True)
-    panels = _daily_panels(cblocks, cols)
-    if panels:
-        windows = [(_short_title(win["t1"]), *win["w1"]), (_short_title(win["t2"]), *win["w2"])]
-        st.plotly_chart(make_country_run_chart(panels, windows, f"{ref.model} {ref.init:%d %b %H}z",
-                                               None if ref.prev_init is None else f"{ref.prev_init:%d %b %H}z"),
-                        use_container_width=True, config={"displayModeBar": False})
-        _note("Solid = reference run · dashed = the run its Δ is taken against · dotted = normal · "
-              "thin = the grid's other runs · shaded = the report's windows.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
