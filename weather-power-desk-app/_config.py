@@ -612,10 +612,18 @@ SCENARIO_OUTPUT_AREAS = ["DE", "FR", "UK", "IT", "ES", "NL", "BE", "PL"]
 # The spatial field and its grid — mirrored by notebook cell 4b (AIFS) and
 # pipeline/mm_z500_members.py (EC-ENS): change all three together.
 # ---------------------------------------------------------------------------
-SPATIAL_METRIC = "Z500"             # the `metric` the spatial tables carry; anything else is stale
-SPATIAL_N_PCA = 10                  # PCA components before k-means (~830 grid points × weeks otherwise)
+SPATIAL_METRIC = "Z500"             # the field the members are clustered on
+SPATIAL_MAP_METRIC = "T2M"          # the field the scenario maps show: 2 m temperature, same members and grid
+SPATIAL_N_PCA = 10                  # PCA components before k-means (~500 grid points × weeks otherwise)
 SPATIAL_GRID_RES = 2.0              # degrees; Z500 is smooth, 2° resolves every ridge and trough
-SPATIAL_BBOX = {"lat_min": 30, "lat_max": 74, "lon_min": -30, "lon_max": 40}   # Europe + the near Atlantic
+# Europe. A box reaching 30 W (tested 2026-11-03 on a real run) let the Atlantic
+# dominate the leading modes and split the members on patterns the land
+# variables did not feel; this box gives tighter clusters for the same names.
+SPATIAL_BBOX = {"lat_min": 35, "lat_max": 72, "lon_min": -15, "lon_max": 35}
+
+# The regions the scenarios are read on (per member: temperature averaged over the
+# countries, wind and solar summed), as rows of the per-week table.
+SCENARIO_REGIONS: dict[str, list[str]] = {"NWE": ["DE", "FR", "UK", "NL", "BE"], "Italy": ["IT"], "Nordics": ["NO", "SE", "FI"]}
 
 # The two ensembles the tab clusters, each with its Z500 member table and the
 # member table its land variables are read from. The member IDs agree across

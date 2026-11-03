@@ -47,7 +47,8 @@ RIVER_FORECAST_RUNS=1
 # Z500_MODEL=ecmwf-ens                   Meteomatics model; Z500_MEMBERS=50 perturbed members m1..m50
 # Z500_DAYS=15                           forecast days after the init day
 # Z500_TIME_STEP=PT6H                    samples per day averaged into the daily mean (P1D = 12 UTC only)
-# Z500_GRID_RES=2.0  Z500_LAT=30,74  Z500_LON=-30,40     must equal SPATIAL_GRID_RES / SPATIAL_BBOX in the app's _config.py
+# Z500_GRID_RES=2.0  Z500_LAT=35,72  Z500_LON=-15,35     must equal SPATIAL_GRID_RES / SPATIAL_BBOX in the app's _config.py
+# Z500_METRICS=Z500,T2M                  fields per member: the Z500 clustered on, the 2 m temperature mapped
 # Z500_MIN_AGE_HOURS=7                   the cycle fetched is the latest 00z/12z at least this old
 # Z500_RETENTION_RUNS=2
 # EQ_MEMBERS_MODELS=aifs-ens             EQ tags whose scenarios (members) are loaded (eq_members.py); add ec-ens if wanted

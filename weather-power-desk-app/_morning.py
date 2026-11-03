@@ -730,17 +730,6 @@ def _render_ai_brief(ctx: dict, today: pd.Timestamp, phone: bool = False, source
     from _ai_brief import FAMILIES, get_az_credentials, generate_family_brief
 
     st.markdown("##### Market read — agent families")
-    if phone:
-        st.caption(f"Commentary on the reference run — {ctx.get('run', '')}, initialised {ctx.get('run_init', '')} — "
-                   "by the power and gas agent families.")
-    else:
-        st.caption("Two families comment on the reference run's numbers and nothing else — the latest issue of the "
-                   "reference model by default, so every new cycle gets its own read: one on the power "
-                   "market (temperature → load, wind & solar → residual load, precipitation → hydro), one on gas "
-                   "(temperature → LDZ heating demand, wind & solar → gas-for-power). Each specialist reads "
-                   "only its own rows; a synthesis agent per family nets them into a few sentences. The gas "
-                   "family is additionally given the Gas Demand section's LDZ and displaced-gas figures for "
-                   "the runs in this grid, from the same source, so the words and the GWh cannot drift apart.")
     st.markdown(BRIEF_CSS, unsafe_allow_html=True)
 
     if not ctx.get("windows"):
@@ -866,7 +855,7 @@ def render_morning_call():
         return
     df = _drop_partial_days(df)
     if src.get("note"):
-        st.caption(src["note"])
+        pass
 
     runs = _list_runs(df)
     if not runs:
@@ -982,9 +971,6 @@ def render_morning_call():
             for name, block in blocks.items():
                 st.markdown(_grid_block_html_phone(cells[cells["block"] == name], name, block, cols, win, wkey, delta_label),
                             unsafe_allow_html=True)
-            st.caption(f"{source} · shaded cells: red = warmer / less wind, solar, precipitation, blue = colder / more · "
-                       f"Δ norm = vs the {source} normal · {len(runs)} runs in the table, latest "
-                       f"{runs[0][1]:%a %d %b %H}z ({MORNING_MODEL_LABELS.get(runs[0][0], runs[0][0])}).")
         else:
             st.markdown(_glance_html(cells, ref, win, delta_label, ("w1", "w2"), len(cols)), unsafe_allow_html=True)
             if show_chart:

@@ -17,7 +17,6 @@ STRATEGY_PLACEHOLDER_ITEMS = [
 
 def render_strategy():
     st.markdown("#### STRATEGY")
-    st.caption("Trading strategy views built on top of the Forecast, Historical and Hydro sections.")
 
     items = "".join(f"<li>{x}</li>" for x in STRATEGY_PLACEHOLDER_ITEMS)
     st.markdown(

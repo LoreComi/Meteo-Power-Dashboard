@@ -22,12 +22,13 @@ Tables written (all read by weather-power-desk-app/_data.py):
                         normal, anomaly, lead_day
   fcst_spread_clim      "normal" ensemble spread per metric/area/lead_day
                         (and per run month) from the last 365 days of EC-ENS runs
-  fcst_members          latest EC-ENS run, per member daily values (Volue) and
-                        Meteomatics EC-ENS / AIFS-ENS members as population-
-                        weighted country means
-  fcst_member_spatial   the AIFS-ENS 500 hPa geopotential height members on the
-                        scenario grid (2°, 30–74 N / 30 W–40 E), departure from the
-                        ensemble mean — the EC-AI field the Scenarios tab clusters.
+  fcst_members          the last two EC-ENS runs, per member daily values (Volue,
+                        reference_date = the INIT time) and the latest Meteomatics
+                        EC-ENS / AIFS-ENS members as population-weighted country means
+  fcst_member_spatial   the AIFS-ENS 500 hPa geopotential height members (metric
+                        Z500) and 2 m temperature members (T2M) on the scenario grid
+                        (2°, 35–72 N / 15 W–35 E), departure from the ensemble mean —
+                        the EC-AI field the Scenarios tab clusters and maps.
                         (The EC-ENS field, fcst_member_spatial_ecens, and the AIFS-ENS
                         country members, fcst_members_eq, are written by pipeline/:
                         the silver layer has no ecmwf-ens Z500 members)
@@ -452,16 +453,26 @@ member_blocks = []
 for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
     if name == "Precipitation energy":
         continue
+    # The last two EC-ENS runs (00z and 12z), each stamped with its INIT time —
+    # init_day at init_hour UTC — not Volue's issue-day stamp, which is the same
+    # for both cycles: the Scenarios tab reads these members on the member IDs of
+    # a Z500 field fetched separately (pipeline, EC-ENS) and must pick the rows of
+    # the SAME run, since member 7 of the 00z is a different atmosphere from
+    # member 7 of the 12z. Two runs kept so the match survives the hours between
+    # the two refresh schedules.
     member_blocks.append(f"""
-    SELECT 'Volue' AS provider, 'EC-ENS' AS model, r.reference_date, '{name}' AS metric, f.area,
+    SELECT 'Volue' AS provider, 'EC-ENS' AS model,
+           CAST(CONCAT(CAST(r.init_day AS STRING), ' ', LPAD(CAST(r.init_hour AS STRING), 2, '0'), ':00:00') AS TIMESTAMP) AS reference_date,
+           '{name}' AS metric, f.area,
            {CET_DAY} AS day, f.tag AS member, AVG(f.value) * {scale} AS value
     FROM {VOLUE}.{fcst_tbl} f
-    JOIN (SELECT pattern, reference_date FROM {SBX}.fcst_runs WHERE model_family = 'EC-ENS' AND run_rank = 1) r
+    JOIN (SELECT pattern, reference_date, init_day, init_hour FROM {SBX}.fcst_runs
+          WHERE model_family = 'EC-ENS' AND run_rank <= 2) r
       ON f.curve_name LIKE CONCAT('%', r.pattern, '%')
      AND f.reference_date BETWEEN r.reference_date - INTERVAL 3 HOURS AND r.reference_date + INTERVAL 3 HOURS
     WHERE array_contains(f.categories, '{cat}') AND f.data_type = 'F' AND f.tag != 'Avg'
       AND f.area IN ({AREA_SQL}) AND f.delivery_start >= current_date()
-    GROUP BY r.reference_date, f.area, {CET_DAY}, f.tag
+    GROUP BY r.init_day, r.init_hour, f.area, {CET_DAY}, f.tag
     """)
 
 spark.sql(f"""
@@ -518,8 +529,9 @@ count("fcst_members")
 SPATIAL_MODEL = "ecmwf-aifs-ens"
 SPATIAL_CURVE = "geopotential_height_500hpa_m_ecmwf_aifs_ens_p1d"
 SPATIAL_METRIC = "Z500"
-BB_LAT = (30, 74)          # _config.SPATIAL_BBOX
-BB_LON = (-30, 40)
+SPATIAL_T2M_CURVE = "t_mean_2m_24h_c_ecmwf_aifs_ens_p1d"     # the 2 m temperature members, for the scenario maps
+BB_LAT = (35, 72)          # _config.SPATIAL_BBOX (Europe)
+BB_LON = (-15, 35)
 GRID_RES = 2.0             # _config.SPATIAL_GRID_RES — Z500 is smooth, 2° resolves every ridge and trough
 
 
@@ -568,12 +580,17 @@ JOIN ens_mean e ON e.day = r.day AND e.latitude = r.latitude AND e.longitude = r
 spark.sql(f"CREATE OR REPLACE TABLE {SBX}.fcst_member_spatial AS "
           + spatial_member_sql(f"{MM}.geopotential_height_forecast", SPATIAL_MODEL, SPATIAL_CURVE, SPATIAL_METRIC,
                                BB_LAT, BB_LON, GRID_RES))
+# the same members' 2 m temperature (daily mean), on the same grid — the scenario maps
+spark.sql(f"INSERT INTO {SBX}.fcst_member_spatial "
+          + spatial_member_sql(f"{MM}.temperature_forecast", SPATIAL_MODEL, SPATIAL_T2M_CURVE, "T2M",
+                               BB_LAT, BB_LON, GRID_RES))
 count("fcst_member_spatial")
-_sp = spark.sql(f"""SELECT COUNT(DISTINCT member) AS members, COUNT(DISTINCT day) AS days,
-                           COUNT(DISTINCT latitude, longitude) AS points, MAX(reference_date) AS run
-                    FROM {SBX}.fcst_member_spatial""").first()
-print(f"fcst_member_spatial: {SPATIAL_MODEL} Z500 — {_sp['members']} members × {_sp['days']} days × "
-      f"{_sp['points']} grid points ({GRID_RES:g}°), load {_sp['run']}")
+for _m in (SPATIAL_METRIC, "T2M"):
+    _sp = spark.sql(f"""SELECT COUNT(DISTINCT member) AS members, COUNT(DISTINCT day) AS days,
+                               COUNT(DISTINCT latitude, longitude) AS points, MAX(reference_date) AS run
+                        FROM {SBX}.fcst_member_spatial WHERE metric = '{_m}'""").first()
+    print(f"fcst_member_spatial: {SPATIAL_MODEL} {_m} — {_sp['members']} members × {_sp['days']} days × "
+          f"{_sp['points']} grid points ({GRID_RES:g}°), load {_sp['run']}")
 
 # COMMAND ----------
 

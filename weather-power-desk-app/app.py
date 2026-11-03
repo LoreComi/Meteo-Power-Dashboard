@@ -30,7 +30,7 @@ from _hydro import render_hydro
 from _gas import render_gas_demand
 from _strategy import render_strategy
 
-st.set_page_config(page_title="Power Desk — Weather Dashboard", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Weather Power Desk", layout="wide", initial_sidebar_state="expanded")
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 HOME = "Home"
@@ -89,7 +89,7 @@ if "device" not in st.session_state:
     with _mid, keyed("welcome"):
         st.markdown('<div class="wl-logo"><svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.2" '
                     'stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>'
-                    '<div class="wl-title">Welcome to Power Desk</div>'
+                    '<div class="wl-title">Welcome to the Weather Power Desk Dashboard</div>'
                     '<div class="wl-sub">How are you viewing the dashboard? Phone shows the Morning Call one window at a '
                     'time, with one compare column and big type. You can switch any time in the sidebar.</div>',
                     unsafe_allow_html=True)
@@ -114,8 +114,8 @@ _LOGO = ('<svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.
 
 
 with st.sidebar:
-    st.markdown(f'<div class="pd-brand"><div class="pd-logo">{_LOGO}</div><div><div class="pd-brand-name">Power Desk'
-                f'</div><div class="pd-brand-sub">Weather Intelligence</div></div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="pd-brand"><div class="pd-logo">{_LOGO}</div><div><div class="pd-brand-name">Weather Power Desk'
+                f'</div><div class="pd-brand-sub">Dashboard</div></div></div>', unsafe_allow_html=True)
     st.markdown('<div class="nav-label">Sections</div>', unsafe_allow_html=True)
     with keyed("nav"):
         for name in [HOME] + list(SECTIONS.keys()):
@@ -128,8 +128,6 @@ with st.sidebar:
         for _col, _dev, _ico in ((_v1, "PC", ":material/computer:"), (_v2, "Phone", ":material/smartphone:")):
             icon_button(_col, _dev, _ico, key=f"view_{_dev}", use_container_width=True, on_click=_set_device,
                         args=(_dev,), type="primary" if st.session_state["device"] == _dev else "secondary")
-    st.markdown('<div class="nav-foot">Volue (sandbox) · Meteomatics · Hydro Report methodology. '
-                'Morning Call and Gas Demand read the sandbox tables, 5-min cache.</div>', unsafe_allow_html=True)
 
 
 # ─── Landing page ────────────────────────────────────────────────────────────────
@@ -151,8 +149,6 @@ def _tile(name: str, cfg: dict, min_height: int = 210) -> None:
 
 def render_home():
     st.markdown("#### CHOOSE A SECTION")
-    st.caption("Morning Call is the daily table; below it the analysis sections. "
-               "Strategy is locked while under construction.")
     wide = {n: c for n, c in SECTIONS.items() if c.get("wide")}
     grid = {n: c for n, c in SECTIONS.items() if not c.get("wide")}
     for name, cfg in wide.items():

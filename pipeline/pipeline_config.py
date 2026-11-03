@@ -152,8 +152,9 @@ class Settings:
     z500_days: int = 15                  # forecast days after the init day (lead 0..15)
     z500_time_step: str = "PT6H"         # sampling within a day; the values of a day are averaged (P1D = 12 UTC only)
     z500_grid_res: float = 2.0           # degrees — the app's SPATIAL_GRID_RES
-    z500_lat: tuple = (30.0, 74.0)       # the app's SPATIAL_BBOX
-    z500_lon: tuple = (-30.0, 40.0)
+    z500_lat: tuple = (35.0, 72.0)       # the app's SPATIAL_BBOX (Europe)
+    z500_lon: tuple = (-15.0, 35.0)
+    z500_metrics: list[str] = field(default_factory=lambda: ["Z500", "T2M"])   # fields fetched per member
     z500_min_age_hours: int = 7          # a cycle is complete in Meteomatics about this long after its init
     z500_min_members: int = 40           # fewer members fetched → the run is not written
     z500_retention_runs: int = 2         # runs kept in the table (the app reads the latest)
@@ -277,8 +278,9 @@ def load_settings() -> Settings:
         z500_days=_int("Z500_DAYS", 15),
         z500_time_step=os.environ.get("Z500_TIME_STEP", "PT6H"),
         z500_grid_res=float(os.environ.get("Z500_GRID_RES", "2.0")),
-        z500_lat=tuple(float(x) for x in _list("Z500_LAT", ["30", "74"])),
-        z500_lon=tuple(float(x) for x in _list("Z500_LON", ["-30", "40"])),
+        z500_lat=tuple(float(x) for x in _list("Z500_LAT", ["35", "72"])),
+        z500_lon=tuple(float(x) for x in _list("Z500_LON", ["-15", "35"])),
+        z500_metrics=_list("Z500_METRICS", ["Z500", "T2M"]),
         z500_min_age_hours=_int("Z500_MIN_AGE_HOURS", 7),
         z500_min_members=_int("Z500_MIN_MEMBERS", 40),
         z500_retention_runs=_int("Z500_RETENTION_RUNS", 2),

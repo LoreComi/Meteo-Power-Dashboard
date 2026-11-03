@@ -56,7 +56,7 @@ from _charts import make_ldz_panel, make_rdl_chart, make_gas_delta_bars
 from _data import (
     load_gas_demand_daily, load_recent_actual_temp, pick_run_at, list_runs_full, format_run_label,
 )
-from _ui import kpi_card, kpi_row, status_banner
+from _ui import info_tip, kpi_card, kpi_row, status_banner
 
 
 @st.cache_resource(show_spinner=False)
@@ -525,10 +525,6 @@ def _run_labels(res: dict) -> tuple[str, str]:
 
 
 def _render_ldz(results: dict[str, dict], areas: list[str]) -> None:
-    st.caption("Heating gas demand implied by each run's ensemble-mean temperature, through the fitted "
-               "hinge curves. A colder run lifts demand — positive delta, bullish gas. The trailing "
-               "actual temperature seeds the curves' multi-day effective temperature, so the first "
-               "forecast day is not cold-started.")
     if not results:
         return
     _signal_cards(results)
@@ -568,17 +564,9 @@ def _render_ldz(results: dict[str, dict], areas: list[str]) -> None:
                          "Weighted R²": round(m.in_sample_r2, 3),
                          "Obs": int(m.n_obs)})
         st.dataframe(pd.DataFrame(recs), use_container_width=True, hide_index=True)
-        st.caption("Fitted by EU-gas-demand/fit_demand_curves.py: structure and temperature half-life "
-                   "chosen on a held-out last-365-days backtest, shape fit with a 1.5-year recency "
-                   "half-life, level re-anchored to the last year's mean. The naive column is a plain "
-                   "weekday + linear-in-raw-temperature model — the gap is what the hinge and the "
-                   "thermal inertia earn. Re-run that script and copy curve_models.json to refresh.")
 
 
 def _render_rdl(results: dict[str, dict], regions: list[str]) -> None:
-    st.caption(f"Wind + solar converted to the gas-fired generation they displace: GW × 24 ÷ "
-               f"{GAS_EFFICIENCY:.0%} efficiency × {GAS_LOWER_LOAD:.0%} displacement share. A windier or "
-               "sunnier run displaces more gas — positive delta, bearish gas, the opposite sign to LDZ.")
     if not results:
         return
     _signal_cards(results)
@@ -614,9 +602,6 @@ def _render_rdl(results: dict[str, dict], regions: list[str]) -> None:
 
 
 def _render_combined(ldz: dict[str, dict], rdl: dict[str, dict]) -> None:
-    st.caption("Both legs on one screen. They are separate trades in the scripts and stay separate here; "
-               "the net line is the arithmetic sum of the two, which is only a fair read when the "
-               "displaced-gas leg really does clear against gas rather than coal or hydro.")
     rows = []
     for label in ldz:
         l_d = ldz[label]["total_delta"]
@@ -631,7 +616,7 @@ def _render_combined(ldz: dict[str, dict], rdl: dict[str, dict]) -> None:
     st.dataframe(df.style.format({"LDZ Δ (GWh)": "{:+,.0f}", "Wind+Solar Δ (GWh)": "{:+,.0f}",
                                   "Net demand Δ (GWh)": "{:+,.0f}"}, na_rep="n/a"),
                  use_container_width=True, hide_index=True)
-    st.caption(f"Net = LDZ delta − displaced-gas delta. |net| above {GAS_TOTAL_SIGNAL_GWH:,} GWh is the "
+    info_tip(f"Net = LDZ delta − displaced-gas delta. |net| above {GAS_TOTAL_SIGNAL_GWH:,} GWh is the "
                "scripts' cumulative trade threshold.")
 
 
@@ -655,10 +640,6 @@ def render_gas_demand():
     st.markdown("#### GAS DEMAND")
     source = _source_switch()
     cfg = GAS_SOURCES[source]
-    st.caption(f"EU gas demand from the weather — {cfg['desc']} — through the same fitted curves as "
-               "ldz_forecast.py and rdl_forecast.py. EC and GFS runs are shown side by side; pick runs below. "
-               "Every run is scored against the run the scripts pair it with: a 00z against the same model's "
-               "previous 00z (Friday's on a Monday), a later cycle against that day's 00z.")
 
     try:
         gas_df = load_gas_demand_daily(source)
@@ -712,7 +693,7 @@ def render_gas_demand():
         else:
             regions = []
     if cfg.get("note"):
-        st.caption(cfg["note"])
+        pass
 
     if not sel_runs:
         status_banner("Pick at least one run.", "warning")
@@ -748,10 +729,7 @@ def render_gas_demand():
 
     _run_notices(ldz_res or rdl_res)
     if source == "EQ" and areas:
-        st.caption("The LDZ curves were fitted on Volue consumption temperatures and are seeded with Volue "
-                   "actuals; EQ's consumption temperature is the same kind of population-weighted mean, so "
-                   "a small level offset is possible — the run-over-run delta, which is what is traded "
-                   "here, is unaffected because both runs come from the same source.")
+        pass
 
     if "rdl" not in legs:
         if areas:

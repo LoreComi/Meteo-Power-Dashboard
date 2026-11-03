@@ -40,7 +40,9 @@ from _data import load_hydro_prod
 from _charts import make_hydro_production_chart, make_country_scenario_panel
 from _hydro import _overview_metrics, _layer_kpi, _flags, _chips
 from _hydro_quantify import production_series, production_summary
-from _forecast import default_scenarios, land_members, scenario_cards, scenario_ids, week_title, _side_by_side_html, _UNITS
+from _forecast import (
+    default_scenarios, land_members, aggregate_members, scenario_cards, scenario_ids, week_title, _side_by_side_html, _UNITS,
+)
 from _morning import (
     RunCol, compute_grid, _cell_html, _col_tip, _fmt_val, _signed, _short_title, MORNING_PRECIP_SUM_DAYS,
 )
@@ -334,7 +336,7 @@ def _render_hydro(country: str, cfg: dict, hy: dict) -> None:
         sub = (f"{hy['name']} · last observed day {q['last_obs']:%d %b} · the {W} days to it against the {W} after it"
                + (f" · Volue forecast issued {q['fc_issued']:%d %b}" if q.get("fc_issued") is not None else ""))
     else:
-        sub = "reservoirs, snow, groundwater and the two-week outlook"
+        sub = ""
     _sec_header("hydro", "Hydro", sub)
     if not area_lvl and not hy.get("area"):
         _note(f"No hydro series for {country}: the Hydro section covers the Alpine, Nordic, Iberian and "
@@ -388,30 +390,6 @@ def _render_hydro(country: str, cfg: dict, hy: dict) -> None:
 # SCENARIOS — the Forecast section's defaults, read for this country
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _aggregate_members(pm: pd.DataFrame, areas: list[str], label: str, how: str) -> pd.DataFrame:
-    """Member rows of several countries as one area `label`: temperature averaged, wind and
-    solar summed, per member and day (a day counts only when every country has it)."""
-    if pm.empty:
-        return pm
-    if len(areas) == 1:
-        return pm.assign(area=label)
-    keys = [c for c in ("provider", "model", "reference_date", "metric", "day", "lead_day", "member") if c in pm.columns]
-    agg = {c: how for c in ("value", "normal", "anomaly") if c in pm.columns}
-    g = pm.groupby(keys, dropna=False)
-    out = g.agg(agg)
-    n = g["value"].count()
-    out = out[n >= len(areas)].reset_index()
-    return out.assign(area=label)
-
-
-def _load_scenarios() -> tuple:
-    """The Forecast tab's default scenarios: (results per week, info, weeks_sel, weeks_all, error)."""
-    try:
-        return (*default_scenarios(SCENARIO_DEFAULT_SOURCE), None)
-    except Exception as e:
-        return None, None, None, None, f"Scenario inputs unavailable: {e}"
-
-
 def _render_scenarios(country: str, cfg: dict, scen: tuple) -> None:
     results, info, weeks_sel, weeks_all, err = scen
     if results and info is not None:
@@ -419,7 +397,7 @@ def _render_scenarios(country: str, cfg: dict, scen: tuple) -> None:
                f"{next(iter(results.values()))['n_members']} members · each trading week clustered on its own "
                f"weekly-mean Z500 field, k = {SCENARIO_K_DEFAULT}")
     else:
-        sub = "the Forecast section's split, read for this country"
+        sub = ""
     _sec_header("scen", "Scenarios", sub)
     if err:
         st.warning(err)
@@ -432,16 +410,14 @@ def _render_scenarios(country: str, cfg: dict, scen: tuple) -> None:
         st.caption("The run does not cover enough days of any trading week to form scenarios yet.")
         return
     areas = list(cfg.get("scenario", []))
-    _note(f"The Forecast → Scenarios tab's defaults; change them there for another split. "
-          f"Temperature, wind and solar read on the {info['land']['label']} of the same member IDs.")
     land = {}
     for metric in ("Temperature", "Wind", "Solar"):
         pm = land_members(info, metric, tuple(areas)) if areas else pd.DataFrame()
-        pm = _aggregate_members(pm, areas, country, "mean" if metric == "Temperature" else "sum") if not pm.empty else pm
+        pm = aggregate_members(pm, areas, country, "mean" if metric == "Temperature" else "sum") if not pm.empty else pm
         if not pm.empty:
             land[metric] = pm
     if len(areas) > 1:
-        st.caption(f"{country} = {', '.join(areas)} per member: temperature averaged, wind and solar summed.")
+        pass
     for i, (_, wk) in enumerate(weeks_sel.iterrows()):
         ws = pd.Timestamp(wk["week_start"]).normalize()
         res = results.get(ws)
@@ -463,9 +439,6 @@ def _render_scenarios(country: str, cfg: dict, scen: tuple) -> None:
                                        res["sizes"], res["n_members"], res["names"]), unsafe_allow_html=True)
         st.plotly_chart(make_country_scenario_panel(daily, country, _UNITS, [ws]),
                         use_container_width=True, key=f"dd_scen_{country}_{wk['week_label']}")
-    _note("Precipitation energy by scenario is not available: the member tables carry temperature, wind and "
-          "solar only. The hydro outlook above gives the ensemble-mean precipitation and its change since the "
-          "previous issue instead.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -72,7 +72,7 @@ from _hydro_quantify import (
     HYDRO_FAMILIES, HYDRO_DEFAULT_COUNTRIES, build_climatology, quantify_anomaly, split_recent_hist, stats_text,
     production_series, production_summary,
 )
-from _ui import kpi_card, kpi_row, status_banner, ordinal
+from _ui import info_tip, kpi_card, kpi_row, status_banner, ordinal
 
 NONE_LABEL = "— none —"
 
@@ -684,15 +684,7 @@ def _render_overview(avail: pd.DataFrame):
     aggs = [f"{a} paints {', '.join(c['iso3'])} where they have no series of their own"
             for a, c in HYDRO_MAP_REGIONS.items() if c.get("aggregate") and a in lm]
     legend = (layer + (f" as of {max(as_of):%d %b %Y}" if as_of else "")
-              + " · red = below normal / low in the history, blue = above / high · on each country: level vs "
-              f"normal · percentile of this week against the same week in {yrs} years · move in a week · hover for "
-              "every layer and the flags · <b>click a country or a station for its deep dive</b>"
-              + (" · " + "; ".join(aggs) if aggs else "")
-              + ((f" · ● river stations coloured by the latest temperature vs normal, red = warm, ±{RIVER_TEMP_COLOUR_RANGE_C:.0f} °C"
-                  if station_mode == "temperature" else
-                  f" · ● river stations coloured by the latest flow as % of normal, red = low water, "
-                  f"{RIVER_FLOW_COLOUR_RANGE_PCT[0]:.0f}–{RIVER_FLOW_COLOUR_RANGE_PCT[1]:.0f} %") if rivers else "")
-              + ".")
+              + " · <b>click a country or a station for its deep dive</b>")
     station_scale = None
     if station_mode == "flow":
         station_scale = dict(cmin=RIVER_FLOW_COLOUR_RANGE_PCT[0], cmax=RIVER_FLOW_COLOUR_RANGE_PCT[1], cmid=100.0,
@@ -731,7 +723,7 @@ def _render_overview(avail: pd.DataFrame):
             status_banner(f"None flagged — every series sits between the {ordinal(HYDRO_PCTL_LOW)} and "
                           f"{ordinal(HYDRO_PCTL_HIGH)} percentile of its history and moved less than "
                           f"{HYDRO_WEEK_MOVE_PTS} pts of normal in the week.", "good")
-        st.caption(f"Flags: at or below the {ordinal(HYDRO_PCTL_CRITICAL)} percentile = critically low, the "
+        info_tip(f"Flags: at or below the {ordinal(HYDRO_PCTL_CRITICAL)} percentile = critically low, the "
                    f"{ordinal(HYDRO_PCTL_LOW)} = low, at or above the {ordinal(HYDRO_PCTL_HIGH)} = very high; "
                    f"|Δ| ≥ {HYDRO_WEEK_MOVE_PTS} pts of normal in a week = fast drawdown / refill (level series "
                    "only — the hydro balance and SWE are shown as anomalies, so their week move is in GWh / mm and "
@@ -818,8 +810,6 @@ def _compute(country: str, family: str) -> tuple[dict | None, dict, str | None]:
 def _render_family(family: str, avail: pd.DataFrame):
     fam = HYDRO_FAMILIES[family]
     comp = HYDRO_COMPONENTS[family]
-    st.caption(f"{fam['description']} Volue curve family `res <area> hydro {fam['code']} gwh cet h sa`"
-               + (" with the Volue normal `... h n`." if fam["has_norm"] else "; norm = mean across completed years."))
 
     have = set(avail[(avail["component"] == comp) & (avail["data_type"] == "SA")]["area"]) if not avail.empty else set()
     countries_all = [c for c, code in HYDRO_AREA_CODES.items() if code in have] or list(HYDRO_AREA_CODES.keys())
@@ -962,11 +952,6 @@ def _production_table(cols: list[tuple[str, dict]]) -> pd.DataFrame:
 
 
 def _render_production():
-    st.caption("Hydro production per Volue area — run-of-river and reservoir (= total − run-of-river, the split of "
-               "the Hydro Report's RoR / reservoir analysis) over the last two weeks against the Volue normal, Volue's "
-               "own production forecast for the next two, and the precipitation energy observed and expected over the "
-               "same windows. Curves `pro <area> hydro ror|tot mwh/h cet h sa|n|f` and `rre <area> … sa|n` plus the "
-               "ensemble 'Avg', in GWh/day from hydro_prod_daily (pipeline/volue_hydro_prod.py).")
     by_name = {v: k for k, v in HYDRO_PROD_AREAS.items()}
     c1, c2 = st.columns([4, 1.4])
     with c1:
@@ -997,10 +982,9 @@ def _render_production():
         status_banner(f"No production rows for {', '.join(missing)} in {HYDRO_PROD_TABLE}.", "warning")
     issued = [q["fc_issued"] for q in summ.values() if q and q.get("fc_issued") is not None]
     short = [HYDRO_PROD_AREAS[c] for c, q in summ.items() if q and (q["n_obs"] < window or q["n_fwd"] < window)]
-    st.caption((f"Volue production forecast issued {max(issued):%d %b %Y}. " if issued else "")
-               + f"Precipitation energy expected = the '{HYDRO_PROD_PRECIP_PATTERNS[0]}' ensemble mean of the latest "
-                 f"issue; the other patterns are listed under it."
-               + (f" Short windows (fewer than {window} days found): {', '.join(short)}." if short else ""))
+    if issued or short:
+        st.caption((f"Volue production forecast issued {max(issued):%d %b %Y}. " if issued else "")
+                   + (f"Short windows (fewer than {window} days found): {', '.join(short)}." if short else ""))
 
     cols = [(HYDRO_PROD_AREAS[c], summ[c]) for c in codes]
     st.markdown(f"##### Last {window} days vs the next {window} · areas side by side")
@@ -1090,14 +1074,6 @@ def _render_reservoir_outlook():
     model = load_reservoir_model()
     area_code = next(iter(RESERVOIR_OUTLOOK_AREAS))
     country = RESERVOIR_OUTLOOK_AREAS[area_code]
-    st.caption(f"{country}: where the reservoir stock goes from here. The Volue normal path from the latest level, moved by a "
-               "**weather term** — the precipitation-energy ensemble's cumulative anomaly over 46 days × a season-specific response "
-               "(the direct rain → reservoir relation, which absorbs the production response) — and, from 2–8 weeks on, a **state term** — "
-               "the mean reversion of the level anomaly, fitted separately below and above normal (the refill from below is fast, the "
-               "drawdown from above slow — and weighted down, since stock has been kept higher since 2022), and the snowpack (Exolabs SWE) "
-               "anomaly from December to June. The band is the "
-               "members' spread plus the state regression's residual. Volue's own reservoir forecast and the nearest **analogue years** "
-               "(level and snow anomaly at this week, their actual path re-anchored on today's level) are context, not the forecast.")
     try:
         paths, runs = load_reservoir_outlook(area_code, RESERVOIR_OUTLOOK_PAST_ISSUES)
     except Exception as e:
@@ -1139,11 +1115,6 @@ def _render_reservoir_outlook():
     with st.expander("Model skill — leave-one-year-out backtest stored with the fit"):
         if model:
             st.markdown(_skill_table_html(model), unsafe_allow_html=True)
-            st.caption(f"Weather term fitted on {model['issues']['n']} weekly issues {model['issues']['from']} → {model['issues']['to']}; state term "
-                       f"on the weekly history {model['history']['from']} → {model['history']['to']} (SWE years from 2017). In the same study "
-                       "Volue's own reservoir forecast was worse than the normal path at every horizon (45 monthly issues 2023–2026), because "
-                       "inflow and turbining co-move and the inflow forecast error exceeds the reservoir signal — hence a reduced form on "
-                       "precipitation energy rather than an inflow − production balance.")
         else:
             st.info("reservoir_model_fr.json not found next to the app.")
     past = paths[paths["issue_date"] < issue]
@@ -1161,10 +1132,6 @@ def _render_reservoir_outlook():
 
 def render_hydro():
     st.markdown("#### HYDRO MONITORING")
-    st.caption("The hydro outlook on a map of Europe — reservoirs, snow water equivalent, groundwater, hydro balance "
-               "and river temperatures, criticalities flagged, a deep dive per country on click — then the Hydro "
-               "Report quantify_* figures and statistics per family, computed live from the Volue hydro curves "
-               "since 2013 vs normal.")
     try:
         avail = load_hydro_available()
     except Exception as e:

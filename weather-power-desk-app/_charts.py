@@ -397,6 +397,69 @@ def make_scenario_table_heatmap(table: pd.DataFrame, unit: str, title: str) -> g
     return fig
 
 
+def make_scenario_temperature_maps(maps: pd.DataFrame, titles: dict[int, str], scen_ids: list[int],
+                                   bbox: dict | None = None, unit: str = "°C"):
+    """The scenarios side by side as temperature patterns: each one's weekly-mean 2 m
+    temperature departure from the ensemble mean on the scenario grid, filled contours
+    on one shared symmetric scale (red = milder than the ensemble, blue = colder), with
+    coastlines and borders — matplotlib + cartopy as the Anomaly Maps."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ids = [s for s in scen_ids if s != 0 and not maps[maps["scenario"] == s].empty]
+    n = max(1, len(ids))
+    z_all = maps["anomaly"].values.astype(float) if not maps.empty else np.array([0.0])
+    lim = float(np.nanmax(np.abs(z_all))) if np.isfinite(z_all).any() else 1.0
+    lim = max(float(np.ceil(lim * 2) / 2), 1.0)
+    levels = np.linspace(-lim, lim, 21)
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+        has_cartopy = True
+    except ImportError:
+        has_cartopy = False
+    with plt.rc_context(_MPL_STYLE):
+        fig, axes = plt.subplots(1, n, figsize=(5.6 * n, 4.8),
+                                 subplot_kw={"projection": ccrs.PlateCarree()} if has_cartopy else {})
+        axes = np.atleast_1d(axes)
+        cf = None
+        for ax, s in zip(axes, ids):
+            d = maps[maps["scenario"] == s]
+            piv = d.pivot_table(index="latitude", columns="longitude", values="anomaly")
+            lon, lat = piv.columns.values.astype(float), piv.index.values.astype(float)
+            z = piv.values.astype(float)
+            if has_cartopy:
+                if bbox:
+                    ax.set_extent([bbox["lon_min"], bbox["lon_max"], bbox["lat_min"], bbox["lat_max"]], crs=ccrs.PlateCarree())
+                ax.add_feature(cfeature.OCEAN, color=_OCEAN_COLOR, zorder=0)
+                ax.add_feature(cfeature.LAND, color=_LAND_COLOR, zorder=0)
+                cf = ax.contourf(lon, lat, z, levels=levels, cmap="RdBu_r", extend="both", alpha=0.9,
+                                 transform=ccrs.PlateCarree(), zorder=1)
+                ax.add_feature(cfeature.BORDERS, linewidth=0.4, edgecolor=_BORDER_CLR, zorder=3)
+                ax.coastlines(linewidth=0.7, color=_COAST_COLOR, zorder=3)
+                gl = ax.gridlines(draw_labels=True, linewidth=0.3, color=GRIDLINE, alpha=0.9)
+                gl.top_labels = False
+                gl.right_labels = False
+                gl.xlabel_style = {"color": INK_MUTED, "size": 7}
+                gl.ylabel_style = {"color": INK_MUTED, "size": 7}
+            else:
+                cf = ax.contourf(lon, lat, z, levels=levels, cmap="RdBu_r", extend="both")
+                ax.set_xlabel("Longitude")
+                ax.set_ylabel("Latitude")
+            ax.set_title(titles.get(s, f"Scenario {s}"), fontsize=10, fontweight="bold", pad=6,
+                         color=SCENARIO_COLORS[(int(s) - 1) % len(SCENARIO_COLORS)])
+        for ax in axes[len(ids):]:
+            ax.set_visible(False)
+        if cf is not None:
+            cbar = fig.colorbar(cf, ax=list(axes[:len(ids)]), orientation="horizontal", pad=0.08, fraction=0.04,
+                                label=f"2 m temperature, weekly mean, departure from the ensemble mean ({unit})")
+            cbar.ax.xaxis.label.set_color(INK_SECONDARY)
+            cbar.ax.tick_params(labelsize=7, colors=INK_MUTED)
+            cbar.outline.set_edgecolor(GRIDLINE)
+    return fig
+
+
 def make_country_scenario_panel(summaries: dict[str, pd.DataFrame], area: str, units: dict[str, str],
                                 weeks: list[pd.Timestamp] | None = None, height: int = 320) -> go.Figure:
     """One country, three panels side by side (Temperature | Wind | Solar): each scenario's

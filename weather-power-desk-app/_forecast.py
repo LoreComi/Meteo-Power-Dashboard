@@ -28,8 +28,8 @@ import streamlit as st
 from _config import (
     AREAS, DEFAULT_AREAS, ANOMALY_VIEW_DEFAULT_AREAS, METRICS, DEFAULT_METRIC, VOLUE_MODELS, DEFAULT_MODEL,
     METEOMATICS_MODELS, SPREAD_RATIO_HIGH, SPREAD_RATIO_LOW,
-    SCENARIO_SPATIAL_SOURCES, SCENARIO_DEFAULT_SOURCE, SCENARIO_OUTPUT_AREAS, SCENARIO_K_DEFAULT, SCENARIO_K_MAX,
-    SCENARIO_NWE_AREAS, SPATIAL_GRID_RES, SPATIAL_BBOX,
+    SCENARIO_SPATIAL_SOURCES, SCENARIO_DEFAULT_SOURCE, SCENARIO_K_DEFAULT, SCENARIO_K_MAX,
+    SCENARIO_NWE_AREAS, SCENARIO_REGIONS, SPATIAL_GRID_RES, SPATIAL_BBOX, SPATIAL_MAP_METRIC,
     area_label,
 )
 from _data import (
@@ -39,12 +39,12 @@ from _data import (
 from _charts import (
     AREA_COLORS, make_fan_chart, make_anomaly_heatmap,
     make_spread_vs_normal_chart, make_spread_ratio_heatmap, make_member_distribution, make_member_strips,
-    make_country_scenario_panel, scenario_color,
+    make_country_scenario_panel, make_scenario_temperature_maps, scenario_color,
 )
 from _scenarios import (
     available_weeks, default_weeks, spatial_member_matrix, cluster_members, apply_scenarios, centroid_maps,
-    name_cluster, short_name, nwe_read, scenario_daily_summary, scenario_weekly_values, scenario_name,
-    describe_scenario, silhouette_for_k,
+    name_cluster, short_name, nwe_read, scenario_field_maps, scenario_daily_summary, scenario_weekly_values,
+    scenario_name, describe_scenario, silhouette_for_k,
 )
 from _regimes import render_regimes
 from _ui import (anomaly_kpi, kpi_card, kpi_row, status_banner, page_header, sec_header, tile, tiles, note,
@@ -156,8 +156,7 @@ def _render_values(runs: pd.DataFrame):
     st.plotly_chart(make_anomaly_heatmap(cur, anom_col, a_unit, title=f"{metric} — daily anomaly vs normal ({a_unit})"),
                     use_container_width=True)
 
-    sec_header("spread", "Ensemble distribution by country",
-               "P10–P90 and P25–P75 bands · ensemble mean, median and normal · earlier runs faded")
+    sec_header("spread", "Ensemble distribution by country")
     cols = st.columns(2)
     for i, a in enumerate(areas):
         with cols[i % 2]:
@@ -250,10 +249,7 @@ def _render_uncertainty(runs: pd.DataFrame):
         status_banner("No spread climatology yet — fcst_spread_clim is built by the refresh job from the "
                       "last 365 days of EC-ENS 00z runs.", "warning")
     else:
-        sec_header("spread", f"Spread vs normal · days 1–{max_lead}",
-                   f"this run's across-member σ against the last year of EC-ENS 00z runs "
-                   f"({ratio['baseline'].iloc[0]} baseline) · above {SPREAD_RATIO_HIGH}× = more uncertain than usual, "
-                   f"below {SPREAD_RATIO_LOW}× = more confident")
+        sec_header("spread", f"Spread vs normal · days 1–{max_lead}")
         rr = ratio[(ratio["lead_day"] >= 1) & (ratio["lead_day"] <= max_lead)].groupby("area")["ratio"].mean()
         tiles([_ratio_tile(a, metric, float(rr.get(a, np.nan)), max_lead) for a in areas])
         high = [area_label(a) for a in areas if rr.get(a, 0) >= SPREAD_RATIO_HIGH]
@@ -265,8 +261,7 @@ def _render_uncertainty(runs: pd.DataFrame):
             status_banner(f"Ensemble spread is unusually tight for {', '.join(low)} — higher-than-usual confidence.", "good")
         st.plotly_chart(make_spread_ratio_heatmap(ratio), use_container_width=True)
 
-    sec_header("members", "Spread of the distribution · country detail",
-               "this run's spread by lead day against the normal spread, then every member day by day")
+    sec_header("members", "Spread of the distribution · country detail")
     d1, _ = st.columns([1.4, 3])
     with d1:
         focus = st.selectbox("Country", areas, format_func=area_label, key="fu_focus")
@@ -333,11 +328,48 @@ def spatial_weeks(info: dict) -> pd.DataFrame:
 
 
 def land_members(info: dict, metric: str, areas: tuple[str, ...]) -> pd.DataFrame:
-    """The member rows the scenarios are read on for this source (its `land` entry)."""
+    """The member rows the scenarios are read on for this source (its `land` entry) —
+    of the SAME run as the Z500 field (info['init']): member 7 of the 00z run is not
+    member 7 of the 12z run, so another run's rows would scramble every split. Empty
+    when that run's rows are not in the sandbox (the caller says so)."""
     try:
-        return load_members(info["land"]["provider"], info["land"]["model"], metric, tuple(areas))
+        return load_members(info["land"]["provider"], info["land"]["model"], metric, tuple(areas), init=info["init"])
     except Exception:
         return pd.DataFrame()
+
+
+def aggregate_members(pm: pd.DataFrame, areas: list[str], label: str, how: str) -> pd.DataFrame:
+    """Member rows of several countries as one area `label`: temperature averaged, wind and
+    solar summed, per member and day, over the countries the rows have (a day counts
+    only when every one of them has it)."""
+    if pm.empty:
+        return pm
+    present = [a for a in areas if a in set(pm["area"])]
+    if not present:
+        return pd.DataFrame()
+    pm = pm[pm["area"].isin(present)]
+    if len(present) == 1:
+        return pm.assign(area=label)
+    keys = [c for c in ("provider", "model", "reference_date", "metric", "day", "lead_day", "member") if c in pm.columns]
+    agg = {c: how for c in ("value", "normal", "anomaly") if c in pm.columns}
+    g = pm.groupby(keys, dropna=False)
+    out = g.agg(agg)
+    n = g["value"].count()
+    out = out[n >= len(present)].reset_index()
+    return out.assign(area=label)
+
+
+def region_members(info: dict, metric: str, regions: dict[str, list[str]] | None = None) -> pd.DataFrame:
+    """The land member rows of every region of SCENARIO_REGIONS as one frame, each region
+    aggregated per member (temperature averaged, wind and solar summed)."""
+    regions = regions or SCENARIO_REGIONS
+    areas = tuple(sorted({a for v in regions.values() for a in v}))
+    pm = land_members(info, metric, areas)
+    if pm.empty:
+        return pm
+    parts = [aggregate_members(pm, v, name, "mean" if metric == "Temperature" else "sum") for name, v in regions.items()]
+    parts = [x for x in parts if x is not None and not x.empty]
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -362,7 +394,19 @@ def cluster_spatial(source: str, weeks: tuple[str, ...], k: int, ref_iso: str) -
         return None
     cmaps = centroid_maps(grid, res["assignments"])
     names = {int(s): name_cluster(cmaps[cmaps["scenario"] == s]) for s in res["sizes"] if s != 0}
+    # the same members' weekly 2 m temperature field, per scenario — the maps
+    t2m = pd.DataFrame()
+    try:
+        for w in weeks:
+            ws = pd.Timestamp(w).normalize()
+            g = load_member_spatial_days(source, ws, ws + pd.Timedelta(days=6), SPATIAL_MAP_METRIC)
+            if not g.empty:
+                m = scenario_field_maps(g, res["assignments"])
+                t2m = m if t2m.empty else pd.concat([t2m, m]).groupby(["scenario", "latitude", "longitude"], as_index=False)["anomaly"].mean()
+    except Exception:
+        t2m = pd.DataFrame()
     return {
+        "t2m_maps": t2m,
         "assign": res["assignments"], "sizes": res["sizes"], "n_members": res["n_members"], "k": res["k"],
         "silhouette": res["silhouette"], "features": features, "grid_points": int(features.attrs.get("n_grid_points", 0)),
         "explained_pct": float(features.attrs.get("explained_variance_pct", 0.0)), "n_pcs": int(features.shape[1]),
@@ -503,30 +547,50 @@ def _week_days(tagged: dict[str, pd.DataFrame], ws: pd.Timestamp) -> dict[str, p
     return {m: t[t["week_start"] == ws] for m, t in tagged.items() if not t.empty}
 
 
-def _render_week(info: dict, res: dict, wk: pd.Series, tagged: dict[str, pd.DataFrame], show_areas: list[str],
-                 key: str) -> None:
-    """One trading week's scenarios: the cards, every country side by side, the daily
-    paths per country in an expander, the diagnostics in another."""
+def map_titles(res: dict) -> dict[int, str]:
+    return {s: f"Scenario {s} · {res['sizes'][s] / res['n_members']:.0%}" + (f" · {short_name(nm)}" if short_name(nm) else "")
+            for s, nm in res["names"].items()}
+
+
+def _render_week(info: dict, res: dict, wk: pd.Series, tagged: dict[str, pd.DataFrame], key: str) -> None:
+    """One trading week's scenarios: the cards, the temperature-pattern maps side by
+    side, the regions (NWE · Italy · Nordics) side by side, the daily paths per region
+    in an expander, the diagnostics in another."""
     ws = pd.Timestamp(wk["week_start"]).normalize()
     scen_ids = scenario_ids(res)
-    sec_header("scen", f"Scenarios · {week_title(wk)}", week_caption(info, res))
+    st.markdown(f"##### Scenarios for {week_title(wk)}")
+    st.caption(week_caption(info, res))
     kpi_row(scenario_cards(res, info, [ws]), max_cols=4)
+    maps = res.get("t2m_maps")
+    if maps is not None and not maps.empty:
+        try:
+            st.pyplot(make_scenario_temperature_maps(maps, map_titles(res), scen_ids, bbox=SPATIAL_BBOX),
+                      use_container_width=True)
+        except Exception as e:
+            st.warning(f"Temperature maps could not be drawn: {e}")
+        st.caption("Each scenario's weekly-mean 2 m temperature against the full ensemble mean, on its members' own "
+                   "gridded temperature: red = milder than the central forecast, blue = colder.")
+    else:
+        st.caption(f"No gridded temperature members ({SPATIAL_MAP_METRIC}) for this run yet — the maps appear once the "
+                   "field is in the sandbox.")
     tagged_w = {m: apply_scenarios(t, res["assign"]) for m, t in tagged.items() if not t.empty}
     if not tagged_w or all(t.empty for t in tagged_w.values()):
-        status_banner(f"No {info['land']['label']} rows for temperature, wind and solar yet — the scenarios are shown "
-                      "on the field alone." + (" Run the pipeline's eq-members step (run_scenarios.bat)."
-                                               if info["land"]["provider"] == "EQ" else " Run power_desk_refresh.py."),
-                      "warning")
+        status_banner(f"No {info['land']['label']} rows of this run ({pd.Timestamp(info['init']):%a %d %b %Hz}) in the sandbox "
+                      "yet — temperature, wind and solar by scenario appear once the run's member rows are loaded "
+                      + ("(the pipeline's eq-members step, run_scenarios.bat)." if info["land"]["provider"] == "EQ"
+                         else "(the refresh job, every 6 h)."), "warning")
         return
     weekly = {m: scenario_weekly_values(t, [ws], "value") for m, t in tagged_w.items()}
-    if show_areas:
-        st.markdown(_week_table_html(f"Countries · {wk['week_label']}", weekly, scen_ids, ws, res["sizes"], res["n_members"],
-                                     res["names"], show_areas), unsafe_allow_html=True)
-        with st.expander(f"Daily paths by country · {wk['week_label']}"):
-            daily = {m: scenario_daily_summary(t, "value") for m, t in _week_days(tagged_w, ws).items() if not t.empty}
-            for a in show_areas:
-                st.plotly_chart(make_country_scenario_panel(daily, a, _UNITS, [ws]), use_container_width=True,
-                                key=f"{key}_panel_{a}")
+    regions = list(SCENARIO_REGIONS)
+    st.markdown(_week_table_html(f"Regions · {wk['week_label']}", weekly, scen_ids, ws, res["sizes"], res["n_members"],
+                                 res["names"], regions, {r: r for r in regions}), unsafe_allow_html=True)
+    st.caption("Per member: temperature averaged over the region's countries, wind and solar summed · "
+               + " · ".join(f"{r} = {', '.join(v)}" for r, v in SCENARIO_REGIONS.items()) + ".")
+    with st.expander(f"Daily paths by region · {wk['week_label']}"):
+        daily = {m: scenario_daily_summary(t, "value") for m, t in _week_days(tagged_w, ws).items() if not t.empty}
+        for r in regions:
+            st.plotly_chart(make_country_scenario_panel(daily, r, _UNITS, [ws]), use_container_width=True,
+                            key=f"{key}_panel_{r}")
     with st.expander(f"Member → scenario map · cluster names · separability · {wk['week_label']}"):
         d1, d2, d3 = st.columns([1, 1.6, 1.2])
         with d1:
@@ -572,7 +636,7 @@ def _render_scenarios(runs: pd.DataFrame):
 
     keys = list(opts.keys())
     with keyed("tb_fs"):
-        c1, c2, c3, c4 = st.columns([1.6, 3.0, 1.0, 2.2])
+        c1, c2, c3 = st.columns([1.6, 3.4, 1.0])
         with c1:
             source = st.selectbox("Ensemble", keys, index=keys.index(SCENARIO_DEFAULT_SOURCE) if SCENARIO_DEFAULT_SOURCE in keys else 0,
                                   format_func=lambda k: opts[k]["label"], key="fs_source",
@@ -594,19 +658,15 @@ def _render_scenarios(runs: pd.DataFrame):
                                       f"{'' if wk_idx.loc[w, 'full'] else '  (partial, %d d)' % wk_idx.loc[w, 'n_days']}")
         with c3:
             k = st.number_input("Scenarios", 2, SCENARIO_K_MAX, SCENARIO_K_DEFAULT, key="fs_k")
-        with c4:
-            out_areas = st.multiselect("Countries shown", list(AREAS.keys()),
-                                       [a for a in SCENARIO_OUTPUT_AREAS if a in AREAS], format_func=area_label, key="fs_out")
     if not weeks_pick:
         st.info("Pick at least one week.")
         return
     weeks_sel = usable[usable["week_start"].isin(weeks_pick)].sort_values("week_start")
-    show_areas = [a for a in out_areas if a in AREAS]
 
-    # the land members once, for every week (cached loads)
+    # the regions' land members of the field's run, once for every week (cached loads)
     tagged_src: dict[str, pd.DataFrame] = {}
     for metric in ("Temperature", "Wind", "Solar"):
-        pm = land_members(info, metric, tuple(show_areas))
+        pm = region_members(info, metric)
         if not pm.empty:
             tagged_src[metric] = pm
 
@@ -619,7 +679,7 @@ def _render_scenarios(runs: pd.DataFrame):
         if not res:
             status_banner(f"{wk['week_label']}: not enough complete members in the Z500 field.", "warning")
             continue
-        _render_week(info, res, wk, tagged_src, show_areas, key=f"fs_{source}_{wk['week_label']}")
+        _render_week(info, res, wk, tagged_src, key=f"fs_{source}_{wk['week_label']}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -629,9 +689,7 @@ def _render_scenarios(runs: pd.DataFrame):
 def render_forecast():
     st.markdown(PAGE_CSS, unsafe_allow_html=True)
     with keyed("pg_forecast"):
-        page_header("forecast", "Section 01", "Forecast",
-                    "Volue ensembles by country · spread against the normal spread · scenarios from the Z500 field · "
-                    "European weather regimes")
+        page_header("forecast", "Section 01", "Forecast")
         # Weather Regimes reads its own table, so a failure of the Volue run list
         # must not take it down with the other three tabs.
         runs, runs_error = None, None

@@ -165,3 +165,12 @@ def page_header(icon: str, eyebrow: str, title: str, subtitle: str = "", color: 
                 f'<div class="pg-title">{title}</div>'
                 + (f'<div class="pg-sub">{subtitle}</div>' if subtitle else "") + "</div></div>",
                 unsafe_allow_html=True)
+
+
+def info_tip(text: str, label: str = "How to read this") -> None:
+    """An explanation kept out of the page: a small muted label with a "?" that shows `text`
+    on hover. On a Streamlit whose st.markdown has no `help`, nothing is drawn."""
+    try:
+        st.markdown(f'<div class="info-tip">{label}</div>', unsafe_allow_html=True, help=text)
+    except TypeError:
+        pass

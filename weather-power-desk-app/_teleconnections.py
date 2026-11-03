@@ -38,7 +38,7 @@ from _charts import (
     make_corr_heatmap, make_index_period_bars, make_index_recent_chart, make_tele_scatter, make_composite_bars,
     make_regression_fit, make_year_month_heatmap,
 )
-from _ui import kpi_card, kpi_row, status_banner
+from _ui import info_tip, kpi_card, kpi_row, status_banner
 
 CORR_NOTE = ("* p < 0.05, ** p < 0.01 for each cell on its own — with this many cells about one in twenty shows a "
              "star by chance, so trust patterns (neighbouring countries, adjacent months, a physical reason) over a "
@@ -183,8 +183,6 @@ def render_teleconnections():
 
     signs: dict[str, int] = {}
     if len(sel) >= 2:
-        st.caption("Blend — the mean of the selected indices' z-scores, standardised again. Tick *invert* to subtract an "
-                   "index instead of adding it (NAO − SCAND is a classic).")
         ncol = min(len(sel), 8)
         cols = st.columns(ncol)
         for i, n in enumerate(sel):
@@ -228,9 +226,7 @@ def render_teleconnections():
     ctx = (f"{plabel} · {years[0]}–{years[1]} · index leads {lead} mo" if lead else f"{plabel} · {years[0]}–{years[1]}")
     trend_note = "linear trend removed" if detrend else "trend kept"
     if "Reanalysis" in sources:
-        st.caption(f"Reanalysis: Meteologica ERA5-driven generation of today's fleet (one vintage, constant capacity — "
-                   f"pure weather), anomaly = % of its {TELE_REANALYSIS_BASE_YEARS[0]}–{TELE_REANALYSIS_BASE_YEARS[1]} "
-                   f"mean for the month. Volue: actuals vs the Volue normal, and its fleet grows over time.")
+        pass
 
     tabs = st.tabs(["Indices", "Correlations", "Phase & analogue years", "Model & hit rate"])
 
@@ -308,7 +304,6 @@ def _render_correlations(all_frames, focus, focus_f, tgt, labels, areas, sources
     n_ = np.vstack([_grid(grid[grid["index"] == n], labels, "n") for n in rows])
     st.plotly_chart(make_corr_heatmap(r, p, n_, list(labels.values()), rows,
                                       f"{metric} anomaly vs index · {ctx} · {trend_note}"), use_container_width=True)
-    st.caption(CORR_NOTE)
 
     prof = ts.profile_grid(focus_f, tgt, resolution, detrend, years)
     keys = list(labels)
@@ -401,8 +396,6 @@ def _render_phase(sel, frames, focus, focus_f, focus_m, tgt, labels, period, pla
         _composite_block(tgt, labels, period, groups, order, detrend, years, a_unit,
                          f"{metric} anomaly when {focus} is low / neutral / high · {ctx}", f"tele_phase_{metric}_{plabel}", now_cls)
         return
-    st.caption(f"Pick a condition per index. A year is in the regime when every condition holds at once "
-               f"(positive = at or above +{thr:g}σ, negative = at or below −{thr:g}σ).")
     cond: dict[str, str] = {}
     cols = st.columns(min(len(sel), 6))
     for i, n in enumerate(sel):
@@ -431,9 +424,6 @@ _VERDICT_BG = {"Usable": "background-color:#d6efd6", "Marginal": "background-col
 
 def _render_regression(sel, frames, tgt, labels, period, plabel, detrend, years, a_unit, metric, ctx):
     """The indices as a forecast model for the target anomaly, judged out of sample."""
-    st.caption("A model of the target anomaly from the indices, judged only on years it did not see: every year is "
-               "predicted by a fit that leaves that year out. **Hit rate** = share of years whose above / below-normal sign "
-               "it got right.")
     pred = st.multiselect("Predictors (1–4 — with ~45 years, more start to fit noise)", sel, sel[:3], max_selections=4,
                           key="tc_reg_pred_" + "|".join(sel))
     if not pred:
@@ -473,7 +463,7 @@ def _render_regression(sel, frames, tgt, labels, period, plabel, detrend, years,
                             "typical miss": "{:.1f}"}, na_rep="—")
     sty = (sty.map if hasattr(sty, "map") else sty.applymap)(lambda v: _VERDICT_BG.get(v, ""), subset=["verdict"])
     st.dataframe(sty, use_container_width=True, hide_index=True)
-    st.caption(
+    info_tip(
         f"{metric} anomaly ({a_unit}), {ctx}. **Usable** = out-of-sample R² ≥ 0.10, hit rate ≥ 65 % that a coin toss would "
         "rarely give (p < 0.05) and above the always-guess-the-common-sign baseline; **Marginal** = some skill and a hit rate "
         "beating a coin at p < 0.10; otherwise **Not usable**. These cut-offs are a judgement call, not a standard. "

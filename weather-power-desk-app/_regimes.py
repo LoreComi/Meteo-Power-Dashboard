@@ -261,9 +261,6 @@ def _render_headline(perc: pd.DataFrame, clim_share: pd.Series, n_members: int, 
             sub = "climatology unavailable"
         cards.append(_regime_badge(label, share, sub))
     kpi_row(cards, max_cols=4)
-    st.caption(f"Share of the {n_members} members averaged over {len(days)} forecast days "
-               f"({days[0]:%d %b} – {days[-1]:%d %b}), against what the reanalysis says is "
-               "normal for the same calendar days.")
 
 
 def _render_forecast(run: pd.DataFrame, clim: dict, model_label: str, n_members: int,
@@ -289,10 +286,7 @@ def _render_forecast(run: pd.DataFrame, clim: dict, model_label: str, n_members:
                                       spread=band if show_band else None),
                     use_container_width=True)
     if no_days:
-        st.caption(f"Grey: {len(no_days)} day(s) where no regime clears the threshold — "
-                   f"{', '.join(d.strftime('%a %d %b') for d in no_days)}. The threshold falls from "
-                   f"{WR_THRESHOLD:.2f} at day 0 to {threshold_for_lead(14):.2f} at day 14, because "
-                   "a regime is harder to identify further out.")
+        st.caption(f"No regime clears the threshold on: {', '.join(d.strftime('%a %d %b') for d in no_days)}.")
     if extended:
         status_banner(f"Showing beyond day {WR_DEFAULT_HORIZON_DAYS - 1}: the threshold's lead decay "
                       "was fitted over leads 0–14, so it is extrapolated on the last days.", "warning")
@@ -321,8 +315,7 @@ def _render_climatology(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, clean
                       f"({clim['first']:%Y}–{clim['last']:%Y}); at least {WR_CLIM_MIN_YEARS} are "
                       "wanted before these frequencies mean much.", "warning")
     else:
-        st.caption(f"Reanalysis {clim['first']:%b %Y} – {clim['last']:%b %Y} "
-                   f"({clim['years']} years), classified through the same projection.")
+        pass
 
     days = perc.index
     clim_share = window_climatology(clim, days)
@@ -340,9 +333,6 @@ def _render_climatology(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, clean
                         use_container_width=True)
 
     st.markdown("###### Persistence — forecast episodes against the climatological spread")
-    st.caption("One histogram per regime the members actually settle into: how long each member "
-               "holds it, against the reanalysis quartiles for episodes of 5 days or more (the "
-               "filter the original tool's histograms use).")
     seqs = member_sequences(run, clean=clean)
     per_regime: dict[str, list] = {r: [] for r in WR_REGIMES}
     for seq in seqs.values():
@@ -379,18 +369,11 @@ def _render_climatology(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, clean
         st.plotly_chart(make_wr_transition_heatmap(
             clim["transitions"], "Climatology — % of exits into each regime"),
             use_container_width=True)
-    st.caption("Left: where the members go, as a share of all transitions in this run. Right: the "
-               "reanalysis, as a share of exits from each regime — read it row by row.")
 
 
 def render_regimes():
     """Forecast → Weather Regimes."""
     st.markdown("##### European Weather Regimes")
-    st.caption("Each ensemble member's 500 hPa geopotential field projected onto the 7 "
-               "North-Atlantic / European regimes of Michel & Rivière (2011) — the "
-               "corso_model_wr tool, live. EC-ENS (the tool's ensemble, 51 members) is projected by the "
-               "local pipeline from the Meteomatics field it fetches through the DSL gateway; AIFS-ENS and "
-               "GFS-ENS by the refresh job from the silver layer. This page reads the per-member result.")
 
     try:
         df = load_wr_forecast_members()

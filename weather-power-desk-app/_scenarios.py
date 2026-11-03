@@ -265,6 +265,21 @@ def centroid_maps(grid: pd.DataFrame, assignments: pd.DataFrame) -> pd.DataFrame
     return pd.concat(out, ignore_index=True) if out else pd.DataFrame(columns=["scenario", "latitude", "longitude", "anomaly"])
 
 
+def scenario_field_maps(grid_df: pd.DataFrame, assignments: pd.DataFrame) -> pd.DataFrame:
+    """Per scenario, the mean of a gridded member field over its members — the weekly
+    T2M departure from the ensemble mean the scenario maps show. `grid_df` is one
+    week's DataFrame(provider, member, latitude, longitude, anomaly) from
+    load_member_spatial_days. DataFrame(scenario, latitude, longitude, anomaly)."""
+    if grid_df is None or grid_df.empty or assignments is None or assignments.empty:
+        return pd.DataFrame(columns=["scenario", "latitude", "longitude", "anomaly"])
+    d = _with_ids(grid_df).merge(assignments[["member_id", "scenario"]], on="member_id", how="inner")
+    if d.empty:
+        return pd.DataFrame(columns=["scenario", "latitude", "longitude", "anomaly"])
+    out = d.groupby(["scenario", "latitude", "longitude"], as_index=False)["anomaly"].mean()
+    out["scenario"] = out["scenario"].astype(int)
+    return out
+
+
 def region_name(lat: float, lon: float) -> str:
     for name, la0, la1, lo0, lo1 in NAMED_REGIONS:
         if la0 <= lat <= la1 and lo0 <= lon <= lo1:

@@ -296,19 +296,29 @@ def load_member_sources() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def load_members(provider: str, model: str, metric: str, areas: tuple[str, ...]) -> pd.DataFrame:
-    """Per-member daily values (and anomaly) for one member source — its latest run only,
-    so a pipeline table that briefly holds two issues never mixes them."""
+def load_members(provider: str, model: str, metric: str, areas: tuple[str, ...], init=None) -> pd.DataFrame:
+    """Per-member daily values (and anomaly) for one member source: the run whose init is
+    `init` (± 1 h — the Volue rows are stamped with the init since the notebook keeps
+    two runs, the EQ rows with the issue time), else its latest run. Empty when that
+    run is not in the table: member IDs only correspond within one run, so the
+    Scenarios tab never reads a field's clusters on another run's members."""
     if not areas:
         return pd.DataFrame()
     table = _member_table(provider)
+    if init is not None:
+        t = pd.Timestamp(init)
+        t = t.tz_convert("UTC").tz_localize(None) if t.tzinfo is not None else t
+        run_where = (f"reference_date BETWEEN TIMESTAMP '{t - pd.Timedelta(hours=1):%Y-%m-%d %H:%M:%S}' "
+                     f"AND TIMESTAMP '{t + pd.Timedelta(hours=1):%Y-%m-%d %H:%M:%S}'")
+    else:
+        run_where = (f"reference_date = (SELECT MAX(reference_date) FROM {table} "
+                     f"WHERE provider = '{provider}' AND model = '{model}' AND metric = '{metric}')")
     df = run_query(f"""
         SELECT provider, model, reference_date, metric, area, day, lead_day, member, value, normal, anomaly
         FROM {table}
         WHERE provider = '{provider}' AND model = '{model}' AND metric = '{metric}'
           AND area IN ({_sql_list(areas)})
-          AND reference_date = (SELECT MAX(reference_date) FROM {table}
-                                WHERE provider = '{provider}' AND model = '{model}' AND metric = '{metric}')
+          AND {run_where}
         ORDER BY area, day, member
     """)
     if df.empty:
@@ -353,11 +363,12 @@ def load_spatial_sources() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def load_member_spatial_days(source: str, day_min, day_max) -> pd.DataFrame:
-    """The Z500 member field of one source averaged over the days of one trading
-    week (one call per week): DataFrame(member, latitude, longitude, n_days, value,
-    ens_mean, anomaly) on the latest run — ~50 × 830 rows, aggregated in SQL so the
-    full table (× 16 days) never crosses the Statement API's inline-result limit."""
+def load_member_spatial_days(source: str, day_min, day_max, metric: str = SPATIAL_METRIC) -> pd.DataFrame:
+    """One member field of one source (Z500 to cluster on, T2M to map) averaged over
+    the days of one trading week (one call per week): DataFrame(member, latitude,
+    longitude, n_days, value, ens_mean, anomaly) on the run that holds the Z500 field
+    — ~50 × 500 rows, aggregated in SQL so the full table (× 16 days) never crosses
+    the Statement API's inline-result limit."""
     cfg = SCENARIO_SPATIAL_SOURCES[source]
     table = f"{SBX_SCHEMA}.{cfg['table']}"
     d0, d1 = pd.Timestamp(day_min).date(), pd.Timestamp(day_max).date()
@@ -366,7 +377,7 @@ def load_member_spatial_days(source: str, day_min, day_max) -> pd.DataFrame:
                member, latitude, longitude, COUNT(DISTINCT day) AS n_days,
                AVG(anomaly) AS anomaly, AVG(value) AS value, AVG(ens_mean) AS ens_mean
         FROM {table}
-        WHERE model = '{cfg['model']}' AND metric = '{SPATIAL_METRIC}'
+        WHERE model = '{cfg['model']}' AND metric = '{metric}'
           AND reference_date = (SELECT MAX(reference_date) FROM {table}
                                 WHERE model = '{cfg['model']}' AND metric = '{SPATIAL_METRIC}')
           AND day BETWEEN DATE '{d0}' AND DATE '{d1}'

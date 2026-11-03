@@ -125,7 +125,8 @@ CUSTOM_CSS = f"""
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     color: var(--text-primary);
 }}
-.stApp > header {{ background: transparent !important; }}
+.stApp > header, header[data-testid="stHeader"] {{ background: transparent !important; box-shadow: none !important; }}
+[data-testid="stMainBlockContainer"], .main .block-container {{ padding-top: 2.2rem !important; }}
 
 h1 {{
     color: var(--text-primary) !important;
@@ -386,12 +387,43 @@ p, .stMarkdown, span, label {{ color: var(--text-primary); }}
 }}
 hr {{ border-color: var(--border) !important; }}
 
+/* Inputs: white fields with a visible outline, so every control stands out from the grey page */
 .stMultiSelect [data-baseweb="select"] > div,
-.stSelectbox [data-baseweb="select"] > div {{
-    background: var(--bg-card) !important;
-    border-color: var(--border) !important;
+.stSelectbox [data-baseweb="select"] > div,
+.stNumberInput [data-baseweb="input"],
+.stTextInput [data-baseweb="input"],
+.stDateInput [data-baseweb="input"],
+.stTextArea textarea {{
+    background: #ffffff !important;
+    border: 1px solid rgba(20,20,15,0.22) !important;
     border-radius: var(--radius-md) !important;
+    box-shadow: 0 1px 2px rgba(20,20,15,0.06);
 }}
+.stNumberInput input, .stTextInput input, .stDateInput input {{ background: #ffffff !important; }}
+.stNumberInput button {{ background: #ffffff !important; }}
+.stMultiSelect [data-baseweb="select"] > div:hover,
+.stSelectbox [data-baseweb="select"] > div:hover,
+.stNumberInput [data-baseweb="input"]:hover,
+.stTextInput [data-baseweb="input"]:hover,
+.stDateInput [data-baseweb="input"]:hover {{ border-color: {CAT_BLUE} !important; }}
+.stMultiSelect [data-baseweb="select"] > div:focus-within,
+.stSelectbox [data-baseweb="select"] > div:focus-within,
+.stNumberInput [data-baseweb="input"]:focus-within,
+.stTextInput [data-baseweb="input"]:focus-within,
+.stDateInput [data-baseweb="input"]:focus-within {{
+    border-color: {CAT_BLUE} !important; box-shadow: 0 0 0 3px rgba(42,120,214,0.15) !important; }}
+/* expanders read as cards, not as faint outlines */
+[data-testid="stExpander"] details {{ background: #ffffff; border: 1px solid rgba(20,20,15,0.16) !important;
+    border-radius: var(--radius-md) !important; }}
+/* radio and checkbox circles/boxes: a darker ring when off */
+[data-testid="stRadio"] label > div:first-child, [data-testid="stCheckbox"] label > span:first-child {{
+    border-color: rgba(20,20,15,0.35) !important; }}
+/* softer multiselect chips, everywhere */
+[data-baseweb="tag"] {{ background: rgba(42,120,214,0.10) !important; border-radius: 8px !important; }}
+[data-baseweb="tag"] span {{ color: {CAT_BLUE} !important; font-weight: 600; }}
+[data-baseweb="tag"] svg {{ fill: {CAT_BLUE} !important; }}
+/* "How to read this ?" tips — explanations live only behind the "?" */
+.info-tip {{ font-size: 0.72rem; font-weight: 600; color: var(--text-muted) !important; margin: -2px 0 6px; }}
 /* Morning Call table — the Excel sheet, as HTML */
 .mc-block {{
     background: var(--bg-surface);
@@ -699,10 +731,6 @@ div[class*="st-key-pg_"] [data-baseweb="tab-list"] button[role="tab"][aria-selec
     box-shadow: 0 1px 4px rgba(20,20,15,0.10); }}
 div[class*="st-key-pg_"] [data-baseweb="tab-list"] button[role="tab"][aria-selected="true"] p {{ color: var(--accent) !important; }}
 div[class*="st-key-pg_"] [data-baseweb="tab-highlight"], div[class*="st-key-pg_"] [data-baseweb="tab-border"] {{ display: none; }}
-/* softer multiselect chips */
-div[class*="st-key-pg_"] [data-baseweb="tag"] {{ background: rgba(42,120,214,0.10) !important; border-radius: 8px !important; }}
-div[class*="st-key-pg_"] [data-baseweb="tag"] span {{ color: {CAT_BLUE} !important; font-weight: 600; }}
-div[class*="st-key-pg_"] [data-baseweb="tag"] svg {{ fill: {CAT_BLUE} !important; }}
 .dd-hero {{
     position: relative; overflow: hidden;
     background: radial-gradient(120% 140% at 100% 0%, #2c4f86 0%, rgba(44,79,134,0) 55%),

@@ -80,7 +80,6 @@ def _render_history():
     source, note = resolve_hist_source(metric, choice)
     if note:
         status_banner(note, "warning")
-    st.caption(f"Source — {HIST_SOURCE_NOTES.get(source or HIST_DEFAULT_SOURCE, source)}.")
     try:
         years_avail = load_hist_years(metric, source)
     except Exception as e:
@@ -141,9 +140,7 @@ def _render_history():
         full = agg.groupby("area")["n_days"].transform("max")
         part = agg[agg["n_days"] < 0.9 * full]
         if not part.empty:
-            st.caption("Part-years (fewer days of the selected months than the fullest year): "
-                       + ", ".join(sorted(f"{p}" for p in part["period"].unique()))
-                       + " — their anomaly is fair (same days as the normal), their actual level is not a full-year mean.")
+            st.caption("Part-years: " + ", ".join(sorted(f"{p}" for p in part["period"].unique())))
     if gran == "Weekly":
         st.plotly_chart(make_anomaly_heatmap(
             agg.rename(columns={"week_start": "day"}), a_col, a_unit,
@@ -215,11 +212,6 @@ def _render_maps():
 
 def render_historical():
     st.markdown("#### HISTORICAL & ANALYSIS")
-    st.caption("History by country — temperature from the Meteomatics / ERA5 climatology since 1979 "
-               "(population-weighted country means, the Anomaly Maps' own value / normal / anomaly), wind, "
-               "solar and precipitation energy from Volue since 2013 · monthly and weekly · multi-year and "
-               "multi-month selections · ERA5 anomaly maps · teleconnections: weather indices against temperature, wind "
-               "and solar (reanalysis since 1979) — correlations, phases, blends, regression, analogues.")
     tabs = st.tabs(["History by country", "Anomaly Maps", "Teleconnections"])
     with tabs[0]:
         _render_history()
