@@ -45,6 +45,16 @@ RENDERERS = {
 if "section" not in st.session_state:
     st.session_state["section"] = HOME
 
+# PC or phone: asked once when the app is opened (?layout=phone / ?layout=pc skips the question).
+DEVICES = ("PC", "Phone")
+if "device" not in st.session_state:
+    try:
+        _qp = str(st.query_params.get("layout", "")).lower()
+    except Exception:
+        _qp = ""
+    if _qp in ("pc", "phone"):
+        st.session_state["device"] = "Phone" if _qp == "phone" else "PC"
+
 
 def go(section: str) -> None:
     st.session_state["section"] = section
@@ -72,6 +82,21 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
+# ─── First open: PC or phone ─────────────────────────────────────────────────────
+def _set_device(device: str) -> None:
+    st.session_state["device"] = device
+
+
+if "device" not in st.session_state:
+    st.markdown("#### HOW ARE YOU VIEWING THE DASHBOARD?")
+    st.caption("Phone shows the Morning Call one window at a time, with one compare column and big type. "
+               "You can switch later in the sidebar. Open the app with ?layout=phone to skip this question.")
+    _c1, _c2, _ = st.columns([1, 1, 3])
+    _c1.button("💻  PC", use_container_width=True, on_click=_set_device, args=("PC",), key="device_pc")
+    _c2.button("📱  Phone", use_container_width=True, on_click=_set_device, args=("Phone",), key="device_phone")
+    st.stop()
+
+
 # ─── Sidebar navigation ─────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### Sections")
@@ -82,6 +107,10 @@ with st.sidebar:
                       format_func=lambda s: s if s == HOME or not SECTIONS[s]["locked"] else f"{s}  🔒")
     if picked != st.session_state["section"]:
         st.session_state["section"] = picked
+    st.divider()
+    st.radio("Layout", DEVICES, horizontal=True, index=DEVICES.index(st.session_state["device"]),
+             key="device_radio", on_change=lambda: _set_device(st.session_state["device_radio"]),
+             help="Phone: the Morning Call one window at a time, one compare column, big type.")
     st.divider()
     st.caption("Data: Volue (sandbox) · Meteomatics · Hydro Report methodology. "
                "Morning Call and Gas Demand read the sandbox tables (5-min cache).")

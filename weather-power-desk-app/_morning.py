@@ -8,7 +8,7 @@ departure from normal — are read first, and the absolute values second:
   At a glance         the reference run's biggest moves since its previous run and its
                       largest anomalies, as chips ranked across the blocks on each block's
                       own scale (a 1 °C move counts like a 1 GW wind move or 0.5 GW of
-                      solar), plus where the models shown disagree most.
+                      solar).
   Arrow chart         per block and window, every region's anomaly on one axis: the
                       filled dot is the reference run (red = warmer / less wind, solar,
                       precipitation; blue = colder / more), the hollow dot where its
@@ -52,7 +52,8 @@ normal, refreshed every couple of hours by Power_dashboard/pipeline/run_morning.
 so the grid opens on the latest issue and the agents brief about it; or
 {SBX_SCHEMA}.morning_daily — the notebook's Volue 'Avg' curves (00z/12z) with
 the Volue normal plus Meteomatics means. Layout: PC (everything) or Phone (one
-window, the reference run plus one compare column, big type).
+window, the reference run plus one compare column, big type), chosen when the app
+is first opened (app.py, session key "device").
 """
 from __future__ import annotations
 
@@ -439,8 +440,7 @@ def _chip(row: pd.Series, quantity: str, win: dict, n_windows: int) -> str:
 
 def _glance_html(cells: pd.DataFrame, ref: RunCol, win: dict, delta_label: str, windows: tuple[str, ...],
                  n_cols: int) -> str:
-    """Three lines of chips: biggest moves since the previous run, largest anomalies,
-    and — with two or more runs shown — where the models disagree most."""
+    """Two lines of chips: biggest moves since the previous run and largest anomalies."""
     rows = _glance_rows(cells, windows)
     if rows.empty:
         return ""
@@ -457,8 +457,6 @@ def _glance_html(cells: pd.DataFrame, ref: RunCol, win: dict, delta_label: str, 
     lines.append(line(f"Biggest moves · {delta_label} vs {ref.prev_label}" if ref.prev_init is not None
                       else "Biggest moves · no earlier run", "score_run", "d_run"))
     lines.append(line("Furthest from normal", "score_norm", "d_norm"))
-    if n_cols >= 2:
-        lines.append(line("Models disagree most", "score_spread", "spread"))
     return "".join(lines)
 
 
@@ -823,29 +821,19 @@ def _render_ai_brief(ctx: dict, today: pd.Timestamp, phone: bool = False, source
 # ─── page ──────────────────────────────────────────────────────────────────────
 
 def _layout_and_source() -> tuple[str, bool]:
-    """The two switches at the top of the page: data source and PC / Phone layout.
-    `?layout=phone` in the URL opens the phone layout (bookmark it on the phone)."""
+    """The data source switch at the top of the page, plus the device layout chosen
+    when the app was opened (app.py asks PC / Phone once per session)."""
     names = enabled_sources(MORNING_SOURCES)
     if st.session_state.get("mc_source") not in names:
         st.session_state["mc_source"] = MORNING_DEFAULT_SOURCE if MORNING_DEFAULT_SOURCE in names else names[0]
-    if "mc_layout" not in st.session_state:
-        try:
-            qp = str(st.query_params.get("layout", "")).lower()
-        except Exception:
-            qp = ""
-        st.session_state["mc_layout"] = "Phone" if qp == "phone" else "PC"
-    t1, t2, t3 = st.columns([1.4, 1.4, 4.2])
-    with t1:
-        if len(names) == 1:
-            source = names[0]
-        else:
+    if len(names) == 1:
+        source = names[0]
+    else:
+        t1, _ = st.columns([1.4, 5.6])
+        with t1:
             source = st.radio("Source", names, horizontal=True, key="mc_source",
                               help="\n".join(f"{k}: {MORNING_SOURCES[k]['desc']}" for k in names))
-    with t2:
-        layout = st.radio("Layout", ["PC", "Phone"], horizontal=True, key="mc_layout",
-                          help="Phone: one window at a time, one compare column, big type, stacked cards. "
-                               "Open the app with ?layout=phone to start in it.")
-    return source, layout == "Phone"
+    return source, st.session_state.get("device") == "Phone"
 
 
 def _window_title(win: dict, wkey: str) -> str:
@@ -861,12 +849,6 @@ def render_morning_call():
     blocks = {n: b for n, b in MORNING_BLOCKS.items() if not src.get("families") or b["family"] in src["families"]}
     if phone:
         st.markdown(PHONE_CSS, unsafe_allow_html=True)
-    else:
-        st.caption(f"The Morning Report, live — {src['desc']}. Same rows, windows and deltas as "
-                   "import_00z_add_solar_np_tot.py, read change-first: the biggest moves and anomalies of the "
-                   "reference run up front, the arrow chart per block, then the grid with the other models' runs "
-                   "as columns — each with its own change vs its previous run and its difference to the reference. "
-                   "The grid opens on the latest issue of the reference model.")
     try:
         df = load_morning_daily(source)
     except Exception as e:
@@ -998,13 +980,6 @@ def render_morning_call():
                        f"Δ norm = vs the {source} normal · {len(runs)} runs in the table, latest "
                        f"{runs[0][1]:%a %d %b %H}z ({MORNING_MODEL_LABELS.get(runs[0][0], runs[0][0])}).")
         else:
-            span1 = "weekend" if win["kind1"] == "weekend" else "weekly"
-            st.markdown(f'<div class="mc-sub">Windows follow the reference run\'s init day ({today:%A %d %b}): '
-                        f'<b>{win["t1"]}</b> {win["w1"][0]:%d %b} – {win["w1"][1]:%d %b} ({span1} average) · '
-                        f'<b>{win["t2"]}</b> {win["w2"][0]:%d %b} – {win["w2"][1]:%d %b} (weekly average) · '
-                        f'precipitation = sum of the first {MORNING_PRECIP_SUM_DAYS} forecast days · '
-                        f'{delta_label} = change vs each model\'s own earlier run · superscript = days of the window '
-                        f'the run covers, when not all · hover a cell or a chip for every number.</div>', unsafe_allow_html=True)
             st.markdown(_glance_html(cells, ref, win, delta_label, ("w1", "w2"), len(cols)), unsafe_allow_html=True)
             if show_chart:
                 st.plotly_chart(make_morning_anomaly_chart(cells, blocks,
