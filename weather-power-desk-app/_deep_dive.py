@@ -16,7 +16,7 @@ pairing as the Morning Report grid next to it:
                expected precipitation and production since the previous issue.
   Scenarios    the Forecast section's scenarios with its defaults (the EC-ENS members
                clustered on their weekly-mean Z500 field over the next two trading
-               weeks, k = 2, named from their centroid maps), read for this country:
+               weeks, k = 2, named by the regime their centroid resembles), read for this country:
                temperature, wind and solar by scenario, side by side, on the land
                variables of the same member IDs.
 
@@ -33,7 +33,7 @@ import streamlit as st
 
 from _config import (
     DEEP_DIVE_COUNTRIES, DEEP_DIVE_DEFAULT, DEEP_DIVE_HYDRO_WINDOW_DAYS, HYDRO_OVERVIEW_LAYERS, HYDRO_PROD_AREAS,
-    HYDRO_PROD_PRECIP_PATTERNS, HYDRO_PROD_TABLE, SCENARIO_DEFAULT_SOURCE, SCENARIO_K_DEFAULT, SCENARIO_OUTPUT_AREAS,
+    HYDRO_PROD_PRECIP_PATTERNS, HYDRO_PROD_TABLE, SCENARIO_DEFAULT_SOURCE, SCENARIO_K_DEFAULT,
 )
 from _data import load_hydro_prod
 from _charts import make_country_run_chart, make_hydro_production_chart, make_country_scenario_panel
@@ -334,14 +334,11 @@ def _render_scenarios(country: str, cfg: dict) -> None:
     weeks = list(weeks_sel["week_start"])
     scen_ids = scenario_ids(res)
     areas = list(cfg.get("scenario", []))
-    all_areas = tuple(set(areas) | set(SCENARIO_OUTPUT_AREAS))
-    temp_all = land_members(info, "Temperature", all_areas)
-    tagged_all = apply_scenarios(temp_all, res["assign"]) if not temp_all.empty else pd.DataFrame()
     st.caption(f"{info['label']} · run {pd.Timestamp(info['init']):%a %d %b %Hz} · {res['n_members']} members · "
                f"clustered on the weekly-mean Z500 field over {', '.join(weeks_sel['week_label'])} · "
                f"k = {SCENARIO_K_DEFAULT} — the Forecast → Scenarios tab's defaults; change them there for another split. "
                f"Temperature, wind and solar read on the {info['land']['label']} of the same member IDs.")
-    kpi_row(scenario_cards(res, tagged_all, weeks), max_cols=4)
+    kpi_row(scenario_cards(res, info, weeks), max_cols=4)
 
     if not areas:
         st.caption(f"No member rows for {country}.")

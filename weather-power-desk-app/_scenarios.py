@@ -28,7 +28,9 @@ Method (trading-week version)
    read each scenario's weekly values. Everything downstream of
    cluster_members() is provider-agnostic.
 
-Member ID normalisation: 'M07' / '07' / 7 / 'ens07' / 'pf07' / 'm7' / 'e07' -> 7.
+Member ID normalisation: 'M07' / '07' / 7 / 'ens07' / 'pf07' / 'm7' / 'e07' -> 7, then
+the provider's MEMBER_ID_OFFSET (Volue: −1, its '01' being the control run, '02'…'51'
+the perturbations m1…m50 — see _config).
 """
 from __future__ import annotations
 
@@ -43,7 +45,8 @@ from sklearn.preprocessing import StandardScaler
 
 from _config import (
     SCENARIO_K_DEFAULT, SCENARIO_MIN_MEMBERS, SCENARIO_MIN_WEEK_DAYS, SPATIAL_N_PCA,
-    SCENARIO_NAME_MIN_AMPLITUDE_M, SCENARIO_NAME_REGIME_MIN_R, WR_REGIMES, WR_REGIME_LONG,
+    SCENARIO_NAME_MIN_AMPLITUDE_M, SCENARIO_NAME_REGIME_MIN_R, WR_REGIMES, WR_REGIME_LONG, WR_REGIME_SHORT,
+    MEMBER_ID_OFFSET, SCENARIO_NWE_AREAS, SCENARIO_READ_TEMP_C, SCENARIO_READ_WIND_PCT,
 )
 
 OTHER_LABEL = 0   # scenario id reserved for the "Other" fold
@@ -100,9 +103,13 @@ def normalise_member(m) -> int | None:
 
 
 def _with_ids(members: pd.DataFrame) -> pd.DataFrame:
+    """member -> member_id: the parsed number plus the provider's MEMBER_ID_OFFSET
+    (read off the `provider` column; 0 when the frame has none)."""
     df = members.copy()
     df["member_id"] = df["member"].map(normalise_member)
     df = df.dropna(subset=["member_id"])
+    if "provider" in df.columns:
+        df["member_id"] = df["member_id"].astype(int) + df["provider"].map(MEMBER_ID_OFFSET).fillna(0).astype(int)
     df["member_id"] = df["member_id"].astype(int)
     return df
 
@@ -165,10 +172,7 @@ def spatial_member_matrix(grid_by_week: dict, n_components: int = SPATIAL_N_PCA)
     for ws, g in grid_by_week.items():
         if g is None or g.empty:
             continue
-        d = g.copy()
-        d["member_id"] = d["member"].map(normalise_member)
-        d = d.dropna(subset=["member_id"])
-        d["member_id"] = d["member_id"].astype(int)
+        d = _with_ids(g)
         d["week_start"] = pd.Timestamp(ws).normalize()
         wide = d.pivot_table(index="member_id", columns=["week_start", "latitude", "longitude"], values="anomaly")
         blocks.append(wide.dropna(axis=1, how="all"))
@@ -366,45 +370,84 @@ def name_cluster(cmap: pd.DataFrame, min_amplitude: float = SCENARIO_NAME_MIN_AM
             "amplitude": float(max(ridge["value"], -trough["value"])), "similarity": sim}
 
 
+def short_name(name: dict | None) -> str:
+    """The label the desk reads: the short regime name when the centroid matches one
+    ('Scandi Block'), else the ridge / trough description."""
+    if not name:
+        return ""
+    if name.get("regime"):
+        return WR_REGIME_SHORT.get(name["regime"], name.get("regime_label", name["regime"]))
+    return name.get("name", "")
+
+
 def scenario_name(s: int, names: dict | None = None) -> str:
-    """'Scenario 2' — or 'Scenario 2 · Ridge over Scandinavia, trough over Iberia' when
-    the cluster names are given."""
+    """'Scenario 2' — or 'Scenario 2 · Scandi Block' when the cluster names are given."""
     s = int(s)
     if s == OTHER_LABEL:
         return "Other"
     base = f"Scenario {s}"
-    n = (names or {}).get(s)
-    return f"{base} · {n['name']}" if n and n.get("name") else base
+    label = short_name((names or {}).get(s))
+    return f"{base} · {label}" if label else base
 
 
-def temperature_read(tagged_t: pd.DataFrame, scenario: int, weeks: list[pd.Timestamp]) -> dict:
-    """How a scenario reads in the land temperature anomaly: mean over its members,
-    countries and the clustered weeks, the coldest and warmest country, and a tone."""
-    if tagged_t is None or tagged_t.empty:
-        return {}
+def nwe_read(tagged_t: pd.DataFrame, tagged_w: pd.DataFrame, scenario: int, weeks: list[pd.Timestamp],
+             areas: list[str] = SCENARIO_NWE_AREAS, temp_c: float = SCENARIO_READ_TEMP_C,
+             wind_pct: float = SCENARIO_READ_WIND_PCT) -> dict:
+    """How a scenario reads over North-West Europe against the full ensemble over the
+    clustered weeks: temperature averaged over the countries, wind summed, each as
+    the scenario's departure from the ensemble mean (per member first). Returns
+    dict(d_temp, d_wind, d_wind_pct, temp, wind, line) — `line` is the one-liner:
+    'Cold and low wind in NWE', 'Mild and windy in NWE', 'Flat in NWE', or a mix."""
     weeks = [pd.Timestamp(w).normalize() for w in weeks]
-    st_ = tagged_t[(tagged_t["scenario"] == scenario) & tagged_t["week_start"].isin(weeks)]
-    col = "anomaly" if "anomaly" in st_.columns and st_["anomaly"].notna().any() else None
-    if st_.empty or col is None:
-        return {}
-    by_area = st_.groupby("area")[col].mean().sort_values()
-    ma = float(st_[col].mean())
-    tone = "warm" if ma > 0.75 else ("cold" if ma < -0.75 else "near-normal")
-    return {"mean": ma, "tone": tone, "coldest": (by_area.index[0], float(by_area.iloc[0])),
-            "warmest": (by_area.index[-1], float(by_area.iloc[-1]))}
+
+    def _dep(tagged: pd.DataFrame, how: str):
+        if tagged is None or tagged.empty:
+            return np.nan, np.nan
+        df = tagged[tagged["area"].isin(areas) & tagged["week_start"].isin(weeks)]
+        if df.empty:
+            return np.nan, np.nan
+        per_member = df.groupby(["member_id", "area"])["value"].mean().groupby("member_id").agg(how)
+        ens = float(per_member.mean())
+        ids = df.loc[df["scenario"] == scenario, "member_id"].unique()
+        if len(ids) == 0:
+            return np.nan, ens
+        return float(per_member.loc[per_member.index.isin(ids)].mean() - ens), ens
+
+    d_t, ens_t = _dep(tagged_t, "mean")
+    d_w, ens_w = _dep(tagged_w, "sum")
+    d_w_pct = (d_w / ens_w * 100.0) if (ens_w and not np.isnan(d_w) and ens_w != 0) else np.nan
+    t_word = None if np.isnan(d_t) else ("cold" if d_t <= -temp_c else ("mild" if d_t >= temp_c else "flat"))
+    w_word = None if np.isnan(d_w_pct) else ("low wind" if d_w_pct <= -wind_pct else ("windy" if d_w_pct >= wind_pct else "flat"))
+    words = [w for w in (t_word, w_word) if w is not None]
+    if not words:
+        line = ""
+    elif all(w == "flat" for w in words):
+        line = "Flat in NWE"
+    else:
+        parts = []
+        if t_word and t_word != "flat":
+            parts.append(t_word)
+        if w_word and w_word != "flat":
+            parts.append(w_word)
+        line = " and ".join(parts) + " in NWE"
+        if t_word == "flat":
+            line += ", temperature flat"
+        elif w_word == "flat":
+            line += ", wind flat"
+        line = line[0].upper() + line[1:]
+    return {"d_temp": d_t, "d_wind": d_w, "d_wind_pct": d_w_pct, "temp": t_word, "wind": w_word, "line": line}
 
 
-def describe_scenario(share: float, read: dict, name: dict | None = None) -> str:
-    """One line for the scenario card: the regime it resembles, the share of members
-    and the temperature read."""
-    bits = []
-    if name and name.get("regime"):
-        bits.append(f"≈ {name['regime_label']} (r {name['r']:.2f})")
-    bits.append(f"{share:.0%} of members")
-    if read:
-        bits.append(f"{read['tone']} on average ({read['mean']:+.1f}°C) · coldest {read['coldest'][0]} "
-                    f"({read['coldest'][1]:+.1f}), warmest {read['warmest'][0]} ({read['warmest'][1]:+.1f})")
-    return " · ".join(bits)
+def describe_scenario(read: dict) -> str:
+    """The card's second line: the NWE one-liner with its numbers vs the ensemble."""
+    if not read or not read.get("line"):
+        return ""
+    nums = []
+    if not np.isnan(read.get("d_temp", np.nan)):
+        nums.append(f"{read['d_temp']:+.1f} °C")
+    if not np.isnan(read.get("d_wind_pct", np.nan)):
+        nums.append(f"{read['d_wind_pct']:+.0f} % wind")
+    return read["line"] + (f' <span class="mc-muted">({", ".join(nums)} vs the ensemble)</span>' if nums else "")
 
 
 # ─── outputs ────────────────────────────────────────────────────────────────────

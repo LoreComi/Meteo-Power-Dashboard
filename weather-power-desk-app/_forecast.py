@@ -27,7 +27,7 @@ from _config import (
     AREAS, DEFAULT_AREAS, ANOMALY_VIEW_DEFAULT_AREAS, METRICS, DEFAULT_METRIC, VOLUE_MODELS, DEFAULT_MODEL,
     METEOMATICS_MODELS, SPREAD_RATIO_HIGH, SPREAD_RATIO_LOW,
     SCENARIO_SPATIAL_SOURCES, SCENARIO_DEFAULT_SOURCE, SCENARIO_OUTPUT_AREAS, SCENARIO_K_DEFAULT, SCENARIO_K_MAX,
-    SPATIAL_N_PCA, SPATIAL_GRID_RES, SPATIAL_BBOX,
+    SCENARIO_NWE_AREAS, SPATIAL_GRID_RES, SPATIAL_BBOX,
     area_label,
 )
 from _data import (
@@ -37,12 +37,12 @@ from _data import (
 from _charts import (
     AREA_COLORS, make_fan_chart, make_anomaly_heatmap,
     make_spread_vs_normal_chart, make_spread_ratio_heatmap, make_member_distribution, make_member_strips,
-    make_scenario_table_heatmap, make_scenario_centroid_maps, make_country_scenario_panel, scenario_color,
+    make_scenario_table_heatmap, make_country_scenario_panel, scenario_color,
 )
 from _scenarios import (
     available_weeks, default_weeks, spatial_member_matrix, cluster_members, apply_scenarios, centroid_maps,
-    name_cluster, scenario_daily_summary, scenario_weekly_values, scenario_table, scenario_name, describe_scenario,
-    temperature_read, silhouette_for_k,
+    name_cluster, short_name, nwe_read, scenario_daily_summary, scenario_weekly_values, scenario_table, scenario_name,
+    describe_scenario, silhouette_for_k,
 )
 from _regimes import render_regimes
 from _ui import anomaly_kpi, kpi_card, kpi_row, status_banner
@@ -349,22 +349,29 @@ def scenario_ids(res: dict) -> list[int]:
     return sorted(s for s in res["sizes"] if s != 0) + ([0] if 0 in res["sizes"] else [])
 
 
-def scenario_cards(res: dict, tagged_t: pd.DataFrame, weeks: list[pd.Timestamp]) -> list[str]:
-    """One KPI card per scenario: its name, its member count, the regime it resembles
-    and how it reads in temperature."""
+def scenario_cards(res: dict, info: dict, weeks: list[pd.Timestamp]) -> list[str]:
+    """One card per scenario: 'Scenario 1 · 55 % probability · Scandi Block' and, under
+    it, the one-line read of North-West Europe against the ensemble ('Cold and low wind
+    in NWE', the opposite, or flat) from the land temperature and wind members."""
+    temp_m = land_members(info, "Temperature", tuple(SCENARIO_NWE_AREAS))
+    wind_m = land_members(info, "Wind", tuple(SCENARIO_NWE_AREAS))
+    tagged_t = apply_scenarios(temp_m, res["assign"]) if not temp_m.empty else pd.DataFrame()
+    tagged_w = apply_scenarios(wind_m, res["assign"]) if not wind_m.empty else pd.DataFrame()
     cards = []
     n_tot = res["n_members"]
     for s in scenario_ids(res):
         share = res["sizes"][s] / n_tot
         if s == 0:
-            desc = f"{share:.0%} of members in clusters too small to keep"
+            title = f"Other · {share:.0%} · clusters too small to keep"
+            desc = ""
         else:
-            desc = describe_scenario(share, temperature_read(tagged_t, s, weeks), res["names"].get(s))
+            label = short_name(res["names"].get(s))
+            title = f"Scenario {s} · {share:.0%} probability" + (f" · {label}" if label else "")
+            desc = describe_scenario(nwe_read(tagged_t, tagged_w, s, weeks))
         cards.append(
             f'<div class="kpi-card" style="border-top:3px solid {scenario_color(s)}; text-align:left;">'
-            f'<div class="kpi-label">{scenario_name(s, res["names"])}</div>'
-            f'<div class="kpi-value">{res["sizes"][s]} <span style="font-size:0.9rem;color:var(--text-muted)">members</span></div>'
-            f'<div class="kpi-delta kpi-delta-flat">{desc}</div></div>')
+            f'<div class="kpi-label" style="font-size:0.95rem;color:var(--text-primary);font-weight:600;">{title}</div>'
+            f'<div class="kpi-delta kpi-delta-flat">{desc or "&nbsp;"}</div></div>')
     return cards
 
 
@@ -375,16 +382,6 @@ def scenario_run_caption(info: dict, res: dict, weeks_sel: pd.DataFrame) -> str:
             f"{len(weeks_sel)} week(s) ({', '.join(weeks_sel['week_label'])}) · PCA {res['n_pcs']} PCs "
             f"({res['explained_pct']:.0f}% var) · k={res['k']} fixed · silhouette {res['silhouette']:.2f} (diagnostic) · "
             f"temperature, wind and solar read on the {info['land']['label']} of the same member IDs")
-
-
-def centroid_titles(res: dict) -> dict[int, str]:
-    out = {}
-    for s, nm in res["names"].items():
-        t = f"Scenario {s} ({res['sizes'][s]}/{res['n_members']}) — {nm['name']}"
-        if nm.get("regime"):
-            t += f"\n≈ {nm['regime_label']} (r {nm['r']:.2f})"
-        out[s] = t
-    return out
 
 
 def _fmt(v, fmt="{:.1f}") -> str:
@@ -500,18 +497,7 @@ def _render_scenarios(runs: pd.DataFrame):
                       "on the field alone." + (" Run the pipeline's eq-members step (run_scenarios.bat)."
                                                if info["land"]["provider"] == "EQ" else " Run power_desk_refresh.py."),
                       "warning")
-    kpi_row(scenario_cards(res, tagged_t, weeks), max_cols=4)
-
-    # ── the scenarios side by side: the centroid maps ──
-    st.markdown("##### The scenarios — mean Z500 departure from the ensemble mean over the clustered weeks")
-    st.caption("Red = higher 500 hPa heights than the ensemble mean (a ridge), blue = lower (a trough). The names "
-               "read the ridge and the trough off these maps; ≈ a regime when the map correlates with one of the "
-               "seven North-Atlantic regimes of the Weather Regimes tab.")
-    try:
-        st.pyplot(make_scenario_centroid_maps(res["cmaps"], centroid_titles(res), scen_ids, bbox=SPATIAL_BBOX),
-                  use_container_width=True)
-    except Exception as e:
-        st.warning(f"Centroid maps could not be drawn: {e}")
+    kpi_row(scenario_cards(res, info, weeks), max_cols=4)
 
     if not tagged_t.empty:
         st.plotly_chart(make_scenario_table_heatmap(

@@ -631,14 +631,36 @@ SCENARIO_DEFAULT_SOURCE = "EC-ENS"
 # Member tables other than fcst_members, by provider (written by the pipeline)
 MEMBER_TABLES: dict[str, str] = {"EQ": "fcst_members_eq"}
 
+# Member numbering. The clusters are found on the Meteomatics members (m1…m50 =
+# the 50 perturbations) and read on each provider's member rows through one
+# integer id: Meteomatics m<k> → k, EQ (renamed m<k> by the pipeline) → k, and
+# Volue's tags shifted by MEMBER_ID_OFFSET — Volue's '01' is the CONTROL run and
+# '02'…'51' are the perturbations 1…50 (checked 2026-11-03 by correlating the two
+# tables' DE/FR/UK/IT/ES member temperatures on the same 00z run: 50 of 51 tags
+# match member tag − 1 at r ≈ 0.9; '01' matches nothing). The control (id 0) has
+# no Z500 row and drops out of the scenarios.
+MEMBER_ID_OFFSET: dict[str, int] = {"Volue": -1}
+
 # Cluster names. A scenario's centroid map — its members' mean Z500 departure from
-# the ensemble mean over the clustered weeks — is named by where its ridge and
-# trough sit (the named regions in _scenarios.NAMED_REGIONS) and, when it
-# resembles one of the 7 North-Atlantic regimes of the Weather Regimes tab
-# (cos-lat weighted pattern correlation on the common grid points ≥ this), by
-# that regime. Below the amplitude the map is "close to the ensemble mean".
+# the ensemble mean over the clustered weeks — is matched against the 7
+# North-Atlantic regimes of the Weather Regimes tab (cos-lat weighted pattern
+# correlation on the common grid points ≥ SCENARIO_NAME_REGIME_MIN_R) and named by
+# the short regime label; without a match, by where its ridge and trough sit (the
+# named regions in _scenarios.NAMED_REGIONS). Below the amplitude the map is
+# "close to the ensemble mean".
 SCENARIO_NAME_MIN_AMPLITUDE_M = 15.0
 SCENARIO_NAME_REGIME_MIN_R = 0.45
+WR_REGIME_SHORT: dict[str, str] = {
+    "ScTr": "Scandi Trough", "GL": "Greenland Block", "EuBl": "Euro Block", "AR": "Atlantic Ridge",
+    "AT": "Atlantic Trough", "ScBl": "Scandi Block", "ZO": "Zonal",
+}
+# The one-line read under each scenario card: the scenario's weekly temperature and
+# wind over North-West Europe against the full ensemble (temperature averaged over
+# the countries, wind summed) — "Cold and low wind in NWE", "Mild and windy in
+# NWE", "Flat in NWE" — with these thresholds on the departure.
+SCENARIO_NWE_AREAS = ["DE", "FR", "UK", "NL", "BE"]
+SCENARIO_READ_TEMP_C = 0.5           # |Δ temperature vs the ensemble| below this is flat
+SCENARIO_READ_WIND_PCT = 10.0        # |Δ wind vs the ensemble| in % of the ensemble below this is flat
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HISTORICAL
