@@ -6,9 +6,11 @@ Three tabs:
   Uncertainty   spread of the ensemble distribution and how it compares with
                 the normal spread for the same lead day — is this forecast
                 more or less certain than usual?
-  Scenarios     weather scenarios from k-means on the members' WEEKLY-MEAN
-                500 hPa geopotential height field over Europe and the near
-                Atlantic, over real Mon–Sun trading weeks, for EC-ENS (Z500
+  Scenarios     weather scenarios per TRADING WEEK: for each Mon–Sun week the
+                members are clustered (k-means) on their weekly-mean 500 hPa
+                geopotential height field of that week over Europe and the
+                near Atlantic — the scenarios of week 45, the scenarios of
+                week 46 — for EC-ENS (Z500
                 members from the Meteomatics API, via the pipeline) or EC-AI
                 (AIFS-ENS Z500 members from the silver layer, via the
                 notebook); each scenario named from its centroid map; then,
@@ -32,16 +34,16 @@ from _config import (
 )
 from _data import (
     load_runs, load_fcst_daily, load_spread_clim, load_members, load_spatial_sources, load_member_spatial_days,
-    load_meteologica_members, format_run, volue_init_time, snap_to_init_time,
+    format_run, volue_init_time, snap_to_init_time,
 )
 from _charts import (
     AREA_COLORS, make_fan_chart, make_anomaly_heatmap,
     make_spread_vs_normal_chart, make_spread_ratio_heatmap, make_member_distribution, make_member_strips,
-    make_scenario_table_heatmap, make_country_scenario_panel, scenario_color,
+    make_country_scenario_panel, scenario_color,
 )
 from _scenarios import (
     available_weeks, default_weeks, spatial_member_matrix, cluster_members, apply_scenarios, centroid_maps,
-    name_cluster, short_name, nwe_read, scenario_daily_summary, scenario_weekly_values, scenario_table, scenario_name,
+    name_cluster, short_name, nwe_read, scenario_daily_summary, scenario_weekly_values, scenario_name,
     describe_scenario, silhouette_for_k,
 )
 from _regimes import render_regimes
@@ -328,21 +330,25 @@ def cluster_spatial(source: str, weeks: tuple[str, ...], k: int, ref_iso: str) -
 
 def default_scenarios(source_key: str = SCENARIO_DEFAULT_SOURCE):
     """The Scenarios tab with its defaults — the default source (or the first one
-    available), the next two usable trading weeks, k = SCENARIO_K_DEFAULT.
-    Returns (result, source info, weeks selected, all weeks); result None when nothing
-    can be clustered."""
+    available), the first two usable trading weeks (this week and the next), each
+    clustered on its own, k = SCENARIO_K_DEFAULT.
+    Returns (results: {week_start: result}, source info, weeks selected, all weeks);
+    results is empty when nothing can be clustered."""
     opts = spatial_source_options()
     info = opts.get(source_key) or (next(iter(opts.values())) if opts else None)
     if not info:
-        return None, None, pd.DataFrame(), pd.DataFrame()
+        return {}, None, pd.DataFrame(), pd.DataFrame()
     weeks_all = spatial_weeks(info)
     usable = weeks_all[weeks_all["usable"]]
     if usable.empty:
-        return None, info, pd.DataFrame(), weeks_all
+        return {}, info, pd.DataFrame(), weeks_all
     weeks = default_weeks(usable)
-    res = cluster_spatial(info["key"], tuple(str(pd.Timestamp(w).date()) for w in weeks), SCENARIO_K_DEFAULT,
-                          str(info["reference_date"]))
-    return res, info, usable[usable["week_start"].isin(weeks)].sort_values("week_start"), weeks_all
+    results = {}
+    for ws in weeks:
+        res = cluster_spatial(info["key"], (str(pd.Timestamp(ws).date()),), SCENARIO_K_DEFAULT, str(info["reference_date"]))
+        if res:
+            results[pd.Timestamp(ws)] = res
+    return results, info, usable[usable["week_start"].isin(weeks)].sort_values("week_start"), weeks_all
 
 
 def scenario_ids(res: dict) -> list[int]:
@@ -350,9 +356,10 @@ def scenario_ids(res: dict) -> list[int]:
 
 
 def scenario_cards(res: dict, info: dict, weeks: list[pd.Timestamp]) -> list[str]:
-    """One card per scenario: 'Scenario 1 · 55 % probability · Scandi Block' and, under
-    it, the one-line read of North-West Europe against the ensemble ('Cold and low wind
-    in NWE', the opposite, or flat) from the land temperature and wind members."""
+    """One card per scenario of one week: 'Scenario 1 · 55 % probability · Scandi Block'
+    and, under it, the one-line read of North-West Europe against the ensemble ('Cold
+    and low wind in NWE', the opposite, or flat) from the land temperature and wind
+    members of that week."""
     temp_m = land_members(info, "Temperature", tuple(SCENARIO_NWE_AREAS))
     wind_m = land_members(info, "Wind", tuple(SCENARIO_NWE_AREAS))
     tagged_t = apply_scenarios(temp_m, res["assign"]) if not temp_m.empty else pd.DataFrame()
@@ -375,13 +382,17 @@ def scenario_cards(res: dict, info: dict, weeks: list[pd.Timestamp]) -> list[str
     return cards
 
 
-def scenario_run_caption(info: dict, res: dict, weeks_sel: pd.DataFrame) -> str:
-    return (f"{info['label']} · run {pd.Timestamp(info['init']):%a %d %b %Hz} · {res['n_members']} members · "
-            f"weekly-mean Z500 field, {res['grid_points']} grid points ({SPATIAL_GRID_RES:g}°, "
-            f"{SPATIAL_BBOX['lat_min']}–{SPATIAL_BBOX['lat_max']} N, {abs(SPATIAL_BBOX['lon_min'])} W–{SPATIAL_BBOX['lon_max']} E) × "
-            f"{len(weeks_sel)} week(s) ({', '.join(weeks_sel['week_label'])}) · PCA {res['n_pcs']} PCs "
-            f"({res['explained_pct']:.0f}% var) · k={res['k']} fixed · silhouette {res['silhouette']:.2f} (diagnostic) · "
-            f"temperature, wind and solar read on the {info['land']['label']} of the same member IDs")
+def week_title(wk: pd.Series) -> str:
+    ws = pd.Timestamp(wk["week_start"])
+    t = f"{wk['week_label']} · {ws:%d %b}–{ws + pd.Timedelta(days=6):%d %b}"
+    return t if wk.get("full", True) else t + f" · {int(wk['n_days'])} forecast days"
+
+
+def week_caption(info: dict, res: dict) -> str:
+    return (f"{info['label']} · run {pd.Timestamp(info['init']):%a %d %b %Hz} · {res['n_members']} members clustered on "
+            f"their weekly-mean Z500 field of this week ({res['grid_points']} grid points, {SPATIAL_GRID_RES:g}°, PCA "
+            f"{res['n_pcs']} PCs, {res['explained_pct']:.0f}% var) · k={res['k']} fixed · silhouette {res['silhouette']:.2f} "
+            f"(diagnostic) · temperature, wind and solar read on the {info['land']['label']} of the same member IDs")
 
 
 def _fmt(v, fmt="{:.1f}") -> str:
@@ -395,29 +406,33 @@ def _fmt_d(v, fmt="{:+.1f}") -> str:
     return f'<span class="{cls}">{fmt.format(v)}</span>'
 
 
-def _side_by_side_html(area: str, weekly: dict[str, pd.DataFrame], scen_ids: list[int],
-                       weeks: pd.DataFrame, sizes: dict[int, int], n_tot: int, names: dict | None = None) -> str:
-    """Rows = metric × week; per scenario three cells: value, Δ vs ensemble mean, Δ vs normal."""
+def _week_table_html(title: str, weekly: dict[str, pd.DataFrame], scen_ids: list[int], week_start: pd.Timestamp,
+                     sizes: dict[int, int], n_tot: int, names: dict | None, areas: list[str],
+                     area_names: dict[str, str] | None = None) -> str:
+    """One week, every country: rows = country × metric, per scenario three cells
+    (value, Δ vs ensemble mean, Δ vs normal) — the scenarios side by side."""
     head1 = "<tr><th></th>"
-    head2 = "<tr><th>metric · week</th>"
+    head2 = "<tr><th>country · metric</th>"
     for s in scen_ids:
         col = scenario_color(s)
         head1 += (f'<th class="sc-scen" colspan="3" style="border-color:{col}; text-align:center;">'
                   f'{scenario_name(s, names)} <span class="mc-muted">({sizes.get(s, 0)}/{n_tot})</span></th>')
         head2 += "<th>value</th><th>Δ ens</th><th>Δ norm</th>"
     head1 += "</tr>"; head2 += "</tr>"
+    ws = pd.Timestamp(week_start).normalize()
     body = ""
-    for metric in ("Temperature", "Wind", "Solar"):
-        w = weekly.get(metric)
-        if w is None or w.empty:
-            continue
-        wa = w[w["area"] == area]
-        for _, wk in weeks.iterrows():
-            ws = wk["week_start"]
-            row = wa[wa["week_start"] == ws]
+    for a in areas:
+        first = True
+        for metric in ("Temperature", "Wind", "Solar"):
+            w = weekly.get(metric)
+            if w is None or w.empty:
+                continue
+            row = w[(w["area"] == a) & (w["week_start"] == ws)]
             if row.empty:
                 continue
-            label = f"{metric} · {wk['week_label']} <span class='mc-muted'>({_UNITS[metric]})</span>"
+            label = ((area_names or {}).get(a, area_label(a)) if first else "") + \
+                f" <span class='mc-muted'>{metric} ({_UNITS[metric]})</span>"
+            first = False
             body += f"<tr><td>{label}</td>"
             for s in scen_ids:
                 r = row[row["scenario"] == s]
@@ -427,7 +442,73 @@ def _side_by_side_html(area: str, weekly: dict[str, pd.DataFrame], scen_ids: lis
                 r = r.iloc[0]
                 body += f"<td>{_fmt(r['mean'])}</td><td>{_fmt_d(r['d_ens'])}</td><td>{_fmt_d(r['d_norm'])}</td>"
             body += "</tr>"
-    return f'<div class="mc-block"><div class="mc-title">{area_label(area)}</div><table class="sc-table">{head1}{head2}{body}</table></div>'
+    return f'<div class="mc-block"><div class="mc-title">{title}</div><table class="sc-table">{head1}{head2}{body}</table></div>'
+
+
+def _side_by_side_html(area: str, weekly: dict[str, pd.DataFrame], scen_ids: list[int],
+                       weeks: pd.DataFrame, sizes: dict[int, int], n_tot: int, names: dict | None = None) -> str:
+    """One country, one week's scenarios: rows = metric, per scenario value, Δ vs
+    ensemble mean, Δ vs normal (the deep dive's table)."""
+    wk = weeks.iloc[0]
+    return _week_table_html(f"{area_label(area)} · {week_title(wk)}", weekly, scen_ids, wk["week_start"], sizes, n_tot, names,
+                            [area], {area: area_label(area)})
+
+
+def _week_days(tagged: dict[str, pd.DataFrame], ws: pd.Timestamp) -> dict[str, pd.DataFrame]:
+    """The daily member rows of one trading week per metric."""
+    ws = pd.Timestamp(ws).normalize()
+    return {m: t[t["week_start"] == ws] for m, t in tagged.items() if not t.empty}
+
+
+def _render_week(info: dict, res: dict, wk: pd.Series, tagged: dict[str, pd.DataFrame], show_areas: list[str],
+                 key: str) -> None:
+    """One trading week's scenarios: the cards, every country side by side, the daily
+    paths per country in an expander, the diagnostics in another."""
+    ws = pd.Timestamp(wk["week_start"]).normalize()
+    scen_ids = scenario_ids(res)
+    st.markdown(f"##### Scenarios for {week_title(wk)}")
+    st.caption(week_caption(info, res))
+    kpi_row(scenario_cards(res, info, [ws]), max_cols=4)
+    tagged_w = {m: apply_scenarios(t, res["assign"]) for m, t in tagged.items() if not t.empty}
+    if not tagged_w or all(t.empty for t in tagged_w.values()):
+        status_banner(f"No {info['land']['label']} rows for temperature, wind and solar yet — the scenarios are shown "
+                      "on the field alone." + (" Run the pipeline's eq-members step (run_scenarios.bat)."
+                                               if info["land"]["provider"] == "EQ" else " Run power_desk_refresh.py."),
+                      "warning")
+        return
+    weekly = {m: scenario_weekly_values(t, [ws], "value") for m, t in tagged_w.items()}
+    if show_areas:
+        st.markdown(_week_table_html(f"Countries · {wk['week_label']}", weekly, scen_ids, ws, res["sizes"], res["n_members"],
+                                     res["names"], show_areas), unsafe_allow_html=True)
+        with st.expander(f"Daily paths by country · {wk['week_label']}"):
+            daily = {m: scenario_daily_summary(t, "value") for m, t in _week_days(tagged_w, ws).items() if not t.empty}
+            for a in show_areas:
+                st.plotly_chart(make_country_scenario_panel(daily, a, _UNITS, [ws]), use_container_width=True,
+                                key=f"{key}_panel_{a}")
+    with st.expander(f"Member → scenario map · cluster names · separability · {wk['week_label']}"):
+        d1, d2, d3 = st.columns([1, 1.6, 1.2])
+        with d1:
+            st.dataframe(res["assign"].sort_values(["scenario", "member_id"]).rename(
+                columns={"member_id": "member", "scenario": "scenario id"})[["member", "scenario id"]],
+                use_container_width=True, hide_index=True, height=260, key=f"{key}_map")
+        with d2:
+            rows = []
+            for s, nm in res["names"].items():
+                rows.append({"scenario": s, "label": short_name(nm), "centroid": nm["name"],
+                             "ridge": f"{nm['ridge']['region']} ({nm['ridge']['value']:+.0f} m)" if nm.get("ridge") else "",
+                             "trough": f"{nm['trough']['region']} ({nm['trough']['value']:+.0f} m)" if nm.get("trough") else "",
+                             "closest regime": (f"{nm['regime_label']} (r {nm['r']:.2f})" if nm.get("regime")
+                                                else (f"none above r {nm.get('r', np.nan):.2f}" if nm.get("similarity")
+                                                      else "patterns not available"))})
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, key=f"{key}_names")
+            st.caption("Labels: the Weather Regimes tab's pattern the centroid correlates with best, when that correlation "
+                       "is high enough; else where the centroid's highest and lowest Z500 departure sit.")
+        with d3:
+            sil = silhouette_for_k(res["features"], ks=range(2, SCENARIO_K_MAX + 1))
+            if sil:
+                st.dataframe(pd.DataFrame({"k": list(sil.keys()), "silhouette": [round(v, 3) for v in sil.values()]}),
+                             use_container_width=True, hide_index=True, key=f"{key}_sil")
+                st.caption("Diagnostic only: k is fixed by the desk (2 = scenario + alternative), not chosen by silhouette.")
 
 
 def _render_scenarios(runs: pd.DataFrame):
@@ -452,8 +533,9 @@ def _render_scenarios(runs: pd.DataFrame):
     with c1:
         source = st.selectbox("Ensemble", keys, index=keys.index(SCENARIO_DEFAULT_SOURCE) if SCENARIO_DEFAULT_SOURCE in keys else 0,
                               format_func=lambda k: opts[k]["label"], key="fs_source",
-                              help="Clustered on the members' weekly-mean 500 hPa geopotential height field; temperature, "
-                                   "wind and solar are then read per scenario on the same member IDs.")
+                              help="Each trading week's members are clustered on their weekly-mean 500 hPa geopotential "
+                                   "height field of that week; temperature, wind and solar are then read per scenario on "
+                                   "the same member IDs.")
     info = opts[source]
     weeks_all = spatial_weeks(info)
     usable = weeks_all[weeks_all["usable"]]
@@ -463,7 +545,8 @@ def _render_scenarios(runs: pd.DataFrame):
     wk_idx = usable.set_index("week_start")
     with c2:
         weeks_pick = st.multiselect(
-            "Trading weeks to cluster on (Mon–Sun)", list(usable["week_start"]), default_weeks(usable), key=f"fs_weeks_{source}",
+            "Trading weeks (Mon–Sun), each clustered on its own", list(usable["week_start"]), default_weeks(usable),
+            key=f"fs_weeks_{source}",
             format_func=lambda w: f"{wk_idx.loc[w, 'week_label']}  {pd.Timestamp(w):%d %b}–{pd.Timestamp(w) + pd.Timedelta(days=6):%d %b}"
                                   f"{'' if wk_idx.loc[w, 'full'] else '  (partial, %d d)' % wk_idx.loc[w, 'n_days']}")
     with c3:
@@ -475,96 +558,27 @@ def _render_scenarios(runs: pd.DataFrame):
         st.info("Pick at least one week.")
         return
     weeks_sel = usable[usable["week_start"].isin(weeks_pick)].sort_values("week_start")
-
-    try:
-        res = cluster_spatial(source, tuple(str(pd.Timestamp(w).date()) for w in weeks_sel["week_start"]), int(k),
-                              str(info["reference_date"]))
-    except Exception as e:
-        st.error(f"Failed to load the Z500 member field: {e}")
-        return
-    if not res:
-        status_banner("Not enough complete members in the Z500 field for these weeks.", "warning")
-        return
-    weeks = list(weeks_sel["week_start"])
-    scen_ids = scenario_ids(res)
-    st.caption(scenario_run_caption(info, res, weeks_sel))
-
     show_areas = [a for a in out_areas if a in AREAS]
-    temp_m = land_members(info, "Temperature", tuple(set(show_areas) | set(SCENARIO_OUTPUT_AREAS)))
-    tagged_t = apply_scenarios(temp_m, res["assign"]) if not temp_m.empty else pd.DataFrame()
-    if temp_m.empty:
-        status_banner(f"No {info['land']['label']} rows for temperature, wind and solar yet — the scenarios are shown "
-                      "on the field alone." + (" Run the pipeline's eq-members step (run_scenarios.bat)."
-                                               if info["land"]["provider"] == "EQ" else " Run power_desk_refresh.py."),
-                      "warning")
-    kpi_row(scenario_cards(res, info, weeks), max_cols=4)
 
-    if not tagged_t.empty:
-        st.plotly_chart(make_scenario_table_heatmap(
-            scenario_table(tagged_t, weeks, "anomaly", res["names"]), "°C",
-            f"Temperature anomaly by scenario — mean over {', '.join(weeks_sel['week_label'])}"), use_container_width=True)
-
-    # ── per country: the scenarios side by side for temperature, wind, solar ──
-    st.divider()
-    st.markdown("##### Per country — scenarios side by side: temperature, wind, solar")
-    st.caption(f"Weekly means over the clustered trading weeks, read on the {info['land']['label']} with the same "
-               "member IDs as the Z500 clusters. Δ ens = vs full-ensemble mean · Δ norm = vs the normal.")
-    if not show_areas:
-        st.info("Select at least one country to show.")
-        return
-    tagged: dict[str, pd.DataFrame] = {"Temperature": tagged_t[tagged_t["area"].isin(show_areas)] if not tagged_t.empty else pd.DataFrame()}
-    for metric in ("Wind", "Solar"):
+    # the land members once, for every week (cached loads)
+    tagged_src: dict[str, pd.DataFrame] = {}
+    for metric in ("Temperature", "Wind", "Solar"):
         pm = land_members(info, metric, tuple(show_areas))
-        tagged[metric] = apply_scenarios(pm, res["assign"]) if not pm.empty else pd.DataFrame()
-    if all(t.empty for t in tagged.values()):
-        return
-    weekly = {m: scenario_weekly_values(t, weeks, "value") for m, t in tagged.items() if not t.empty}
-    daily = {m: scenario_daily_summary(t, "value") for m, t in tagged.items() if not t.empty}
-    monday_lines = list(weeks_all["week_start"])
+        if not pm.empty:
+            tagged_src[metric] = pm
 
-    for a in show_areas:
-        st.markdown(_side_by_side_html(a, weekly, scen_ids, weeks_sel, res["sizes"], res["n_members"], res["names"]),
-                    unsafe_allow_html=True)
-        st.plotly_chart(make_country_scenario_panel(daily, a, _UNITS, monday_lines), use_container_width=True)
-
-    with st.expander("Meteologica members (same scenario IDs)"):
-        found = False
-        for metric in ("Wind", "Solar", "Hydro", "Temperature"):
-            mlm = load_meteologica_members(metric, tuple(show_areas))
-            if mlm.empty:
-                continue
-            found = True
-            w = scenario_weekly_values(apply_scenarios(mlm, res["assign"]), weeks, "value")
-            st.markdown(f"**{metric}**")
-            st.dataframe(w[["area", "week_label", "scenario", "mean", "ens_mean", "d_ens", "n"]].round(2),
-                         use_container_width=True, hide_index=True)
-        if not found:
-            st.caption("Meteologica is not ingested into Databricks yet — populate meteologica_members and this fills in.")
-
-    with st.expander("Member → scenario map · cluster names · separability diagnostic"):
-        d1, d2, d3 = st.columns([1, 1.6, 1.2])
-        with d1:
-            st.dataframe(res["assign"].sort_values(["scenario", "member_id"]).rename(
-                columns={"member_id": "member", "scenario": "scenario id"})[["member", "scenario id"]],
-                use_container_width=True, hide_index=True, height=260)
-        with d2:
-            rows = []
-            for s, nm in res["names"].items():
-                rows.append({"scenario": s, "name": nm["name"],
-                             "ridge": f"{nm['ridge']['region']} ({nm['ridge']['value']:+.0f} m)" if nm.get("ridge") else "",
-                             "trough": f"{nm['trough']['region']} ({nm['trough']['value']:+.0f} m)" if nm.get("trough") else "",
-                             "closest regime": (f"{nm['regime_label']} (r {nm['r']:.2f})" if nm.get("regime")
-                                                else (f"none above r {res['names'][s].get('r', np.nan):.2f}"
-                                                      if nm.get("similarity") else "patterns not available"))})
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            st.caption("Names: where the centroid's highest and lowest Z500 departure sit (named regions), and the "
-                       "Weather Regimes tab's pattern it correlates with best, when that correlation is high enough.")
-        with d3:
-            sil = silhouette_for_k(res["features"], ks=range(2, SCENARIO_K_MAX + 1))
-            if sil:
-                st.dataframe(pd.DataFrame({"k": list(sil.keys()), "silhouette": [round(v, 3) for v in sil.values()]}),
-                             use_container_width=True, hide_index=True)
-                st.caption("Diagnostic only: k is fixed by the desk (2 = scenario + alternative), not chosen by silhouette.")
+    for i, (_, wk) in enumerate(weeks_sel.iterrows()):
+        if i:
+            st.divider()
+        try:
+            res = cluster_spatial(source, (str(pd.Timestamp(wk["week_start"]).date()),), int(k), str(info["reference_date"]))
+        except Exception as e:
+            st.error(f"{wk['week_label']}: failed to load the Z500 member field: {e}")
+            continue
+        if not res:
+            status_banner(f"{wk['week_label']}: not enough complete members in the Z500 field.", "warning")
+            continue
+        _render_week(info, res, wk, tagged_src, show_areas, key=f"fs_{source}_{wk['week_label']}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

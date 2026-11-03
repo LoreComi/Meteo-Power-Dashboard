@@ -11,6 +11,7 @@ Steps, each isolated so one failure does not stop the others:
   8. indices     all_daily_indices.csv (teleconnection indices) to {schema}.weather_indexes
   9. z500        EC-ENS 500 hPa geopotential members from the Meteomatics API to {schema}.fcst_member_spatial_ecens
  10. eq-members  AIFS-ENS per-member temperature / wind / solar by country from EQ to {schema}.fcst_members_eq
+ 11. wr-ecens    EC-ENS members projected onto the 7 European weather regimes to {schema}.wr_forecast_members_ecens
 
     python run_daily.py                      everything, incremental
     python run_daily.py --skip-swe-model     upload only (the model already ran today)
@@ -22,7 +23,7 @@ Steps, each isolated so one failure does not stop the others:
     python run_daily.py --only hydro-prod    the hydro Production tab's feed
     python run_daily.py --only reservoir     the Reservoir outlook tab's feed
     python run_daily.py --only indices       the Teleconnections tab's indices (after refreshing the CSV)
-    python run_daily.py --only z500 --only eq-members   the Scenarios tab's inputs (run_scenarios.bat, twice a day)
+    python run_daily.py --only z500 --only eq-members --only wr-ecens   the Scenarios / Weather Regimes inputs (run_scenarios.bat, twice a day)
 
 Exit code 0 when every requested step succeeded, 1 otherwise. Logs in pipeline/logs/.
 """
@@ -42,7 +43,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_config import load_settings, setup_logging  # noqa: E402
 
 log = logging.getLogger("pipeline")
-STEPS = ["swe-model", "swe", "rivers", "morning", "volue", "hydro-prod", "reservoir", "indices", "z500", "eq-members"]
+STEPS = ["swe-model", "swe", "rivers", "morning", "volue", "hydro-prod", "reservoir", "indices", "z500", "eq-members",
+         "wr-ecens"]
 UPLOAD_STEPS = [s for s in STEPS if s != "swe-model"]
 
 
@@ -89,6 +91,7 @@ def main(argv=None) -> int:
     ap.add_argument("--skip-indices", action="store_true")
     ap.add_argument("--skip-z500", action="store_true")
     ap.add_argument("--skip-eq-members", action="store_true")
+    ap.add_argument("--skip-wr-ecens", action="store_true")
     ap.add_argument("--backfill", action="store_true", help="full history instead of the incremental window")
     ap.add_argument("--dry-run", action="store_true", help="do not touch Databricks; write frames to pipeline/out/")
     ap.add_argument("--no-heightbands", action="store_true", help="skip the per-catchment height-band rows")
@@ -102,7 +105,7 @@ def main(argv=None) -> int:
 
     steps = list(a.only) if a.only else [s for s, skip in zip(STEPS, [a.skip_swe_model, a.skip_swe, a.skip_rivers, a.skip_morning,
                                                                       a.skip_volue, a.skip_hydro_prod, a.skip_reservoir, a.skip_indices,
-                                                                      a.skip_z500, a.skip_eq_members])
+                                                                      a.skip_z500, a.skip_eq_members, a.skip_wr_ecens])
                                         if not skip]
     results: dict[str, str] = {}
     writer = None
@@ -179,6 +182,13 @@ def main(argv=None) -> int:
             except Exception as e:
                 log.exception("eq members failed")
                 results["eq-members"] = f"FAILED: {str(e)[:200]}"
+        if "wr-ecens" in steps:
+            try:
+                import wr_ecens
+                results["wr-ecens"] = f"ok {wr_ecens.run(settings, writer, backfill=a.backfill)}"
+            except Exception as e:
+                log.exception("wr-ecens failed")
+                results["wr-ecens"] = f"FAILED: {str(e)[:200]}"
     finally:
         if writer is not None:
             writer.close()

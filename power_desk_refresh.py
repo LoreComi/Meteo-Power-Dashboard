@@ -1312,22 +1312,31 @@ print(f"normalizer = {WR_NORMALIZER}")
 # The silver tables store absolute heights; the projection needs anomalies.
 # A day-of-year mean per grid point over the ERA5 record is what the original
 # MATLAB climatology provided — verified to give identical regime assignments.
+#
+# The ERA5 actuals are stamped at 23:00 UTC = midnight CET of the FOLLOWING
+# calendar day (checked 2026-11-03 against the DSL gateway: the row stamped
+# 18 Oct 23:00 UTC holds the 19 Oct 00 UTC field), so the valid day is
+# delivery_start + 1 hour — DATE(delivery_start) labelled every reanalysis day
+# one day early. The forecast tables are stamped on the valid day and need
+# nothing. Drop wr_gph_clim and wr_reanalysis_daily once to rebuild them with
+# the right dates.
+ERA5_VALID = "(delivery_start + INTERVAL 1 HOUR)"
 if spark.catalog.tableExists(f"{SBX}.wr_gph_clim"):
     print("wr_gph_clim already built — skipping")
 else:
     spark.sql(f"""
     CREATE OR REPLACE TABLE {SBX}.wr_gph_clim AS
     SELECT latitude, longitude,
-           DAYOFYEAR(delivery_start)
-             - CASE WHEN MONTH(delivery_start) > 2
-                     AND (YEAR(delivery_start) % 4 = 0
-                          AND (YEAR(delivery_start) % 100 != 0 OR YEAR(delivery_start) % 400 = 0))
+           DAYOFYEAR({ERA5_VALID})
+             - CASE WHEN MONTH({ERA5_VALID}) > 2
+                     AND (YEAR({ERA5_VALID}) % 4 = 0
+                          AND (YEAR({ERA5_VALID}) % 100 != 0 OR YEAR({ERA5_VALID}) % 400 = 0))
                     THEN 1 ELSE 0 END          AS doy,
            AVG(value)   AS gph_normal,
            COUNT(*)     AS n_years
     FROM {GPH_ACT}
     WHERE curve_name = '{WR_ERA5_CURVE}' AND {wr_domain()}
-      AND YEAR(delivery_start) >= {WR_CLIM_START_YEAR}
+      AND YEAR({ERA5_VALID}) >= {WR_CLIM_START_YEAR}
     GROUP BY latitude, longitude, 3
     """)
     _cov = spark.sql(f"SELECT MIN(n_years), MAX(n_years), COUNT(DISTINCT doy) FROM {SBX}.wr_gph_clim").first()
@@ -1399,11 +1408,11 @@ count("wr_forecast_members")
 # (the whole ERA5 record); afterwards only the days not yet classified are
 # added, which is one or two per refresh.
 _era5_exists = spark.catalog.tableExists(f"{SBX}.wr_reanalysis_daily")
-_since = f"YEAR(delivery_start) >= {WR_CLIM_START_YEAR}"
+_since = f"YEAR({ERA5_VALID}) >= {WR_CLIM_START_YEAR}"
 if _era5_exists:
     _last = spark.sql(f"SELECT MAX(day) FROM {SBX}.wr_reanalysis_daily").first()[0]
     if _last is not None:
-        _since = f"delivery_start > DATE '{_last}'"
+        _since = f"DATE({ERA5_VALID}) > DATE '{_last}'"
     print(f"wr_reanalysis_daily exists — appending days after {_last}")
 else:
     print(f"wr_reanalysis_daily: first build, classifying ERA5 from {WR_CLIM_START_YEAR} "
@@ -1412,21 +1421,22 @@ else:
 _era5_proj = ",\n           ".join(
     f"SUM((f.value - c.gph_normal) / a.amplitude * p.w_{r}) / {WR_NORMALIZER} AS raw_{r}"
     for r in WR_REGIMES)
+_era5_valid = "(f.delivery_start + INTERVAL 1 HOUR)"          # see 7c.2: the actuals are stamped the evening before
 _era5_sql = f"""
 WITH raw AS (
-  SELECT DATE(f.delivery_start) AS day, {_era5_proj}
+  SELECT DATE({_era5_valid}) AS day, {_era5_proj}
   FROM {GPH_ACT} f
   JOIN {SBX}.wr_patterns p ON p.latitude = f.latitude AND p.longitude = f.longitude
   JOIN {SBX}.wr_gph_clim c ON c.latitude = f.latitude AND c.longitude = f.longitude
-       AND c.doy = DAYOFYEAR(f.delivery_start)
-         - CASE WHEN MONTH(f.delivery_start) > 2
-                 AND (YEAR(f.delivery_start) % 4 = 0
-                      AND (YEAR(f.delivery_start) % 100 != 0 OR YEAR(f.delivery_start) % 400 = 0))
+       AND c.doy = DAYOFYEAR({_era5_valid})
+         - CASE WHEN MONTH({_era5_valid}) > 2
+                 AND (YEAR({_era5_valid}) % 4 = 0
+                      AND (YEAR({_era5_valid}) % 100 != 0 OR YEAR({_era5_valid}) % 400 = 0))
                 THEN 1 ELSE 0 END
-  JOIN {SBX}.wr_amplitude a ON a.month = MONTH(f.delivery_start)
-       AND a.day_of_month = DAY(f.delivery_start)
-  WHERE f.curve_name = '{WR_ERA5_CURVE}' AND {wr_domain('f')} AND {_since}
-  GROUP BY DATE(f.delivery_start)
+  JOIN {SBX}.wr_amplitude a ON a.month = MONTH({_era5_valid})
+       AND a.day_of_month = DAY({_era5_valid})
+  WHERE f.curve_name = '{WR_ERA5_CURVE}' AND {wr_domain('f')} AND {_since.replace('delivery_start', 'f.delivery_start')}
+  GROUP BY DATE({_era5_valid})
 ),
 iwr AS (SELECT day, {_iwr_cols} FROM raw),
 scored AS (SELECT *, {_greatest} AS max_iwr FROM iwr)

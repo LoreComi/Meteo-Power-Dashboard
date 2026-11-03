@@ -20,7 +20,7 @@ from _config import (
     MORNING_CURVES, MORNING_REGION_CODES, MORNING_MODELS, MORNING_VOLUE_TABLES,
     GAS_VOLUE_FAMILIES, GAS_VOLUE_PATTERNS, GAS_VOLUE_AREAS, LIVE_HISTORY_DAYS, EXPECTED_HORIZON,
     DELTASHARE_PATTERN_MAP, hist_source, HIST_DEFAULT_SOURCE,
-    MEMBER_TABLES, SCENARIO_SPATIAL_SOURCES, SPATIAL_METRIC,
+    MEMBER_TABLES, SCENARIO_SPATIAL_SOURCES, SPATIAL_METRIC, WR_MODELS, WR_MEMBERS_TABLE,
 )
 
 # ─── Connection config ───────────────────────────────────────────────────────────
@@ -450,14 +450,25 @@ def load_wr_forecast_members() -> pd.DataFrame:
     8-day run history for both models is a few tens of thousands of rows.
     """
     cols = ", ".join(f"iwr_{r}" for r in WR_REGIMES)
-    df = run_query(f"""
-        SELECT model, reference_date, day, lead_day, member, {cols},
-               max_iwr, threshold, regime
-        FROM {SBX_SCHEMA}.wr_forecast_members
-        ORDER BY model, reference_date, member, lead_day
-    """)
-    if df.empty:
-        return df
+    tables = [WR_MEMBERS_TABLE] + sorted({v["table"] for v in WR_MODELS.values() if v.get("table")})
+    frames = []
+    for t in tables:
+        try:
+            part = run_query(f"""
+                SELECT model, reference_date, day, lead_day, member, {cols},
+                       max_iwr, threshold, regime
+                FROM {SBX_SCHEMA}.{t}
+                ORDER BY model, reference_date, member, lead_day
+            """)
+        except Exception:
+            if t == WR_MEMBERS_TABLE:
+                raise
+            continue                      # a pipeline table not written yet
+        if not part.empty:
+            frames.append(part)
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
     df = _dt(df, ["reference_date"], utc=True)
     df = _dt(df, ["day"])
     df = _num(df, ["lead_day", "max_iwr", "threshold"] + [f"iwr_{r}" for r in WR_REGIMES])
@@ -483,6 +494,9 @@ def load_wr_reanalysis() -> pd.DataFrame:
     if df.empty:
         return df
     df = _dt(df, ["day"])
+    # the notebook's daily append can write a day twice when the ERA5 table has not
+    # moved on between refreshes (seen 2026-11-03: three identical rows for 28 Oct)
+    df = df.drop_duplicates(subset=["day"], keep="last").reset_index(drop=True)
     return _num(df, ["max_iwr"] + [f"iwr_{r}" for r in WR_REGIMES])
 
 

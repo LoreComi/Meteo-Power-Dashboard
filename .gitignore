@@ -4,3 +4,4 @@ pipeline/.env
 pipeline/local_settings.txt
 pipeline/logs/
 pipeline/out/
+pipeline/cache/

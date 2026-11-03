@@ -141,13 +141,10 @@ def available_weeks(days: pd.DataFrame, min_days: int = SCENARIO_MIN_WEEK_DAYS) 
     return g.sort_values("week_start").reset_index(drop=True)
 
 
-def default_weeks(usable: pd.DataFrame, n: int = 2, today: pd.Timestamp | None = None) -> list[pd.Timestamp]:
-    """The next n usable trading weeks after the current one (the current week itself
-    when nothing lies beyond it)."""
-    today = (today or pd.Timestamp.today()).normalize()
-    this_week = today - pd.Timedelta(days=today.weekday())
-    nxt = [w for w in usable["week_start"] if w > this_week][:n]
-    return nxt or list(usable["week_start"][:n])
+def default_weeks(usable: pd.DataFrame, n: int = 2) -> list[pd.Timestamp]:
+    """The first n usable trading weeks of the run — this week (while the run still
+    covers enough of it) and the next: the scenarios of week 45 and of week 46."""
+    return list(usable["week_start"][:n])
 
 
 # ─── the spatial feature matrix ─────────────────────────────────────────────────

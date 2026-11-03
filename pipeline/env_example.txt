@@ -54,6 +54,8 @@ RIVER_FORECAST_RUNS=1
 # EQ_MEMBERS_AREAS=DE,FR,IT,ES,UK,NL,BE,PL,CZ,HU,NO,SE,FI,DK,PT,SI,SK,HR,EE,LV,LT
 # EQ_MEMBERS_RETENTION_DAYS=7
 # INSERT_CHUNK_ROWS=6000                 rows per INSERT statement for the whole-run snapshot tables
+# WR_MEMBERS_PER_CALL=5                  wr_ecens.py: EC-ENS members per gateway call on the regime domain (0.5°, 121 × 241)
+# WR_INCLUDE_CONTROL=true  WR_RETENTION_DAYS=8  WR_CACHE_DIR=P:\QFA\TonyWeather\Power_dashboard\pipeline\cache
 
 # ── SWE model ──
 SWE_ROOT=P:\QFA\TonyWeather\Hydro_Report\SWE_Exolabs

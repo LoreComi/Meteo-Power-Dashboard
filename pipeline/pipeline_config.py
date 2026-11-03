@@ -162,6 +162,13 @@ class Settings:
     eq_members_areas: list[str] = field(default_factory=lambda: list(DEFAULT_EQ_MEMBER_AREAS))
     eq_members_retention_days: int = 7
     insert_chunk_rows: int = 6000        # rows per INSERT statement (whole-run snapshot tables)
+    wr_ecens_table: str = "wr_forecast_members_ecens"   # wr_ecens.py: EC-ENS members on the 7 weather regimes
+    wr_model: str = "ecmwf-ens"
+    wr_days: int = 15                    # lead days after the init (the gateway serves exactly 15)
+    wr_include_control: bool = True      # member 0 too → 51 members, as the tool
+    wr_members_per_call: int = 5         # 29 161 points × 16 days per member ≈ 23 MB of JSON each
+    wr_retention_days: int = 8           # runs kept (WR_RUN_HISTORY_DAYS in the notebook)
+    wr_cache_dir: Path = HERE / "cache"  # the ERA5 day-of-year climatology pulled once from wr_gph_clim
 
     @property
     def z500_table_fq(self) -> str:
@@ -170,6 +177,10 @@ class Settings:
     @property
     def eq_members_table_fq(self) -> str:
         return f"{self.schema}.{self.eq_members_table}"
+
+    @property
+    def wr_ecens_table_fq(self) -> str:
+        return f"{self.schema}.{self.wr_ecens_table}"
 
     def dsl_ready(self) -> bool:
         return bool(os.environ.get(self.dsl_secret_env))
@@ -276,6 +287,13 @@ def load_settings() -> Settings:
         eq_members_areas=_list("EQ_MEMBERS_AREAS", list(DEFAULT_EQ_MEMBER_AREAS)),
         eq_members_retention_days=_int("EQ_MEMBERS_RETENTION_DAYS", 7),
         insert_chunk_rows=_int("INSERT_CHUNK_ROWS", 6000),
+        wr_ecens_table=os.environ.get("WR_ECENS_TABLE", "wr_forecast_members_ecens"),
+        wr_model=os.environ.get("WR_MODEL", "ecmwf-ens"),
+        wr_days=_int("WR_DAYS", 15),
+        wr_include_control=_bool("WR_INCLUDE_CONTROL", True),
+        wr_members_per_call=_int("WR_MEMBERS_PER_CALL", 5),
+        wr_retention_days=_int("WR_RETENTION_DAYS", 8),
+        wr_cache_dir=Path(os.environ.get("WR_CACHE_DIR", str(HERE / "cache"))),
     )
 
 

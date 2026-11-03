@@ -1,7 +1,10 @@
 """Morning Call → Country deep dive.
 
 One country, the whole picture, read off the SAME reference run, compare columns and Δ
-pairing as the Morning Report grid next to it:
+pairing as the Morning Report grid next to it. On top a header with the outlook in two or
+three words ("Cold & still") for the report's first window, the next window's and what moved
+since the paired run, and one signal chip per variable plus hydro and the leading scenario.
+Then three section cards:
 
   Forecast     every variable the report carries for the country — temperature, wind,
                solar, precipitation energy — as one grid with the variables as rows and
@@ -39,12 +42,154 @@ from _data import load_hydro_prod
 from _charts import make_country_run_chart, make_hydro_production_chart, make_country_scenario_panel
 from _hydro import _overview_metrics, _layer_kpi, _flags, _chips
 from _hydro_quantify import production_series, production_summary
-from _forecast import default_scenarios, land_members, scenario_cards, scenario_ids, _side_by_side_html, _UNITS
+from _forecast import default_scenarios, land_members, scenario_cards, scenario_ids, week_title, _side_by_side_html, _UNITS
 from _morning import (
     RunCol, compute_grid, _series, _cell_html, _col_tip, _fmt_val, _signed, _short_title, MORNING_PRECIP_SUM_DAYS,
 )
-from _scenarios import apply_scenarios, scenario_daily_summary, scenario_weekly_values
+from _scenarios import apply_scenarios, scenario_daily_summary, scenario_weekly_values, short_name
+from _style import DEEP_DIVE_CSS, DD_WARM, DD_COOL
+from _charts import scenario_color
 from _ui import kpi_card, kpi_row, status_banner
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LOOK — icons, section cards, stat tiles, the outlook in words
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SVG = ('<svg viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" stroke-linecap="round" '
+        'stroke-linejoin="round">{p}</svg>')
+_ICONS = {
+    "tt": '<path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>',
+    "wnd": '<path d="M17.7 7.7a2.5 2.5 0 1 1 1.8 4.3H2"/><path d="M9.6 4.6A2 2 0 1 1 11 8H2"/>'
+           '<path d="M12.6 19.4A2 2 0 1 0 14 16H2"/>',
+    "spv": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41'
+           'M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',
+    "rre": '<path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"/>',
+    "forecast": '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+    "hydro": '<path d="M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/>'
+             '<path d="M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/>'
+             '<path d="M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/>',
+    "prod": '<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>',
+    "scen": '<line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>'
+            '<path d="M18 9a9 9 0 0 1-9 9"/>',
+}
+_ICON_TINT = {"tt": "#e5484d", "wnd": "#0e9384", "spv": "#e09100", "rre": "#2a78d6", "forecast": "#4a3aa7",
+              "hydro": "#2a78d6", "prod": "#0e9384", "scen": "#c4407a"}
+
+
+def _icon(name: str, box_cls: str) -> str:
+    c = _ICON_TINT.get(name, "#54534d")
+    return (f'<div class="{box_cls}" style="background:{c}14;">'
+            f'{_SVG.format(c=c, p=_ICONS.get(name, ""))}</div>')
+
+
+def _section(key: str):
+    """A white card around one section (keyed so the CSS can find it)."""
+    try:
+        return st.container(border=True, key=key)
+    except TypeError:                                   # Streamlit without container keys
+        return st.container(border=True)
+
+
+def _sec_header(icon: str, title: str, sub: str = "") -> None:
+    st.markdown(f'<div class="dd-sec">{_icon(icon, "dd-sec-ico")}<div><div class="dd-sec-title">{title}</div>'
+                + (f'<div class="dd-sec-sub">{sub}</div>' if sub else "") + "</div></div>", unsafe_allow_html=True)
+
+
+def _tile(icon: str, label: str, sub: str, value: str, unit: str, gauge: float | None, tone: str,
+          pill: str, foot: str = "", foot_tone: str = "") -> str:
+    """A stat tile: icon + label, big value, a centred gauge of the departure (−1…+1 = the
+    block's full shade), a pill with the departure and a foot line with the move."""
+    if gauge is not None and not np.isnan(gauge):
+        x = float(np.clip(gauge, -1, 1)) * 50
+        color = DD_WARM if tone == "warm" else (DD_COOL if tone == "cool" else "#a9a89f")
+        left = 50 if x >= 0 else 50 + x
+        g = (f'<div class="dd-gauge"><div class="dd-gauge-bar" style="left:{left:.1f}%;width:{abs(x):.1f}%;'
+             f'background:{color};"></div><div class="dd-gauge-mid"></div></div>')
+    else:
+        g = '<div class="dd-gauge"><div class="dd-gauge-mid"></div></div>'
+    return (f'<div class="dd-tile"><div class="dd-tile-head">{_icon(icon, "dd-tile-ico")}<div>'
+            f'<div class="dd-tile-label">{label}</div><div class="dd-tile-sub">{sub}</div></div></div>'
+            f'<div class="dd-tile-val">{value}<span class="dd-tile-unit">{unit}</span></div>{g}'
+            f'<div class="dd-tile-foot"><span class="dd-pill dd-pill-{tone or "flat"}">{pill}</span>'
+            + (f'<span class="dd-move {("dd-move-" + foot_tone) if foot_tone else ""}">{foot}</span>' if foot else "")
+            + "</div></div>")
+
+
+def _tiles(tiles: list[str]) -> None:
+    if tiles:
+        st.markdown(f'<div class="dd-tiles">{"".join(tiles)}</div>', unsafe_allow_html=True)
+
+
+def _note(text: str) -> None:
+    st.markdown(f'<div class="dd-note">{text}</div>', unsafe_allow_html=True)
+
+
+# words for the outlook: (above normal, below normal) and the move (up, down)
+_OUT_WORDS = {"wnd": ("Windy", "Still"), "spv": ("Sunny", "Dull"), "rre": ("Wet", "Dry")}
+_MOVE_WORDS = {"tt": ("warmer", "colder"), "wnd": ("windier", "less windy"), "spv": ("sunnier", "duller"),
+               "rre": ("wetter", "drier")}
+_FAMILY_ORDER = ["tt", "wnd", "spv", "rre"]
+OUTLOOK_MIN_SCORE = 0.25        # |Δ norm| / heat_scale below this is "near normal" for the outlook
+OUTLOOK_MOVE_MIN = 0.15         # |Δ run| / heat_scale below this is not a move worth naming
+
+
+def _temp_words(month: int) -> tuple[str, str]:
+    if month in (11, 12, 1, 2, 3):
+        return "Mild", "Cold"
+    if month in (6, 7, 8):
+        return "Hot", "Cool"
+    return "Warm", "Cool"
+
+
+def _tone(d: float, block: dict) -> str:
+    if np.isnan(d) or round(d, 1) == 0:
+        return "flat"
+    return "warm" if (d > 0) == block["warm_is_positive"] else "cool"
+
+
+def _ref_cell(cells: pd.DataFrame, wkey: str, name: str) -> pd.Series | None:
+    r = cells[(cells["window"] == wkey) & (cells["block"] == name) & (cells["col"] == 0)]
+    return None if r.empty else r.iloc[0]
+
+
+def _outlook(cells: pd.DataFrame, cblocks: dict, wkey: str, start: pd.Timestamp) -> tuple[str, str]:
+    """Two or three words for one window of the reference run ("Cold & still"), and the
+    tone of the strongest signal (warm / cool / flat)."""
+    sig = []
+    for name, block in cblocks.items():
+        r = _ref_cell(cells, wkey, name)
+        d = np.nan if r is None else float(r["d_norm"])
+        if np.isnan(d):
+            continue
+        score = abs(d) / block["heat_scale"]
+        if score < OUTLOOK_MIN_SCORE:
+            continue
+        fam = block["family"]
+        up, down = _temp_words(start.month) if fam == "tt" else _OUT_WORDS[fam]
+        sig.append((score, up if d > 0 else down, _tone(d, block), _FAMILY_ORDER.index(fam)))
+    if not sig:
+        return "Near normal", "flat"
+    sig.sort(key=lambda t: -t[0])                      # the three strongest, read temperature first
+    words = [w for _, w, _, _ in sorted(sig[:3], key=lambda t: t[3])]
+    if len(words) == 1:
+        text = ("Very " + words[0].lower()) if sig[0][0] >= 1 else words[0]
+    else:
+        text = ", ".join([words[0]] + [w.lower() for w in words[1:-1]]) + " & " + words[-1].lower()
+    return text, sig[0][2]
+
+
+def _moves(cells: pd.DataFrame, cblocks: dict) -> str:
+    """What moved since the paired run, in words ("colder, windier"), first window."""
+    mv = []
+    for name, block in cblocks.items():
+        r = _ref_cell(cells, "w1", name)
+        d = np.nan if r is None else float(r["d_run"])
+        if np.isnan(d) or abs(d) / block["heat_scale"] < OUTLOOK_MOVE_MIN:
+            continue
+        up, down = _MOVE_WORDS[block["family"]]
+        mv.append((abs(d) / block["heat_scale"], up if d > 0 else down))
+    return ", ".join(w for _, w in sorted(mv, key=lambda t: -t[0])[:3]) if mv else "little changed"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -118,31 +263,30 @@ def _variables_grid_html(cells: pd.DataFrame, cblocks: dict, cols: list[RunCol],
     return f'<div class="mc-block"><table class="mc-table mcg-table">{colgroup}{head1}{head2}{body}</table></div>'
 
 
-def _variable_cards(cells: pd.DataFrame, cblocks: dict, win: dict, delta_label: str) -> list[str]:
-    """The reference run's first window per variable: value, Δ norm (coloured like the
-    grid: red = warmer / less wind, solar, precipitation) and the change since the paired run."""
-    cards = []
+def _variable_tiles(cells: pd.DataFrame, cblocks: dict, win: dict, delta_label: str) -> list[str]:
+    """The reference run's first window per variable: value, Δ norm on a gauge (red = warmer /
+    less wind, solar, precipitation; blue = colder / more) and the change since the paired run."""
+    tiles = []
     for name, block in cblocks.items():
         is_sum = block["agg"] == "sum"
-        r = cells[(cells["window"] == "w1") & (cells["block"] == name) & (cells["col"] == 0)]
-        if r.empty or np.isnan(float(r["value"].iloc[0])):
+        r = _ref_cell(cells, "w1", name)
+        if r is None or np.isnan(float(r["value"])):
             continue
-        r = r.iloc[0]
         fmt, unit = block["fmt"], block["unit"]
         d_norm, d_run = float(r["d_norm"]), float(r["d_run"])
-        cls, delta = "kpi-card-neutral", ""
-        if not np.isnan(d_norm) and round(d_norm, 1) != 0:
-            warm = (d_norm > 0) == block["warm_is_positive"]
-            cls = "kpi-card-warm" if warm else "kpi-card-cool"
-            delta = (f'<div class="kpi-delta {"kpi-delta-up" if warm else "kpi-delta-down"}">'
-                     f'{"▲" if d_norm > 0 else "▼"} {fmt.format(abs(d_norm))} {unit} vs normal</div>')
-        elif not np.isnan(d_norm):
-            delta = '<div class="kpi-delta kpi-delta-flat">on the normal</div>'
-        run = ("n/a" if np.isnan(d_run) else _signed(d_run, fmt))
-        rank = f'<div class="kpi-rank">{delta_label}: {run} {unit}</div>'
-        label = f"{name.split(' (')[0]} · " + (f"{MORNING_PRECIP_SUM_DAYS}-day sum" if is_sum else _short_title(win["t1"]))
-        cards.append(kpi_card(label, f"{fmt.format(float(r['value']))} {unit}", cls, delta, rank))
-    return cards
+        tone = _tone(d_norm, block)
+        pill = ("n/a vs normal" if np.isnan(d_norm) else
+                "on the normal" if tone == "flat" else f"{_signed(d_norm, fmt)} {unit} vs normal")
+        if np.isnan(d_run):
+            foot, ftone = f"{delta_label} n/a", ""
+        else:
+            arrow = "▲" if round(d_run, 1) > 0 else ("▼" if round(d_run, 1) < 0 else "=")
+            foot, ftone = f"{arrow} {_signed(d_run, fmt)} {delta_label}", ("" if arrow == "=" else _tone(d_run, block))
+        sub = (f"{MORNING_PRECIP_SUM_DAYS}-day sum" if is_sum else
+               f"{_short_title(win['t1'])} · {win['w1'][0]:%d %b} – {win['w1'][1]:%d %b}")
+        tiles.append(_tile(block["family"], name.split(" (")[0], sub, fmt.format(float(r["value"])), unit,
+                           d_norm / block["heat_scale"] if not np.isnan(d_norm) else None, tone, pill, foot, ftone))
+    return tiles
 
 
 def _daily_panels(cblocks: dict, cols: list[RunCol]) -> list[dict]:
@@ -166,20 +310,15 @@ def _daily_panels(cblocks: dict, cols: list[RunCol]) -> list[dict]:
     return panels
 
 
-def _render_forecast(country: str, cfg: dict, cols: list[RunCol], win: dict, delta_label: str,
-                     view_key: str | None, blocks: dict) -> None:
+def _render_forecast(country: str, cblocks: dict, cells: pd.DataFrame, cols: list[RunCol], win: dict,
+                     delta_label: str, view_key: str | None, blocks: dict) -> None:
     ref = cols[0]
-    cblocks = _country_blocks(country, cfg, blocks)
-    if not cblocks:
-        status_banner(f"The Morning Report has no curve for {country} in this source.", "warning")
-        return
-    missing = [n.split(" (")[0] for n, b in blocks.items() if n not in cblocks]
-    st.markdown(f"##### Forecast · {ref.model} {ref.init:%a %d %b} — {delta_label} vs {ref.prev_label}"
-                + ("" if ref.prev_exact else " (nearest earlier run)"))
-    if missing:
-        st.caption(f"The report carries no {', '.join(missing).lower()} for {country}.")
-    cells = compute_grid(cols, win, cblocks)
-    kpi_row(_variable_cards(cells, cblocks, win, delta_label), max_cols=4)
+    missing = [n.split(" (")[0].lower() for n in blocks if n not in cblocks]
+    _sec_header("forecast", "Forecast",
+                f"{ref.model} {ref.init:%a %d %b %H}z · {delta_label} vs {ref.prev_label}"
+                + ("" if ref.prev_exact else " (nearest earlier run)")
+                + (f" · no {', '.join(missing)} for {country} in the report" if missing else ""))
+    _tiles(_variable_tiles(cells, cblocks, win, delta_label))
     st.markdown(_variables_grid_html(cells, cblocks, cols, win, view_key, delta_label), unsafe_allow_html=True)
     panels = _daily_panels(cblocks, cols)
     if panels:
@@ -187,8 +326,8 @@ def _render_forecast(country: str, cfg: dict, cols: list[RunCol], win: dict, del
         st.plotly_chart(make_country_run_chart(panels, windows, f"{ref.model} {ref.init:%d %b %H}z",
                                                None if ref.prev_init is None else f"{ref.prev_init:%d %b %H}z"),
                         use_container_width=True, config={"displayModeBar": False})
-        st.caption("Solid = the reference run · dashed = the run its Δ is taken against (where the two part is the "
-                   "change) · dotted = normal · thin = the other runs of the grid · shaded = the report's windows.")
+        _note("Solid = reference run · dashed = the run its Δ is taken against · dotted = normal · "
+              "thin = the grid's other runs · shaded = the report's windows.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -218,31 +357,64 @@ def _issue_change(df: pd.DataFrame, area: str, variable: str, pattern: str, q: d
             "n_days": int(len(common))}
 
 
-def _pct_card(label: str, value: float | None, normal: float | None, change: dict | None, what: str) -> str:
-    """GWh over a window with % of normal (blue = above normal, red = short of it) and, when
-    there is one, the change since the previous issue."""
+def _pct_tile(icon: str, label: str, sub: str, value: float | None, normal: float | None,
+              change: dict | None) -> str:
+    """GWh over a window on a gauge of % of normal (blue = above normal, red = short of it)
+    and, when there is one, the change since the previous issue."""
     if value is None:
-        return kpi_card(label, "n/a")
+        return _tile(icon, label, sub, "n/a", "", None, "flat", "no data")
     pct = (value / normal * 100) if normal else None
-    cls, delta = "kpi-card-neutral", ""
+    tone, pill, gauge = "flat", "no normal", None
     if pct is not None:
-        up = value >= normal
-        cls = "kpi-card-cool" if up else ("kpi-card-critical" if pct < 70 else "kpi-card-warm")
-        delta = (f'<div class="kpi-delta {"kpi-delta-down" if up else "kpi-delta-up"}">{"▲" if up else "▼"} '
-                 f'{abs(value - normal):,.0f} GWh vs normal · {pct:.0f}% of normal</div>')
-    rank = ""
+        tone = "cool" if value >= normal else "warm"
+        pill = f"{pct:.0f}% of normal"
+        gauge = (pct - 100) / 50
+    foot, ftone = "", ""
     if change:
-        rank = (f'<div class="kpi-rank">{change["delta"]:+,.0f} GWh vs the issue of {change["prev_issue"]:%a %d %b %H}z'
-                f' ({what}, {change["n_days"]} common days)</div>')
-    return kpi_card(label, f"{value:,.0f} GWh", cls, delta, rank)
+        d = change["delta"]
+        foot = f"{'▲' if d > 0 else ('▼' if d < 0 else '=')} {d:+,.0f} GWh vs {change['prev_issue']:%a %H}z issue"
+        ftone = "cool" if d > 0 else ("warm" if d < 0 else "")
+    return _tile(icon, label, sub, f"{value:,.0f}", "GWh", gauge, tone, pill, foot, ftone)
 
 
-def _render_hydro(country: str, cfg: dict) -> None:
-    area_lvl, area_prod = cfg.get("hydro_level"), cfg.get("hydro_prod")
-    st.markdown(f"##### Hydro · {country}")
-    if not area_lvl and not area_prod:
-        st.caption(f"No hydro series for {country} — the Hydro section covers the Alpine, Nordic, Iberian and "
-                   "south-east European systems.")
+def _hydro_outlook(cfg: dict) -> dict:
+    """The production / precipitation-energy summary of the country's hydro area, or the
+    reason there is none: dict(area, name, q, error[, df, s])."""
+    area = cfg.get("hydro_prod")
+    out = {"area": area, "name": HYDRO_PROD_AREAS.get(area, area) if area else None, "q": None, "error": None}
+    if not area:
+        return out
+    try:
+        df = load_hydro_prod((area,))
+    except Exception as e:
+        out["error"] = f"Cannot read {HYDRO_PROD_TABLE}: {e}"
+        return out
+    if df.empty:
+        out["error"] = (f"No production rows for {out['name']} in {HYDRO_PROD_TABLE} yet "
+                        "(pipeline/run_daily.py --only hydro-prod).")
+        return out
+    s = production_series(df[df["area"] == area], HYDRO_PROD_PRECIP_PATTERNS)
+    q = production_summary(s, DEEP_DIVE_HYDRO_WINDOW_DAYS, HYDRO_PROD_PRECIP_PATTERNS)
+    if not q:
+        out["error"] = f"No observed production for {out['name']} yet."
+        return out
+    out.update(df=df, s=s, q=q)
+    return out
+
+
+def _render_hydro(country: str, cfg: dict, hy: dict) -> None:
+    area_lvl = cfg.get("hydro_level")
+    W = DEEP_DIVE_HYDRO_WINDOW_DAYS
+    q = hy.get("q")
+    if q:
+        sub = (f"{hy['name']} · last observed day {q['last_obs']:%d %b} · the {W} days to it against the {W} after it"
+               + (f" · Volue forecast issued {q['fc_issued']:%d %b}" if q.get("fc_issued") is not None else ""))
+    else:
+        sub = "reservoirs, snow, groundwater and the two-week outlook"
+    _sec_header("hydro", "Hydro", sub)
+    if not area_lvl and not hy.get("area"):
+        _note(f"No hydro series for {country}: the Hydro section covers the Alpine, Nordic, Iberian and "
+              "south-east European systems.")
         return
     # state — the Hydro overview's own figures for this area
     if area_lvl:
@@ -258,42 +430,33 @@ def _render_hydro(country: str, cfg: dict) -> None:
             if flags:
                 _chips(flags)
         else:
-            st.caption(f"No reservoir / snow / groundwater series for {country} yet.")
+            _note(f"No reservoir / snow / groundwater series for {country} yet.")
     # outlook — production and precipitation energy, last two weeks vs the next two
-    if not area_prod:
+    if not hy.get("area"):
         return
-    W = DEEP_DIVE_HYDRO_WINDOW_DAYS
-    try:
-        df = load_hydro_prod((area_prod,))
-    except Exception as e:
-        st.warning(f"Cannot read {HYDRO_PROD_TABLE}: {e}")
+    if hy.get("error"):
+        _note(hy["error"])
         return
-    if df.empty:
-        st.caption(f"No production rows for {HYDRO_PROD_AREAS.get(area_prod, area_prod)} in {HYDRO_PROD_TABLE} yet "
-                   "(pipeline/run_daily.py --only hydro-prod).")
-        return
-    s = production_series(df[df["area"] == area_prod], HYDRO_PROD_PRECIP_PATTERNS)
-    q = production_summary(s, W, HYDRO_PROD_PRECIP_PATTERNS)
-    if not q:
-        st.caption(f"No observed production for {HYDRO_PROD_AREAS.get(area_prod, area_prod)} yet.")
-        return
+    df, area_prod = hy["df"], hy["area"]
     ref_p = HYDRO_PROD_PRECIP_PATTERNS[0]
     d_rre = _issue_change(df, area_prod, "rre", ref_p, q)
     d_tot = _issue_change(df, area_prod, "tot", "volue", q)
-    name = HYDRO_PROD_AREAS.get(area_prod, area_prod)
-    st.caption(f"{name} · last observed day {q['last_obs']:%d %b} · the {W} days to it against the {W} after it"
-               + (f" · Volue production forecast issued {q['fc_issued']:%d %b}" if q.get("fc_issued") is not None else ""))
-    kpi_row([
-        _pct_card(f"Production · last {W} d", q["obs_tot"], q["obs_tot_n"], None, ""),
-        _pct_card(f"Production forecast · next {W} d", q["fwd_tot"], q["fwd_tot_n"], d_tot, "Volue forecast"),
-        _pct_card(f"Precip. energy · last {W} d", q["obs_rre"], q["obs_rre_n"], None, ""),
-        _pct_card(f"Precip. energy expected · next {W} d ({ref_p})", q["fwd_rre_ref"], q["fwd_rre_n"], d_rre, ref_p),
-    ], max_cols=4)
+    _tiles([
+        _pct_tile("prod", "Production", f"last {W} days · observed", q["obs_tot"], q["obs_tot_n"], None),
+        _pct_tile("prod", "Production forecast", f"next {W} days · Volue", q["fwd_tot"], q["fwd_tot_n"], d_tot),
+        _pct_tile("rre", "Precip. energy", f"last {W} days · observed", q["obs_rre"], q["obs_rre_n"], None),
+        _pct_tile("rre", "Precip. energy expected", f"next {W} days · {ref_p}", q["fwd_rre_ref"], q["fwd_rre_n"], d_rre),
+    ])
     others = {p: v for p, v in (q.get("fwd_rre") or {}).items() if p != ref_p and v is not None}
     bal = q.get("fwd_balance")
-    st.caption((f"Other ensembles, next {W} d: " + " · ".join(f"{p} {v:,.0f} GWh" for p, v in others.items()) + " · " if others else "")
-               + (f"precipitation − production, next {W} d: {bal:+,.0f} GWh" if bal is not None else ""))
-    st.plotly_chart(make_hydro_production_chart(s, name, W, HYDRO_PROD_PRECIP_PATTERNS, height=420),
+    parts = []
+    if others:
+        parts.append(f"Other ensembles, next {W} d: " + " · ".join(f"{p} {v:,.0f} GWh" for p, v in others.items()))
+    if bal is not None:
+        parts.append(f"precipitation − production, next {W} d: {bal:+,.0f} GWh")
+    if parts:
+        _note(" · ".join(parts))
+    st.plotly_chart(make_hydro_production_chart(hy["s"], hy["name"], W, HYDRO_PROD_PRECIP_PATTERNS, height=420),
                     use_container_width=True, key=f"dd_hydro_chart_{area_prod}")
 
 
@@ -317,74 +480,155 @@ def _aggregate_members(pm: pd.DataFrame, areas: list[str], label: str, how: str)
     return out.assign(area=label)
 
 
-def _render_scenarios(country: str, cfg: dict) -> None:
-    st.markdown(f"##### Scenarios · {country}")
+def _load_scenarios() -> tuple:
+    """The Forecast tab's default scenarios: (results per week, info, weeks_sel, weeks_all, error)."""
     try:
-        res, info, weeks_sel, weeks_all = default_scenarios(SCENARIO_DEFAULT_SOURCE)
+        return (*default_scenarios(SCENARIO_DEFAULT_SOURCE), None)
     except Exception as e:
-        st.warning(f"Scenario inputs unavailable: {e}")
+        return None, None, None, None, f"Scenario inputs unavailable: {e}"
+
+
+def _render_scenarios(country: str, cfg: dict, scen: tuple) -> None:
+    results, info, weeks_sel, weeks_all, err = scen
+    if results and info is not None:
+        sub = (f"{info['label']} · run {pd.Timestamp(info['init']):%a %d %b %Hz} · "
+               f"{next(iter(results.values()))['n_members']} members · each trading week clustered on its own "
+               f"weekly-mean Z500 field, k = {SCENARIO_K_DEFAULT}")
+    else:
+        sub = "the Forecast section's split, read for this country"
+    _sec_header("scen", "Scenarios", sub)
+    if err:
+        st.warning(err)
         return
     if info is None:
         st.caption("No Z500 member field in the sandbox yet — the Forecast → Scenarios tab is empty too "
                    "(pipeline run_scenarios.bat for EC-ENS, power_desk_refresh.py cell 4b for EC-AI).")
         return
-    if not res:
+    if not results:
         st.caption("The run does not cover enough days of any trading week to form scenarios yet.")
         return
-    weeks = list(weeks_sel["week_start"])
-    scen_ids = scenario_ids(res)
     areas = list(cfg.get("scenario", []))
-    st.caption(f"{info['label']} · run {pd.Timestamp(info['init']):%a %d %b %Hz} · {res['n_members']} members · "
-               f"clustered on the weekly-mean Z500 field over {', '.join(weeks_sel['week_label'])} · "
-               f"k = {SCENARIO_K_DEFAULT} — the Forecast → Scenarios tab's defaults; change them there for another split. "
-               f"Temperature, wind and solar read on the {info['land']['label']} of the same member IDs.")
-    kpi_row(scenario_cards(res, info, weeks), max_cols=4)
-
-    if not areas:
-        st.caption(f"No member rows for {country}.")
-        return
-    tagged = {}
+    _note(f"The Forecast → Scenarios tab's defaults; change them there for another split. "
+          f"Temperature, wind and solar read on the {info['land']['label']} of the same member IDs.")
+    land = {}
     for metric in ("Temperature", "Wind", "Solar"):
-        pm = land_members(info, metric, tuple(areas))
-        pm = _aggregate_members(pm, areas, country, "mean" if metric == "Temperature" else "sum")
-        t = apply_scenarios(pm, res["assign"]) if not pm.empty else pd.DataFrame()
-        if not t.empty:
-            tagged[metric] = t
-    if not tagged:
-        st.caption(f"No member rows for {country} ({', '.join(areas)}) in the {info['land']['label']} yet.")
-        return
-    weekly = {m: scenario_weekly_values(t, weeks, "value") for m, t in tagged.items()}
-    daily = {m: scenario_daily_summary(t, "value") for m, t in tagged.items()}
+        pm = land_members(info, metric, tuple(areas)) if areas else pd.DataFrame()
+        pm = _aggregate_members(pm, areas, country, "mean" if metric == "Temperature" else "sum") if not pm.empty else pm
+        if not pm.empty:
+            land[metric] = pm
     if len(areas) > 1:
         st.caption(f"{country} = {', '.join(areas)} per member: temperature averaged, wind and solar summed.")
-    st.markdown(_side_by_side_html(country, weekly, scen_ids, weeks_sel, res["sizes"], res["n_members"], res["names"]),
-                unsafe_allow_html=True)
-    st.plotly_chart(make_country_scenario_panel(daily, country, _UNITS, list(weeks_all["week_start"])),
-                    use_container_width=True, key=f"dd_scen_{country}")
-    st.caption("Precipitation energy by scenario is not available: the member tables carry temperature, "
-               "wind and solar only. The hydro outlook above gives the "
-               "ensemble-mean precipitation and its change since the previous issue instead.")
+    for i, (_, wk) in enumerate(weeks_sel.iterrows()):
+        ws = pd.Timestamp(wk["week_start"]).normalize()
+        res = results.get(ws)
+        if not res:
+            continue
+        st.markdown(f'<div class="dd-week">{week_title(wk)}</div>', unsafe_allow_html=True)
+        kpi_row(scenario_cards(res, info, [ws]), max_cols=4)
+        if not areas:
+            st.caption(f"No member rows for {country}.")
+            continue
+        tagged = {m: apply_scenarios(t, res["assign"]) for m, t in land.items()}
+        tagged = {m: t for m, t in tagged.items() if not t.empty}
+        if not tagged:
+            st.caption(f"No member rows for {country} ({', '.join(areas)}) in the {info['land']['label']} yet.")
+            continue
+        weekly = {m: scenario_weekly_values(t, [ws], "value") for m, t in tagged.items()}
+        daily = {m: scenario_daily_summary(t[t["week_start"] == ws], "value") for m, t in tagged.items()}
+        st.markdown(_side_by_side_html(country, weekly, scenario_ids(res), weeks_sel[weeks_sel["week_start"] == ws],
+                                       res["sizes"], res["n_members"], res["names"]), unsafe_allow_html=True)
+        st.plotly_chart(make_country_scenario_panel(daily, country, _UNITS, [ws]),
+                        use_container_width=True, key=f"dd_scen_{country}_{wk['week_label']}")
+    _note("Precipitation energy by scenario is not available: the member tables carry temperature, wind and "
+          "solar only. The hydro outlook above gives the ensemble-mean precipitation and its change since the "
+          "previous issue instead.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ENTRY
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _sig(color: str, label: str, value: str) -> str:
+    return (f'<span class="dd-sig"><span class="dd-dot" style="background:{color};"></span>'
+            f'{label} <b>{value}</b></span>')
+
+
+def _hero_html(country: str, source: str, ref: RunCol, win: dict, delta_label: str, cells: pd.DataFrame,
+               cblocks: dict, hy: dict, scen: tuple) -> str:
+    out1, tone1 = _outlook(cells, cblocks, "w1", win["w1"][0])
+    out2, _ = _outlook(cells, cblocks, "w2", win["w2"][0])
+    moves = _moves(cells, cblocks) if ref.prev_init is not None else "no earlier run"
+    sig = []
+    for name, block in cblocks.items():
+        r = _ref_cell(cells, "w1", name)
+        d = np.nan if r is None else float(r["d_norm"])
+        if np.isnan(d):
+            continue
+        t = _tone(d, block)
+        color = DD_WARM if t == "warm" else (DD_COOL if t == "cool" else "#a9a89f")
+        sig.append(_sig(color, name.split(" (")[0], f"{_signed(d, block['fmt'])} {block['unit']}"))
+    q = hy.get("q")
+    if q and q.get("fwd_rre_ref") is not None and q.get("fwd_rre_n"):
+        pct = q["fwd_rre_ref"] / q["fwd_rre_n"] * 100
+        sig.append(_sig(DD_COOL if pct >= 100 else DD_WARM, f"Hydro inflow, next {DEEP_DIVE_HYDRO_WINDOW_DAYS} d",
+                        f"{pct:.0f}% of normal"))
+    results, _, weeks_sel, _, _ = scen
+    res = None
+    if results and weeks_sel is not None and len(weeks_sel):
+        res = results.get(pd.Timestamp(weeks_sel["week_start"].iloc[0]).normalize())
+    if res:
+        ids = [i for i in scenario_ids(res) if i != 0]
+        if ids:
+            s1 = max(ids, key=lambda i: res["sizes"][i])
+            label = short_name(res["names"].get(s1)) or f"Scenario {s1}"
+            sig.append(_sig(scenario_color(s1), f"Leading scenario · {weeks_sel.iloc[0]['week_label']}",
+                            f"{label} · {res['sizes'][s1] / res['n_members']:.0%}"))
+    return (f'<div class="dd-hero"><div class="dd-hero-top">'
+            f'<div><div class="dd-eyebrow">Country deep dive · {source}</div>'
+            f'<div class="dd-country">{country}</div>'
+            f'<div class="dd-meta">{ref.model} {ref.init:%a %d %b %H}z · {delta_label} vs {ref.prev_label}</div></div>'
+            f'<div class="dd-out-box"><div class="dd-out-label">Outlook · {_short_title(win["t1"])} · '
+            f'{win["w1"][0]:%d %b} – {win["w1"][1]:%d %b}</div>'
+            f'<div class="dd-out dd-tone-{tone1}">{out1}</div>'
+            f'<div class="dd-out-next">{_short_title(win["t2"])}: <b>{out2}</b> · since last run: <b>{moves}</b></div>'
+            f'</div></div>'
+            + (f'<div class="dd-signals">{"".join(sig)}</div>' if sig else "") + "</div>")
+
+
+def _pick_country() -> str:
+    names = list(DEEP_DIVE_COUNTRIES)
+    last = st.session_state.get("dd_country_last", DEEP_DIVE_DEFAULT)
+    pills = getattr(st, "pills", None)
+    if pills is not None:
+        if "dd_country" not in st.session_state:
+            st.session_state["dd_country"] = last
+        picked = pills("Country", names, selection_mode="single", key="dd_country", label_visibility="collapsed")
+    else:
+        picked = st.selectbox("Country", names, index=names.index(last), key="dd_country")
+    country = picked if picked in names else last      # a pill clicked off keeps the last country
+    st.session_state["dd_country_last"] = country
+    return country
+
+
 def render_country_deep_dive(cols: list[RunCol], win: dict, delta_label: str, view_key: str | None,
                              blocks: dict, source: str) -> None:
     """Everything the desk has on one country, on the grid's reference run, compare
     columns and Δ pairing (chosen above the tabs)."""
-    names = list(DEEP_DIVE_COUNTRIES)
-    c1, c2 = st.columns([1.4, 4.6])
-    with c1:
-        country = st.selectbox("Country", names, index=names.index(DEEP_DIVE_DEFAULT), key="dd_country")
-    with c2:
-        st.caption(f"The reference run, compare columns and Δ pairing are the grid's (set above). Source: {source}. "
-                   "Forecast — the report's variables for the country, then the daily series run against run; "
-                   "hydro — state and two-week outlook; scenarios — the Forecast section's split, read here.")
+    st.markdown(DEEP_DIVE_CSS, unsafe_allow_html=True)
+    country = _pick_country()
     cfg = DEEP_DIVE_COUNTRIES[country]
-    _render_forecast(country, cfg, cols, win, delta_label, view_key, blocks)
-    st.divider()
-    _render_hydro(country, cfg)
-    st.divider()
-    _render_scenarios(country, cfg)
+    cblocks = _country_blocks(country, cfg, blocks)
+    if not cblocks:
+        status_banner(f"The Morning Report has no curve for {country} in this source.", "warning")
+        return
+    cells = compute_grid(cols, win, cblocks)
+    hy = _hydro_outlook(cfg)
+    scen = _load_scenarios()
+    st.markdown(_hero_html(country, source, cols[0], win, delta_label, cells, cblocks, hy, scen),
+                unsafe_allow_html=True)
+    with _section("dd_sec_forecast"):
+        _render_forecast(country, cblocks, cells, cols, win, delta_label, view_key, blocks)
+    with _section("dd_sec_hydro"):
+        _render_hydro(country, cfg, hy)
+    with _section("dd_sec_scen"):
+        _render_scenarios(country, cfg, scen)

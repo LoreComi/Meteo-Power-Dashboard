@@ -608,3 +608,88 @@ PLOTLY_LAYOUT = dict(
         tickfont=dict(color=INK_MUTED, size=11), title_font=dict(color=INK_SECONDARY),
     ),
 )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Morning Call → Country deep dive: hero with the outlook, section cards, stat tiles
+# ══════════════════════════════════════════════════════════════════════════════
+DD_WARM = "#e5484d"       # warm side: warmer, or less wind / solar / precipitation
+DD_COOL = "#2a78d6"       # cool side: colder, or more
+DEEP_DIVE_CSS = f"""
+<style>
+.dd-hero {{
+    position: relative; overflow: hidden;
+    background: radial-gradient(120% 140% at 100% 0%, #2c4f86 0%, rgba(44,79,134,0) 55%),
+                linear-gradient(125deg, #0f1726 0%, #172338 55%, #1c2f4f 100%);
+    border-radius: 18px; padding: 22px 26px 18px; margin: 6px 0 18px;
+    box-shadow: 0 10px 30px rgba(15,23,38,0.18);
+}}
+.dd-hero-top {{ display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; flex-wrap: wrap; }}
+.dd-eyebrow {{ font-size: 0.66rem; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase;
+    color: rgba(255,255,255,0.55) !important; }}
+.dd-country {{ font-size: 2.1rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.1;
+    color: #ffffff !important; margin-top: 4px; }}
+.dd-meta {{ font-size: 0.78rem; color: rgba(255,255,255,0.62) !important; margin-top: 6px;
+    font-family: 'JetBrains Mono', monospace; }}
+.dd-out-box {{ text-align: right; min-width: 240px; }}
+.dd-out-label {{ font-size: 0.66rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+    color: rgba(255,255,255,0.55) !important; }}
+.dd-out {{ font-size: 2.3rem; font-weight: 800; letter-spacing: -0.035em; line-height: 1.05; margin-top: 4px; }}
+.dd-tone-warm {{ color: #ff8f8a !important; }}
+.dd-tone-cool {{ color: #8cc4ff !important; }}
+.dd-tone-flat {{ color: #ffffff !important; }}
+.dd-out-next {{ font-size: 0.8rem; color: rgba(255,255,255,0.7) !important; margin-top: 6px; }}
+.dd-out-next b {{ color: #ffffff !important; font-weight: 700; }}
+.dd-signals {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; padding-top: 14px;
+    border-top: 1px solid rgba(255,255,255,0.10); }}
+.dd-sig {{ display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 999px;
+    background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.10);
+    font-size: 0.76rem; color: rgba(255,255,255,0.85) !important; white-space: nowrap; }}
+.dd-sig b {{ color: #ffffff !important; font-weight: 700; }}
+.dd-dot {{ width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }}
+
+/* section cards (keyed st.container) */
+div[class*="st-key-dd_sec_"] {{
+    background: #ffffff; border-radius: 16px !important; padding: 6px 8px 4px;
+    border: 1px solid rgba(20,20,15,0.07) !important; box-shadow: 0 2px 14px rgba(20,20,15,0.05);
+    margin-bottom: 14px;
+}}
+.dd-sec {{ display: flex; align-items: center; gap: 12px; margin: 2px 0 12px; }}
+.dd-sec-ico {{ width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center;
+    justify-content: center; flex: none; }}
+.dd-sec-ico svg {{ width: 19px; height: 19px; }}
+.dd-sec-title {{ font-size: 1.05rem; font-weight: 750; letter-spacing: -0.01em; color: var(--text-primary) !important; }}
+.dd-sec-sub {{ font-size: 0.76rem; color: var(--text-muted) !important; margin-top: 1px; }}
+
+/* stat tiles */
+.dd-tiles {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 4px 0 16px; }}
+.dd-tile {{ background: #fbfbfa; border: 1px solid rgba(20,20,15,0.07); border-radius: 14px; padding: 14px 16px 13px; }}
+.dd-tile-head {{ display: flex; align-items: center; gap: 9px; }}
+.dd-tile-ico {{ width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex: none; }}
+.dd-tile-ico svg {{ width: 16px; height: 16px; }}
+.dd-tile-label {{ font-size: 0.8rem; font-weight: 650; color: var(--text-primary) !important; line-height: 1.15; }}
+.dd-tile-sub {{ font-size: 0.68rem; color: var(--text-muted) !important; font-weight: 500; }}
+.dd-tile-val {{ font-size: 1.85rem; font-weight: 750; letter-spacing: -0.03em; margin-top: 10px;
+    color: var(--text-primary) !important; font-variant-numeric: tabular-nums; line-height: 1.1; }}
+.dd-tile-unit {{ font-size: 0.85rem; font-weight: 600; color: var(--text-muted) !important; margin-left: 4px; letter-spacing: 0; }}
+.dd-gauge {{ position: relative; height: 6px; border-radius: 99px; background: #ecebe7; margin: 10px 0 9px; overflow: hidden; }}
+.dd-gauge-mid {{ position: absolute; left: 50%; top: -2px; bottom: -2px; width: 2px; background: #c9c8bd; }}
+.dd-gauge-bar {{ position: absolute; top: 0; bottom: 0; border-radius: 99px; }}
+.dd-tile-foot {{ display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }}
+.dd-pill {{ font-size: 0.72rem; font-weight: 700; padding: 2px 9px; border-radius: 999px; }}
+.dd-pill-warm {{ background: rgba(229,72,77,0.10); color: {DD_WARM} !important; }}
+.dd-pill-cool {{ background: rgba(42,120,214,0.10); color: {DD_COOL} !important; }}
+.dd-pill-flat {{ background: rgba(20,20,15,0.05); color: var(--text-secondary) !important; }}
+.dd-move {{ font-size: 0.72rem; font-weight: 600; color: var(--text-muted) !important; }}
+.dd-move-warm {{ color: {DD_WARM} !important; }}
+.dd-move-cool {{ color: {DD_COOL} !important; }}
+.dd-week {{ font-size: 0.82rem; font-weight: 700; color: var(--text-primary) !important; margin: 14px 0 8px;
+    padding-left: 10px; border-left: 3px solid #c4407a; }}
+.dd-note {{ font-size: 0.74rem; color: var(--text-muted) !important; margin: -4px 0 10px; }}
+
+/* the shared KPI cards, softened inside the Morning Call page (hydro state, scenarios) */
+.kpi-card {{ text-align: left; border-radius: 14px; background: #fbfbfa; box-shadow: none;
+    border: 1px solid rgba(20,20,15,0.07); padding: 14px 16px; }}
+.kpi-value {{ font-family: 'Inter', sans-serif; font-weight: 750; letter-spacing: -0.03em; }}
+</style>
+"""

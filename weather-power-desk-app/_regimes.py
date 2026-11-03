@@ -388,8 +388,9 @@ def render_regimes():
     st.markdown("##### European Weather Regimes")
     st.caption("Each ensemble member's 500 hPa geopotential field projected onto the 7 "
                "North-Atlantic / European regimes of Michel & Rivière (2011) — the "
-               "corso_model_wr tool, live off the Meteomatics silver layer. The projection runs "
-               "in the refresh job; this page reads the per-member result.")
+               "corso_model_wr tool, live. EC-ENS (the tool's ensemble, 51 members) is projected by the "
+               "local pipeline from the Meteomatics field it fetches through the DSL gateway; AIFS-ENS and "
+               "GFS-ENS by the refresh job from the silver layer. This page reads the per-member result.")
 
     try:
         df = load_wr_forecast_members()

@@ -410,11 +410,16 @@ WR_LEAD_FACTOR = -0.018774217528098960
 WR_DEFAULT_HORIZON_DAYS = 15
 WR_MAX_HORIZON_DAYS = 17
 
-# Forecast sources in dna_prod_silver.meteomatics.geopotential_height_forecast.
-# The original tool runs on ECMWF-ENS (51 IFS members); the silver layer carries
-# per-member geopotential only for AIFS-ENS and GFS-ENS, so AIFS — ECMWF's own
-# ensemble, 50 members — is the default and GFS is offered alongside it.
+# Forecast sources. The original tool runs on ECMWF-ENS (51 IFS members): its
+# Z500 members are not in the silver layer, so the local pipeline fetches them
+# from Meteomatics through the DSL gateway and runs the same projection
+# (pipeline/wr_ecens.py → wr_forecast_members_ecens, `table` below). AIFS-ENS
+# and GFS-ENS come from dna_prod_silver.meteomatics.geopotential_height_forecast
+# through notebook cell 7c (wr_forecast_members). EC-ENS is the default — the
+# tool's ensemble and the Morning Call's reference run.
 WR_MODELS: dict[str, dict] = {
+    "ECMWF EC-ENS":   {"model": "ecmwf-ens", "curve": "DSL gateway (pipeline/wr_ecens.py)",
+                       "n_members": 51, "table": "wr_forecast_members_ecens", "run_is_init": True},
     "ECMWF AIFS-ENS": {"model": "ecmwf-aifs-ens",
                        "curve": "geopotential_height_500hpa_m_ecmwf_aifs_ens_p1d",
                        "n_members": 50},
@@ -422,7 +427,8 @@ WR_MODELS: dict[str, dict] = {
                        "curve": "geopotential_height_500hpa_m_ncep_gfs_ens_p1d",
                        "n_members": 30},
 }
-WR_DEFAULT_MODEL = "ECMWF AIFS-ENS"
+WR_DEFAULT_MODEL = "ECMWF EC-ENS"
+WR_MEMBERS_TABLE = "wr_forecast_members"      # the notebook's; models with their own `table` are read from it too
 WR_RUN_HISTORY_DAYS = 8          # runs kept, so run-to-run evolution is available
 
 # Reanalysis climatology. ERA5 actuals
