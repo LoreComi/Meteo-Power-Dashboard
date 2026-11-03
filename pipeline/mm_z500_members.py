@@ -130,19 +130,23 @@ def query_time_range(session, settings, model: str, param: str = PARAM) -> tuple
     return (min(stamps), max(stamps)) if len(stamps) >= 2 else (None, None)
 
 
-def fetch_members(session, settings, members: list[int], init: dt.datetime) -> dict[int, pd.DataFrame]:
+def fetch_members(session, settings, members: list[int], init: dt.datetime,
+                  t_end: dt.datetime | None = None) -> dict[int, pd.DataFrame]:
     """One gateway call for a group of members: {member: DataFrame(day, latitude,
-    longitude, value)}, the values of each UTC day averaged."""
+    longitude, value)}, the values of each UTC day averaged. The horizon runs from
+    the init to init + Z500_DAYS (the EC-ENS range the gateway serves: exactly 15 days,
+    so the last day holds its 00 UTC value only), capped at `t_end` when given — a
+    request past the served range is refused with a 404."""
     lat0, lat1 = settings.z500_lat
     lon0, lon1 = settings.z500_lon
     res = settings.z500_grid_res
     step = settings.z500_time_step.upper()
-    if step == "P1D":                                     # one value a day: 12 UTC
-        t0 = init.replace(hour=12)
-        t1 = t0 + dt.timedelta(days=settings.z500_days)
-    else:
-        t0 = init.replace(hour=0)
-        t1 = t0 + dt.timedelta(days=settings.z500_days, hours=18)
+    t0 = init                                             # P1D: one value a day at the init hour
+    t1 = init + dt.timedelta(days=settings.z500_days)
+    if t_end is not None:
+        t1 = min(t1, t_end)
+    if step == "P1D" and t1.hour != t0.hour:              # keep whole days of the step
+        t1 = t1.replace(hour=t0.hour) - (dt.timedelta(days=1) if t1.hour < t0.hour else dt.timedelta(0))
     sel = f"member:{members[0]}-{members[-1]}" if len(members) > 1 else f"member:{members[0]}"
     payload = {
         "parameters": PARAM, "source": settings.z500_model, "ensembleMemberSelection": sel,
@@ -212,12 +216,19 @@ def run(settings, writer, backfill: bool = False, now: dt.datetime | None = None
     session = _session(settings, dsl_headers(settings))
     init = latest_cycle(now, settings.z500_min_age_hours)
     first, last = query_time_range(session, settings, settings.z500_model)
-    if first is not None:
-        log.info("gateway serves %s from %s to %s; the cycle rule labels the run %s", settings.z500_model,
-                 _iso(first), _iso(last), _iso(init))
-        if first.date() > init.date():
-            log.warning("the gateway's first valid time %s is after the run label %s — check Z500_MIN_AGE_HOURS",
-                        _iso(first), _iso(init))
+    if last is not None:
+        # The gateway serves the latest run out to init + 15 days exactly (checked
+        # 2026-11-03: max_date 18 Nov 00Z at 13 UTC on 3 Nov = the 00z run), so its
+        # last valid time names the run better than the clock does.
+        from_range = last - dt.timedelta(days=settings.z500_days)
+        if from_range.hour in CYCLES and abs((from_range - init).total_seconds()) <= 36 * 3600:
+            if from_range != init:
+                log.info("gateway's range ends %s → the %s run (the cycle rule said %s)", _iso(last), _iso(from_range), _iso(init))
+            init = from_range
+        else:
+            log.warning("gateway range %s–%s does not end %d days after a 00z/12z cycle — labelling the run %s by the clock",
+                        _iso(first), _iso(last), settings.z500_days, _iso(init))
+        log.info("gateway serves %s to %s; run %s, horizon capped there", settings.z500_model, _iso(last), _iso(init))
     table = settings.z500_table_fq
     writer.ensure_table(table, Z500_COLUMNS,
                         "EC-ENS 500 hPa geopotential height members on the scenario grid, from Meteomatics via the DSL "
@@ -237,7 +248,7 @@ def run(settings, writer, backfill: bool = False, now: dt.datetime | None = None
     for i in range(0, len(wanted), per):
         group = wanted[i:i + per]
         try:
-            members.update(fetch_members(session, settings, group, init))
+            members.update(fetch_members(session, settings, group, init, t_end=last))
         except Exception as e:
             log.warning("members %d-%d skipped: %s", group[0], group[-1], str(e)[:200])
         log.info("  %d/%d members fetched (%.0f s)", len(members), settings.z500_members, time.time() - t0)
