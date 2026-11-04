@@ -47,6 +47,7 @@ from _config import (
     SCENARIO_K_DEFAULT, SCENARIO_MIN_MEMBERS, SCENARIO_MIN_WEEK_DAYS, SPATIAL_N_PCA,
     SCENARIO_NAME_MIN_AMPLITUDE_M, SCENARIO_NAME_REGIME_MIN_R, WR_REGIMES, WR_REGIME_LONG, WR_REGIME_SHORT,
     MEMBER_ID_OFFSET, SCENARIO_NWE_AREAS, SCENARIO_READ_TEMP_C, SCENARIO_READ_WIND_PCT,
+    SCENARIO_SIGNAL_MIN_D, SCENARIO_SIGNAL_CLEAR_D, SCENARIO_SEPARATION_BOUNDS, SCENARIO_TAIL_FRACTION,
 )
 
 OTHER_LABEL = 0   # scenario id reserved for the "Other" fold
@@ -404,33 +405,58 @@ def scenario_name(s: int, names: dict | None = None) -> str:
 
 def nwe_read(tagged_t: pd.DataFrame, tagged_w: pd.DataFrame, scenario: int, weeks: list[pd.Timestamp],
              areas: list[str] = SCENARIO_NWE_AREAS, temp_c: float = SCENARIO_READ_TEMP_C,
-             wind_pct: float = SCENARIO_READ_WIND_PCT) -> dict:
+             wind_pct: float = SCENARIO_READ_WIND_PCT, min_d: float = SCENARIO_SIGNAL_MIN_D,
+             clear_d: float = SCENARIO_SIGNAL_CLEAR_D) -> dict:
     """How a scenario reads over North-West Europe against the full ensemble over the
     clustered weeks: temperature averaged over the countries, wind summed, each as
-    the scenario's departure from the ensemble mean (per member first). Returns
-    dict(d_temp, d_wind, d_wind_pct, temp, wind, line) — `line` is the one-liner:
-    'Cold and low wind in NWE', 'Mild and windy in NWE', 'Flat in NWE', or a mix."""
+    the scenario's departure from the ensemble mean (per member first), judged
+    against the spread of the scenario's own members (their standard deviation).
+
+    A word ('cold', 'windy', …) needs BOTH a departure past the threshold and a
+    departure of at least `min_d` × the within-scenario spread; below `clear_d` ×
+    spread the line says 'Leans …'. Returns dict(d_temp, sd_temp, d_wind, d_wind_pct,
+    sd_wind_pct, eff_temp, eff_wind, temp, wind, lean, overlap, line) — `line` is
+    the one-liner: 'Cold and low wind in NWE', 'Leans mild in NWE, wind flat',
+    'Flat in NWE', …; `overlap` is True when a departure past the threshold was
+    called flat only because the members overlap the ensemble too much."""
     weeks = [pd.Timestamp(w).normalize() for w in weeks]
 
     def _dep(tagged: pd.DataFrame, how: str):
+        """(departure of the scenario mean, ensemble mean, spread within the scenario)."""
         if tagged is None or tagged.empty:
-            return np.nan, np.nan
+            return np.nan, np.nan, np.nan
         df = tagged[tagged["area"].isin(areas) & tagged["week_start"].isin(weeks)]
         if df.empty:
-            return np.nan, np.nan
+            return np.nan, np.nan, np.nan
         per_member = df.groupby(["member_id", "area"])["value"].mean().groupby("member_id").agg(how)
         ens = float(per_member.mean())
         ids = df.loc[df["scenario"] == scenario, "member_id"].unique()
         if len(ids) == 0:
-            return np.nan, ens
-        return float(per_member.loc[per_member.index.isin(ids)].mean() - ens), ens
+            return np.nan, ens, np.nan
+        own = per_member.loc[per_member.index.isin(ids)]
+        return float(own.mean() - ens), ens, float(own.std()) if len(own) > 1 else np.nan
 
-    d_t, ens_t = _dep(tagged_t, "mean")
-    d_w, ens_w = _dep(tagged_w, "sum")
+    d_t, ens_t, sd_t = _dep(tagged_t, "mean")
+    d_w, ens_w, sd_w = _dep(tagged_w, "sum")
     d_w_pct = (d_w / ens_w * 100.0) if (ens_w and not np.isnan(d_w) and ens_w != 0) else np.nan
-    t_word = None if np.isnan(d_t) else ("cold" if d_t <= -temp_c else ("mild" if d_t >= temp_c else "flat"))
-    w_word = None if np.isnan(d_w_pct) else ("low wind" if d_w_pct <= -wind_pct else ("windy" if d_w_pct >= wind_pct else "flat"))
+    sd_w_pct = (sd_w / ens_w * 100.0) if (ens_w and not np.isnan(sd_w) and ens_w != 0) else np.nan
+    eff_t = abs(d_t) / sd_t if (not np.isnan(d_t) and sd_t and not np.isnan(sd_t)) else np.nan
+    eff_w = abs(d_w) / sd_w if (not np.isnan(d_w) and sd_w and not np.isnan(sd_w)) else np.nan
+
+    def _word(d, eff, thr, lo, hi):
+        if np.isnan(d):
+            return None, False
+        past = abs(d) >= thr
+        clear_enough = np.isnan(eff) or eff >= min_d
+        if past and clear_enough:
+            return (lo if d < 0 else hi), False
+        return "flat", past and not clear_enough
+
+    t_word, t_overlap = _word(d_t, eff_t, temp_c, "cold", "mild")
+    w_word, w_overlap = _word(d_w_pct, eff_w, wind_pct, "low wind", "windy")
     words = [w for w in (t_word, w_word) if w is not None]
+    effs = [e for w, e in ((t_word, eff_t), (w_word, eff_w)) if w not in (None, "flat") and not np.isnan(e)]
+    lean = bool(effs) and min(effs) < clear_d
     if not words:
         line = ""
     elif all(w == "flat" for w in words):
@@ -441,25 +467,79 @@ def nwe_read(tagged_t: pd.DataFrame, tagged_w: pd.DataFrame, scenario: int, week
             parts.append(t_word)
         if w_word and w_word != "flat":
             parts.append(w_word)
-        line = " and ".join(parts) + " in NWE"
+        line = ("leans " if lean else "") + " and ".join(parts) + " in NWE"
         if t_word == "flat":
             line += ", temperature flat"
         elif w_word == "flat":
             line += ", wind flat"
         line = line[0].upper() + line[1:]
-    return {"d_temp": d_t, "d_wind": d_w, "d_wind_pct": d_w_pct, "temp": t_word, "wind": w_word, "line": line}
+    return {"d_temp": d_t, "sd_temp": sd_t, "d_wind": d_w, "d_wind_pct": d_w_pct, "sd_wind_pct": sd_w_pct,
+            "eff_temp": eff_t, "eff_wind": eff_w, "temp": t_word, "wind": w_word, "lean": lean,
+            "overlap": bool(t_overlap or w_overlap), "line": line}
 
 
 def describe_scenario(read: dict) -> str:
-    """The card's second line: the NWE one-liner with its numbers vs the ensemble."""
+    """The card's second line: the NWE one-liner with its numbers vs the ensemble, each
+    with ± the spread of the scenario's own members — and, when a departure was
+    called flat because of that spread, why."""
     if not read or not read.get("line"):
         return ""
     nums = []
     if not np.isnan(read.get("d_temp", np.nan)):
-        nums.append(f"{read['d_temp']:+.1f} °C")
+        sd = read.get("sd_temp", np.nan)
+        nums.append(f"{read['d_temp']:+.1f}" + (f" ±{sd:.1f}" if not np.isnan(sd) else "") + " °C")
     if not np.isnan(read.get("d_wind_pct", np.nan)):
-        nums.append(f"{read['d_wind_pct']:+.0f} % wind")
-    return read["line"] + (f' <span class="mc-muted">({", ".join(nums)} vs the ensemble)</span>' if nums else "")
+        sd = read.get("sd_wind_pct", np.nan)
+        nums.append(f"{read['d_wind_pct']:+.0f}" + (f" ±{sd:.0f}" if not np.isnan(sd) else "") + " % wind")
+    tail = ""
+    if nums:
+        tail = f' <span class="mc-muted">({", ".join(nums)} vs the ensemble'
+        tail += "; its members overlap the ensemble too much to call it)" if read.get("overlap") else ")"
+        tail += "</span>"
+    return read["line"] + tail
+
+
+def separation(silhouette: float, bounds: tuple[float, float] = SCENARIO_SEPARATION_BOUNDS) -> dict:
+    """How separable the week's members are on their Z500 field, from the k-means
+    silhouette: dict(label, text) in trader words."""
+    if silhouette is None or np.isnan(silhouette):
+        return {"label": "n/a", "text": ""}
+    if silhouette < bounds[0]:
+        return {"label": "weak", "text": "the members shade into each other, so the scenarios are the two halves of one "
+                                         "spread — read every difference below against the ± spread inside the scenario"}
+    if silhouette < bounds[1]:
+        return {"label": "moderate", "text": "two patterns emerge, with a fair number of members in between"}
+    return {"label": "strong", "text": "two distinct patterns"}
+
+
+def tail_assignments(members: pd.DataFrame, area: str, week_start: pd.Timestamp,
+                     frac: float = SCENARIO_TAIL_FRACTION, member_ids=None) -> pd.DataFrame:
+    """The tails on one driver: the members ranked on their weekly mean of `area`
+    (one region's rows of a land member frame — temperature, or wind), the lowest
+    `frac` of them = scenario 1, the highest = scenario 2, the middle = OTHER_LABEL.
+    Same shape as cluster_members' assignments, so the tails are read, named and
+    drawn exactly like the pattern scenarios. `member_ids` restricts the ranking to
+    those members (the clustered ones — Volue's control run has no Z500 row and
+    would otherwise make it 51). Empty when fewer than 8 members."""
+    cols = ["member_id", "raw_label", "scenario"]
+    if members is None or members.empty:
+        return pd.DataFrame(columns=cols)
+    d = add_week(_with_ids(members))
+    ws = pd.Timestamp(week_start).normalize()
+    d = d[(d["area"] == area) & (d["week_start"] == ws)]
+    if member_ids is not None:
+        d = d[d["member_id"].isin([int(m) for m in member_ids])]
+    if d.empty:
+        return pd.DataFrame(columns=cols)
+    pm = d.groupby("member_id")["value"].mean().sort_values()
+    n = len(pm)
+    k = max(1, int(round(n * frac)))
+    if n < 8 or 2 * k > n:
+        return pd.DataFrame(columns=cols)
+    scen = np.full(n, OTHER_LABEL, dtype=int)
+    scen[:k] = 1
+    scen[-k:] = 2
+    return pd.DataFrame({"member_id": pm.index.values.astype(int), "raw_label": scen, "scenario": scen})
 
 
 # ─── outputs ────────────────────────────────────────────────────────────────────
@@ -480,8 +560,9 @@ def scenario_daily_summary(tagged: pd.DataFrame, value_col: str = "value") -> pd
 
 def scenario_weekly_values(tagged: pd.DataFrame, weeks: list[pd.Timestamp],
                            value_col: str = "value") -> pd.DataFrame:
-    """Per (scenario, area, week_start): weekly mean of member values, the full-ensemble
-    weekly mean, the normal, and the two deltas. This is the side-by-side input."""
+    """Per (scenario, area, week_start): weekly mean of member values, their spread
+    within the scenario (sd), the full-ensemble weekly mean, the normal, the two
+    deltas and `effect` = |Δ ens| / sd. This is the side-by-side input."""
     if tagged.empty:
         return pd.DataFrame()
     weeks = [pd.Timestamp(w).normalize() for w in weeks]
@@ -491,7 +572,7 @@ def scenario_weekly_values(tagged: pd.DataFrame, weeks: list[pd.Timestamp],
     # weekly mean per member first, then across members — so a member missing
     # a day doesn't tilt the scenario mean
     pm = df.groupby(["scenario", "area", "week_start", "week_label", "member_id"])[value_col].mean().reset_index()
-    out = pm.groupby(["scenario", "area", "week_start", "week_label"])[value_col].agg(mean="mean", n="count").reset_index()
+    out = pm.groupby(["scenario", "area", "week_start", "week_label"])[value_col].agg(mean="mean", n="count", sd="std").reset_index()
     ens = df.groupby(["area", "week_start", "member_id"])[value_col].mean().groupby(["area", "week_start"]).mean()
     out = out.merge(ens.rename("ens_mean").reset_index(), on=["area", "week_start"], how="left")
     if "normal" in df.columns and df["normal"].notna().any():
@@ -501,6 +582,9 @@ def scenario_weekly_values(tagged: pd.DataFrame, weeks: list[pd.Timestamp],
         out["normal"] = np.nan
     out["d_ens"] = out["mean"] - out["ens_mean"]
     out["d_norm"] = out["mean"] - out["normal"]
+    # the departure in units of the scenario's own spread — the table greys the
+    # departure below SCENARIO_SIGNAL_MIN_D
+    out["effect"] = (out["d_ens"].abs() / out["sd"]).where(out["sd"] > 0)
     return out.sort_values(["area", "week_start", "scenario"])
 
 

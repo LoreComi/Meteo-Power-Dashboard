@@ -17,7 +17,13 @@ Three tabs:
                 per country, the scenarios side by side for temperature,
                 wind and solar read off the same member IDs — the Volue
                 EC-ENS members for EC-ENS, the AIFS-ENS member rows the
-                pipeline writes for EC-AI
+                pipeline writes for EC-AI. Every departure is shown with ±
+                the spread of the scenario's own members and greyed when
+                it is small against it; a chip says how separable the
+                week's members are; and beside the pattern scenarios the
+                TAILS — the coldest / mildest (calmest / windiest) quarter
+                of the members on one region — with their own pattern name
+                and temperature map.
 """
 from __future__ import annotations
 
@@ -30,6 +36,7 @@ from _config import (
     METEOMATICS_MODELS, SPREAD_RATIO_HIGH, SPREAD_RATIO_LOW,
     SCENARIO_SPATIAL_SOURCES, SCENARIO_DEFAULT_SOURCE, SCENARIO_K_DEFAULT, SCENARIO_K_MAX,
     SCENARIO_NWE_AREAS, SCENARIO_REGIONS, SPATIAL_GRID_RES, SPATIAL_BBOX, SPATIAL_MAP_METRIC,
+    SCENARIO_SIGNAL_MIN_D, SCENARIO_TAIL_FRACTION, SCENARIO_TAIL_DRIVERS, SCENARIO_TAIL_LABELS,
     area_label,
 )
 from _data import (
@@ -44,7 +51,7 @@ from _charts import (
 from _scenarios import (
     available_weeks, default_weeks, spatial_member_matrix, cluster_members, apply_scenarios, centroid_maps,
     name_cluster, short_name, nwe_read, scenario_field_maps, scenario_daily_summary, scenario_weekly_values,
-    scenario_name, describe_scenario, silhouette_for_k,
+    scenario_name, describe_scenario, silhouette_for_k, separation, tail_assignments,
 )
 from _regimes import render_regimes
 from _ui import (anomaly_kpi, kpi_card, kpi_row, status_banner, page_header, sec_header, tile, tiles, note,
@@ -414,6 +421,36 @@ def cluster_spatial(source: str, weeks: tuple[str, ...], k: int, ref_iso: str) -
     }
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def tail_fields(source: str, week_iso: str, ref_iso: str, assign_pairs: tuple[tuple[int, int], ...]) -> dict | None:
+    """For a tail assignment (member_id, scenario) of one week: the Z500 centroid maps
+    and names of the two tails and their 2 m temperature maps — the same fields the
+    pattern scenarios use. `ref_iso` only keys the cache on the run."""
+    assign = pd.DataFrame(list(assign_pairs), columns=["member_id", "scenario"])
+    assign = assign[assign["scenario"] != 0]
+    if assign.empty:
+        return None
+    ws = pd.Timestamp(week_iso).normalize()
+    g = load_member_spatial_days(source, ws, ws + pd.Timedelta(days=6))
+    if g.empty:
+        return None
+    _, grid = spatial_member_matrix({ws: g})
+    if grid.empty:
+        return None
+    cmaps = centroid_maps(grid, assign)
+    names = {int(s): name_cluster(cmaps[cmaps["scenario"] == s]) for s in sorted(assign["scenario"].unique())
+             if not cmaps[cmaps["scenario"] == s].empty}
+    t2m = pd.DataFrame()
+    try:
+        gt = load_member_spatial_days(source, ws, ws + pd.Timedelta(days=6), SPATIAL_MAP_METRIC)
+        if not gt.empty:
+            t2m = scenario_field_maps(gt, assign)
+    except Exception:
+        t2m = pd.DataFrame()
+    sizes = assign["scenario"].value_counts().to_dict()
+    return {"names": names, "cmaps": cmaps, "t2m_maps": t2m, "sizes": {int(k): int(v) for k, v in sizes.items()}}
+
+
 def default_scenarios(source_key: str = SCENARIO_DEFAULT_SOURCE):
     """The Scenarios tab with its defaults — the default source (or the first one
     available), the first two usable trading weeks (this week and the next), each
@@ -461,12 +498,30 @@ def scenario_cards(res: dict, info: dict, weeks: list[pd.Timestamp]) -> list[str
             label = short_name(res["names"].get(s))
             title = f"Scenario {s} · {share:.0%} probability" + (f" · {label}" if label else "")
             desc = describe_scenario(nwe_read(tagged_t, tagged_w, s, weeks))
-        cards.append(
-            f'<div class="kpi-card" style="border-top:3px solid {scenario_color(s)}; text-align:left;">'
+        cards.append(_scenario_card_html(title, desc, scenario_color(s)))
+    return cards
+
+
+def _scenario_card_html(title: str, desc: str, color: str) -> str:
+    return (f'<div class="kpi-card" style="border-top:3px solid {color}; text-align:left;">'
             f'<div class="kpi-label" style="font-size:0.95rem;color:var(--text-primary) !important;font-weight:700;'
             f'text-transform:none;letter-spacing:-0.01em;">{title}</div>'
             f'<div class="kpi-delta kpi-delta-flat">{desc or "&nbsp;"}</div></div>')
-    return cards
+
+
+def separation_chip(res: dict) -> str:
+    """'Pattern split: weak' with the plain-words meaning, from the week's silhouette."""
+    sep = separation(res.get("silhouette", np.nan))
+    col = {"weak": "var(--warning)", "moderate": "var(--text-muted)", "strong": "var(--good)"}.get(sep["label"], "var(--text-muted)")
+    chip = (f'<span style="display:inline-block;padding:2px 10px;border-radius:999px;border:1px solid {col};'
+            f'color:{col};font-size:0.78rem;font-weight:700;letter-spacing:0.02em;">Pattern split: {sep["label"]}</span>')
+    return f'<div style="margin:2px 0 8px 0;">{chip} <span class="mc-muted" style="font-size:0.8rem;">{sep["text"]}</span></div>'
+
+
+def tail_label(metric: str, s: int) -> str:
+    """'Coldest' (s = 1) / 'Mildest' (s = 2) for temperature, 'Calmest' / 'Windiest' for wind."""
+    lo, hi = SCENARIO_TAIL_LABELS.get(metric, ("Lowest", "Highest"))
+    return lo if int(s) == 1 else hi
 
 
 def week_title(wk: pd.Series) -> str:
@@ -478,8 +533,8 @@ def week_title(wk: pd.Series) -> str:
 def week_caption(info: dict, res: dict) -> str:
     return (f"{info['label']} · run {pd.Timestamp(info['init']):%a %d %b %Hz} · {res['n_members']} members clustered on "
             f"their weekly-mean Z500 field of this week ({res['grid_points']} grid points, {SPATIAL_GRID_RES:g}°, PCA "
-            f"{res['n_pcs']} PCs, {res['explained_pct']:.0f}% var) · k={res['k']} fixed · silhouette {res['silhouette']:.2f} "
-            f"(diagnostic) · temperature, wind and solar read on the {info['land']['label']} of the same member IDs")
+            f"{res['n_pcs']} PCs, {res['explained_pct']:.0f}% var) · k={res['k']} fixed · temperature, wind and solar "
+            f"read on the {info['land']['label']} of the same member IDs")
 
 
 def _fmt(v, fmt="{:.1f}") -> str:
@@ -493,18 +548,34 @@ def _fmt_d(v, fmt="{:+.1f}") -> str:
     return f'<span class="{cls}">{fmt.format(v)}</span>'
 
 
+def _delta_cell(d, sd, effect, fmt="{:+.1f}") -> str:
+    """Δ vs the ensemble with ± the spread of the scenario's own members, greyed
+    when the departure is under SCENARIO_SIGNAL_MIN_D × that spread (the members
+    overlap the ensemble too much to call it)."""
+    if d is None or (isinstance(d, float) and np.isnan(d)):
+        return '<span class="mc-muted">n/a</span>'
+    weak = effect is not None and not (isinstance(effect, float) and np.isnan(effect)) and effect < SCENARIO_SIGNAL_MIN_D
+    cell = f'<span class="mc-zero">{fmt.format(d)}</span>' if weak else _fmt_d(d, fmt)
+    if sd is not None and not (isinstance(sd, float) and np.isnan(sd)):
+        cell += f' <span class="mc-muted" style="font-size:0.78em;">±{sd:.1f}</span>'
+    return cell
+
+
 def _week_table_html(title: str, weekly: dict[str, pd.DataFrame], scen_ids: list[int], week_start: pd.Timestamp,
                      sizes: dict[int, int], n_tot: int, names: dict | None, areas: list[str],
-                     area_names: dict[str, str] | None = None) -> str:
+                     area_names: dict[str, str] | None = None, col_labels: dict[int, str] | None = None) -> str:
     """One week, every country: rows = country × metric, per scenario three cells
-    (value, Δ vs ensemble mean, Δ vs normal) — the scenarios side by side."""
+    (value, Δ vs ensemble mean ± the spread within the scenario, Δ vs normal) — the
+    scenarios side by side. `col_labels` replaces 'Scenario 1 · Scandi Block' as the
+    column heads (the tails use it)."""
     head1 = "<tr><th></th>"
     head2 = "<tr><th>country · metric</th>"
     for s in scen_ids:
         col = scenario_color(s)
+        label = (col_labels or {}).get(s) or scenario_name(s, names)
         head1 += (f'<th class="sc-scen" colspan="3" style="border-color:{col}; text-align:center;">'
-                  f'{scenario_name(s, names)} <span class="mc-muted">({sizes.get(s, 0)}/{n_tot})</span></th>')
-        head2 += "<th>value</th><th>Δ ens</th><th>Δ norm</th>"
+                  f'{label} <span class="mc-muted">({sizes.get(s, 0)}/{n_tot})</span></th>')
+        head2 += "<th>value</th><th>Δ ens ± spread</th><th>Δ norm</th>"
     head1 += "</tr>"; head2 += "</tr>"
     ws = pd.Timestamp(week_start).normalize()
     body = ""
@@ -527,7 +598,8 @@ def _week_table_html(title: str, weekly: dict[str, pd.DataFrame], scen_ids: list
                     body += "<td colspan='3' class='mc-muted'>–</td>"
                     continue
                 r = r.iloc[0]
-                body += f"<td>{_fmt(r['mean'])}</td><td>{_fmt_d(r['d_ens'])}</td><td>{_fmt_d(r['d_norm'])}</td>"
+                body += (f"<td>{_fmt(r['mean'])}</td><td>{_delta_cell(r['d_ens'], r.get('sd', np.nan), r.get('effect', np.nan))}</td>"
+                         f"<td>{_fmt_d(r['d_norm'])}</td>")
             body += "</tr>"
     return f'<div class="mc-block"><div class="mc-title">{title}</div><table class="sc-table">{head1}{head2}{body}</table></div>'
 
@@ -552,13 +624,16 @@ def map_titles(res: dict) -> dict[int, str]:
             for s, nm in res["names"].items()}
 
 
-def _render_week(info: dict, res: dict, wk: pd.Series, tagged: dict[str, pd.DataFrame], key: str) -> None:
-    """One trading week's scenarios: the cards, the temperature-pattern maps side by
-    side, the regions (NWE · Italy · Nordics) side by side, the daily paths per region
-    in an expander, the diagnostics in another."""
+def _render_week(info: dict, res: dict, wk: pd.Series, tagged: dict[str, pd.DataFrame], key: str,
+                 tail_driver: tuple[str, str] | None = None) -> None:
+    """One trading week's scenarios: the separation chip, the cards, the
+    temperature-pattern maps side by side, the regions (NWE · Italy · Nordics) side by
+    side, then the tails on `tail_driver` (region, metric) when given, the daily paths
+    per region in an expander, the diagnostics in another."""
     ws = pd.Timestamp(wk["week_start"]).normalize()
     scen_ids = scenario_ids(res)
     st.markdown(f"##### Scenarios for {week_title(wk)}")
+    st.markdown(separation_chip(res), unsafe_allow_html=True)
     st.caption(week_caption(info, res))
     kpi_row(scenario_cards(res, info, [ws]), max_cols=4)
     maps = res.get("t2m_maps")
@@ -585,7 +660,11 @@ def _render_week(info: dict, res: dict, wk: pd.Series, tagged: dict[str, pd.Data
     st.markdown(_week_table_html(f"Regions · {wk['week_label']}", weekly, scen_ids, ws, res["sizes"], res["n_members"],
                                  res["names"], regions, {r: r for r in regions}), unsafe_allow_html=True)
     st.caption("Per member: temperature averaged over the region's countries, wind and solar summed · "
-               + " · ".join(f"{r} = {', '.join(v)}" for r, v in SCENARIO_REGIONS.items()) + ".")
+               + " · ".join(f"{r} = {', '.join(v)}" for r, v in SCENARIO_REGIONS.items())
+               + f". Δ ens carries ± the spread of the scenario's own members and is greyed when it is under "
+                 f"{SCENARIO_SIGNAL_MIN_D:g}× that spread — the members then overlap the ensemble too much to call it.")
+    if tail_driver:
+        _render_tails(info, res, wk, tagged, tail_driver, key)
     with st.expander(f"Daily paths by region · {wk['week_label']}"):
         daily = {m: scenario_daily_summary(t, "value") for m, t in _week_days(tagged_w, ws).items() if not t.empty}
         for r in regions:
@@ -617,6 +696,60 @@ def _render_week(info: dict, res: dict, wk: pd.Series, tagged: dict[str, pd.Data
                 st.caption("Diagnostic only: k is fixed by the desk (2 = scenario + alternative), not chosen by silhouette.")
 
 
+def _render_tails(info: dict, res: dict, wk: pd.Series, tagged: dict[str, pd.DataFrame], driver: tuple[str, str],
+                  key: str) -> None:
+    """The tails of one week on one driver: the coldest and mildest (calmest and
+    windiest) SCENARIO_TAIL_FRACTION of the clustered members on a region's weekly
+    value — two cards with the Z500 pattern each tail sits in and its NWE read, their
+    temperature maps side by side, and the regions table. The answer to 'what does a
+    cold week look like', whatever the pattern split says."""
+    region, metric = driver
+    ws = pd.Timestamp(wk["week_start"]).normalize()
+    src = tagged.get(metric)
+    assign = (tail_assignments(src, region, ws, member_ids=res["assign"]["member_id"].tolist())
+              if src is not None else pd.DataFrame())
+    lo, hi = tail_label(metric, 1), tail_label(metric, 2)
+    st.markdown(f"##### The tails · {lo.lower()} and {hi.lower()} {SCENARIO_TAIL_FRACTION:.0%} of the members in "
+                f"{region} · {wk['week_label']}")
+    if assign.empty:
+        st.caption(f"Not enough {metric.lower()} members for {region} this week to form the tails.")
+        return
+    n_tot = int(len(assign))
+    pairs = tuple((int(a), int(b)) for a, b in assign[["member_id", "scenario"]].itertuples(index=False))
+    try:
+        fields = tail_fields(info["key"], str(ws.date()), str(info["reference_date"]), pairs)
+    except Exception:
+        fields = None
+    names = (fields or {}).get("names", {})
+    sizes = (fields or {}).get("sizes") or assign[assign["scenario"] != 0]["scenario"].value_counts().to_dict()
+    st.caption(f"The {sizes.get(1, 0)} members with the lowest and the {sizes.get(2, 0)} with the highest weekly "
+               f"{metric.lower()} in {region}, ranked on the members themselves rather than on the Z500 split — "
+               f"each tail labelled with the pattern its members' Z500 field averages to.")
+    tagged_w = {m: apply_scenarios(t, assign) for m, t in tagged.items() if not t.empty}
+    tagged_w = {m: t for m, t in tagged_w.items() if not t.empty}
+    cards, titles, col_labels = [], {}, {}
+    for s in (1, 2):
+        label = short_name(names.get(s))
+        head = f"{tail_label(metric, s)} {SCENARIO_TAIL_FRACTION:.0%} in {region}"
+        titles[s] = head + (f" · {label}" if label else "")
+        col_labels[s] = head + (f" · {label}" if label else "")
+        read = nwe_read(tagged_w.get("Temperature", pd.DataFrame()), tagged_w.get("Wind", pd.DataFrame()), s, [ws],
+                        areas=["NWE"])
+        cards.append(_scenario_card_html(f"{head} · {sizes.get(s, 0)} of {n_tot} members" + (f" · {label}" if label else ""),
+                                         describe_scenario(read), scenario_color(s)))
+    kpi_row(cards, max_cols=4)
+    maps = (fields or {}).get("t2m_maps")
+    if maps is not None and not maps.empty:
+        try:
+            st.pyplot(make_scenario_temperature_maps(maps, titles, [1, 2], bbox=SPATIAL_BBOX), use_container_width=True)
+        except Exception as e:
+            st.warning(f"Temperature maps could not be drawn: {e}")
+    weekly = {m: scenario_weekly_values(t, [ws], "value") for m, t in tagged_w.items()}
+    regions = list(SCENARIO_REGIONS)
+    st.markdown(_week_table_html(f"Regions · the tails · {wk['week_label']}", weekly, [1, 2], ws, sizes, n_tot, names,
+                                 regions, {r: r for r in regions}, col_labels=col_labels), unsafe_allow_html=True)
+
+
 def _render_scenarios(runs: pd.DataFrame):
     try:
         opts = spatial_source_options()
@@ -636,7 +769,7 @@ def _render_scenarios(runs: pd.DataFrame):
 
     keys = list(opts.keys())
     with keyed("tb_fs"):
-        c1, c2, c3 = st.columns([1.6, 3.4, 1.0])
+        c1, c2, c3, c4 = st.columns([1.6, 2.6, 0.9, 1.4])
         with c1:
             source = st.selectbox("Ensemble", keys, index=keys.index(SCENARIO_DEFAULT_SOURCE) if SCENARIO_DEFAULT_SOURCE in keys else 0,
                                   format_func=lambda k: opts[k]["label"], key="fs_source",
@@ -658,6 +791,12 @@ def _render_scenarios(runs: pd.DataFrame):
                                       f"{'' if wk_idx.loc[w, 'full'] else '  (partial, %d d)' % wk_idx.loc[w, 'n_days']}")
         with c3:
             k = st.number_input("Scenarios", 2, SCENARIO_K_MAX, SCENARIO_K_DEFAULT, key="fs_k")
+        with c4:
+            tail_driver = st.selectbox("Tails on", SCENARIO_TAIL_DRIVERS, index=0, key="fs_tail",
+                                       format_func=lambda d: f"{d[0]} {d[1].lower()}",
+                                       help=f"Beside each week's pattern scenarios: the {SCENARIO_TAIL_FRACTION:.0%} of "
+                                            "the members with the lowest and the highest weekly value of this driver, "
+                                            "each with the Z500 pattern it sits in and its temperature map.")
     if not weeks_pick:
         st.info("Pick at least one week.")
         return
@@ -679,7 +818,7 @@ def _render_scenarios(runs: pd.DataFrame):
         if not res:
             status_banner(f"{wk['week_label']}: not enough complete members in the Z500 field.", "warning")
             continue
-        _render_week(info, res, wk, tagged_src, key=f"fs_{source}_{wk['week_label']}")
+        _render_week(info, res, wk, tagged_src, key=f"fs_{source}_{wk['week_label']}", tail_driver=tail_driver)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

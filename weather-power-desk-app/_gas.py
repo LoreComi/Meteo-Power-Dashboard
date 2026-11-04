@@ -50,7 +50,7 @@ import _gas_demand_model as gdm
 from _config import (
     GAS_CURVE_MODELS_FILE, GAS_LDZ_AREAS, GAS_LDZ_DEFAULT_AREAS,
     GAS_RDL_DEFAULT_REGIONS, GAS_EFFICIENCY, GAS_LOWER_LOAD, GAS_SOURCES, GAS_DEFAULT_SOURCE, enabled_sources,
-    GAS_FORECAST_DAYS, GAS_HIST_LOOKBACK_DAYS, GAS_TOTAL_SIGNAL_GWH, EXPECTED_HORIZON,
+    GAS_FORECAST_DAYS, GAS_HIST_LOOKBACK_DAYS, GAS_TOTAL_SIGNAL_GWH, EXPECTED_HORIZON, MORNING_MODEL_LABELS,
 )
 from _charts import make_ldz_panel, make_rdl_chart, make_gas_delta_bars
 from _data import (
@@ -343,15 +343,28 @@ def compute_rdl(gas_df: pd.DataFrame, rdl_regions: dict[str, list[str]], regions
 # HEADLESS SNAPSHOT (consumed by the Morning Call gas agents)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def default_runs(gas_df: pd.DataFrame, source: str) -> list[tuple[pd.Timestamp, str]]:
-    """The latest run of each of the source's default patterns (EC-ENS and GFS-ENS)."""
-    cfg = GAS_SOURCES[source]
-    out = []
-    for pat in cfg["default_patterns"]:
-        for init, p in list_runs_full(gas_df, [pat]):
-            out.append((init, p))
-            break
+def _model_of(pattern: str) -> str:
+    return MORNING_MODEL_LABELS.get(pattern, pattern)
+
+
+def latest_by_model(gas_df: pd.DataFrame, source: str) -> dict[str, tuple[pd.Timestamp, str]]:
+    """Newest run of every model in the table, whichever cycle it is — the Morning Call's rule.
+
+    One model = one label (Volue's ec00ens and ec12ens are both "EC-ENS"), so the
+    12z run takes over from the 00z as soon as it has landed. Newest model first.
+    """
+    out: dict[str, tuple[pd.Timestamp, str]] = {}
+    for init, pat in list_runs_full(gas_df, GAS_SOURCES[source]["patterns"]):     # newest first
+        out.setdefault(_model_of(pat), (init, pat))
     return out
+
+
+def default_runs(gas_df: pd.DataFrame, source: str) -> list[tuple[pd.Timestamp, str]]:
+    """The latest run — 12z once it is in, 00z until then — of each of the source's
+    default models (EC-ENS and GFS-ENS), in the config's model order."""
+    latest = latest_by_model(gas_df, source)
+    models = list(dict.fromkeys(_model_of(p) for p in GAS_SOURCES[source]["default_patterns"]))
+    return [latest[m] for m in models if m in latest]
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -636,6 +649,17 @@ def _source_switch() -> str:
                     help="\n".join(f"{k}: {GAS_SOURCES[k]['desc']}" for k in names))
 
 
+def _latest_runs_line(latest: dict[str, tuple[pd.Timestamp, str]], sel_runs: list[tuple[pd.Timestamp, str]]) -> None:
+    """When each model last updated, and a warning for a selected run a newer one has replaced."""
+    if not latest:
+        return
+    st.caption("Latest in the table — " + " · ".join(f"**{m}** {i:%H}z · {i:%a %d %b}" for m, (i, _) in latest.items()))
+    stale = [f"{format_run_label(i, p)} → {format_run_label(*latest[_model_of(p)])}"
+             for i, p in sel_runs if _model_of(p) in latest and i < latest[_model_of(p)][0]]
+    if stale:
+        st.caption("Newer run available for: " + " · ".join(stale))
+
+
 def render_gas_demand():
     st.markdown("#### GAS DEMAND")
     source = _source_switch()
@@ -650,17 +674,23 @@ def render_gas_demand():
         status_banner(f"No rows in {cfg['table']} yet — it is written by Power_dashboard/pipeline "
                       "(run_morning.bat, run_daily.py --only volue).", "warning")
         return
-    if st.session_state.get("gas_source_last") != source:
-        for k in ("gas_sel_runs", "gas_cmp_sel", "gas_ldz_chart_run", "gas_rdl_chart_run"):
-            st.session_state.pop(k, None)
-        st.session_state["gas_source_last"] = source
 
     # --- runs: every cycle of every model in the table, newest first ---
     avail = list_runs_full(gas_df, cfg["patterns"])
     run_map = {format_run_label(init, pat): (init, pat) for init, pat in avail}
     run_keys = list(run_map)
+    latest = latest_by_model(gas_df, source)
     defaults = [format_run_label(init, pat) for init, pat in default_runs(gas_df, source)]
     defaults = [k for k in defaults if k in run_map] or run_keys[:2]
+
+    # The section opens on the latest run of every model (12z once it is in, 00z until then).
+    # Widgets keep their selection in session state, so forget it whenever the source changes or a
+    # newer run has landed — otherwise a tab opened before the 12z load keeps showing the 00z.
+    latest_sig = (source, tuple(sorted(f"{p}|{t.isoformat()}" for t, p in latest.values())))
+    if st.session_state.get("gas_latest_sig") != latest_sig:
+        for k in ("gas_sel_runs", "gas_cmp_sel", "gas_ldz_chart_run", "gas_rdl_chart_run"):
+            st.session_state.pop(k, None)
+        st.session_state["gas_latest_sig"] = latest_sig
 
     c1, c2, c3 = st.columns([2.6, 2.0, 3.4])
     with c1:
@@ -698,6 +728,8 @@ def render_gas_demand():
     if not sel_runs:
         status_banner("Pick at least one run.", "warning")
         return
+
+    _latest_runs_line(latest, sel_runs)
 
     # Completeness banners — on the run's own rows (its cycle), not its day
     for init_dt, pattern in sel_runs:

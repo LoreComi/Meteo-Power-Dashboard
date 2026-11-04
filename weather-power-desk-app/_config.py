@@ -675,6 +675,30 @@ WR_REGIME_SHORT: dict[str, str] = {
 SCENARIO_NWE_AREAS = ["DE", "FR", "UK", "NL", "BE"]
 SCENARIO_READ_TEMP_C = 0.5           # |Δ temperature vs the ensemble| below this is flat
 SCENARIO_READ_WIND_PCT = 10.0        # |Δ wind vs the ensemble| in % of the ensemble below this is flat
+# Signal strength. A scenario's departure from the ensemble is also judged against the
+# spread of its OWN members (the standard deviation of their weekly values): the
+# members of a scenario are rarely alike, and on real runs that spread is often as
+# large as the departure. Below SCENARIO_SIGNAL_MIN_D × spread the read is flat and
+# the table greys the number; up to SCENARIO_SIGNAL_CLEAR_D the card says "leans";
+# above it the call is clear (Cohen's d: 0.4 small, 0.8 large).
+SCENARIO_SIGNAL_MIN_D = 0.4
+SCENARIO_SIGNAL_CLEAR_D = 0.8
+# How separable the week's members are on their Z500 field (the k-means silhouette):
+# below the first bound the members form one continuum and the scenarios are its two
+# halves; above the second they are two distinct patterns. Shown as a chip per week.
+SCENARIO_SEPARATION_BOUNDS = (0.25, 0.45)
+# Tails: beside the pattern scenarios, the lowest and highest SCENARIO_TAIL_FRACTION of
+# the members on one driver — a region's weekly temperature or wind — each with the
+# Z500 pattern it sits in and its temperature map. The pattern scenarios answer "which
+# synoptic pattern"; the tails answer "what does a cold / windy week look like".
+SCENARIO_TAIL_FRACTION = 0.25
+SCENARIO_TAIL_DRIVERS: list[tuple[str, str]] = [
+    ("NWE", "Temperature"), ("NWE", "Wind"), ("Nordics", "Wind"), ("Nordics", "Temperature"),
+    ("Italy", "Temperature"), ("Italy", "Wind"),
+]
+SCENARIO_TAIL_LABELS: dict[str, tuple[str, str]] = {
+    "Temperature": ("Coldest", "Mildest"), "Wind": ("Calmest", "Windiest"), "Solar": ("Dullest", "Sunniest"),
+}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HISTORICAL
