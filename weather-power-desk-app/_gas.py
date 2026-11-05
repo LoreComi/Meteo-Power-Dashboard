@@ -55,8 +55,9 @@ from _config import (
 from _charts import make_ldz_panel, make_rdl_chart, make_gas_delta_bars
 from _data import (
     load_gas_demand_daily, load_recent_actual_temp, pick_run_at, list_runs_full, format_run_label,
+    data_version, VERSIONED_TTL,
 )
-from _ui import info_tip, kpi_card, kpi_row, status_banner
+from _ui import info_tip, kpi_card, kpi_row, status_banner, view_switch
 
 
 @st.cache_resource(show_spinner=False)
@@ -367,7 +368,6 @@ def default_runs(gas_df: pd.DataFrame, source: str) -> list[tuple[pd.Timestamp, 
     return [latest[m] for m in models if m in latest]
 
 
-@st.cache_data(ttl=900, show_spinner=False)
 def gas_demand_snapshot(source: str = GAS_DEFAULT_SOURCE,
                         runs: tuple[tuple[str, str], ...] | None = None) -> dict:
     """Both legs for the given runs, without rendering anything.
@@ -381,6 +381,12 @@ def gas_demand_snapshot(source: str = GAS_DEFAULT_SOURCE,
     """
     if source not in GAS_SOURCES:
         return {}
+    return _gas_demand_snapshot(source, runs, data_version(GAS_SOURCES[source]["table"]), str(pd.Timestamp.today().date()))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=16, show_spinner=False)
+def _gas_demand_snapshot(source: str, runs: tuple[tuple[str, str], ...] | None, version: str, day: str) -> dict:
+    """gas_demand_snapshot, cached per data version and day (the day moves the seed actuals)."""
     try:
         gas_df = load_gas_demand_daily(source)
     except Exception:
@@ -412,6 +418,27 @@ def gas_demand_snapshot(source: str = GAS_DEFAULT_SOURCE,
             continue
         out[format_run_label(init, pattern)] = {"ldz": _strip(ldz), "rdl": _strip(rdl) if rdl else None}
     return out
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=32, show_spinner=False)
+def _legs(source: str, runs: tuple[tuple[str, str], ...], areas: tuple[str, ...], regions: tuple[str, ...],
+          prev_override: str | None, version: str, day: str) -> tuple[dict, dict]:
+    """(LDZ, wind & solar) results per run label for the section's selection — the
+    curves are rebuilt only when the selection or the data changes, not on every rerun.
+    `runs` = ((init ISO, pattern), …); `version` and `day` only key the cache."""
+    cfg = GAS_SOURCES[source]
+    gas_df = load_gas_demand_daily(source)
+    actual_df = load_recent_actual_temp(areas or tuple(GAS_LDZ_DEFAULT_AREAS), days=40)
+    prev_ov = pd.Timestamp(prev_override) if prev_override else None
+    ldz_res, rdl_res = {}, {}
+    for init_iso, pattern in runs:
+        init_dt = pd.Timestamp(init_iso)
+        label = format_run_label(init_dt, pattern)
+        if areas:
+            ldz_res[label] = compute_ldz(gas_df, actual_df, list(areas), pattern, init_dt, prev_override=prev_ov)
+        if regions:
+            rdl_res[label] = compute_rdl(gas_df, cfg["rdl_regions"], list(regions), pattern, init_dt, prev_override=prev_ov)
+    return ldz_res, rdl_res
 
 
 def _strip(res: dict) -> dict:
@@ -748,16 +775,11 @@ def render_gas_demand():
         status_banner("No actual temperature in hist_daily for the selected countries — the LDZ curves "
                       "cannot be seeded, so the LDZ leg is empty.", "critical")
 
-    ldz_res, rdl_res = {}, {}
+    prev_ov = manual_cmp_init if (cmp_mode == "Manual" and manual_cmp_init is not None) else None
     with st.spinner("Building the demand curves…"):
-        for init_dt, pattern in sel_runs:
-            label = format_run_label(init_dt, pattern)
-            prev_ov = manual_cmp_init if (cmp_mode == "Manual" and manual_cmp_init is not None) else None
-            if areas:
-                ldz_res[label] = compute_ldz(gas_df, actual_df, areas, pattern, init_dt, prev_override=prev_ov)
-            if regions:
-                rdl_res[label] = compute_rdl(gas_df, cfg["rdl_regions"], regions, pattern, init_dt,
-                                             prev_override=prev_ov)
+        ldz_res, rdl_res = _legs(source, tuple((pd.Timestamp(t).isoformat(), p) for t, p in sel_runs), tuple(areas),
+                                 tuple(regions), pd.Timestamp(prev_ov).isoformat() if prev_ov is not None else None,
+                                 data_version(cfg["table"]), str(pd.Timestamp.today().date()))
 
     _run_notices(ldz_res or rdl_res)
     if source == "EQ" and areas:
@@ -775,18 +797,19 @@ def render_gas_demand():
                                "text/csv", key="gas_dl")
         return
 
-    tabs = st.tabs(["LDZ — heating demand", "Wind & Solar — displaced gas", "Both legs"])
-    with tabs[0]:
+    view = view_switch("Leg", ["LDZ — heating demand", "Wind & Solar — displaced gas", "Both legs"], "gas_view",
+                       {"LDZ — heating demand": ("gas_ldz_",), "Wind & Solar — displaced gas": ("gas_rdl_",)})
+    if view == "LDZ — heating demand":
         if areas:
             _render_ldz(ldz_res, areas)
         else:
             status_banner("No LDZ country selected.", "warning")
-    with tabs[1]:
+    elif view == "Wind & Solar — displaced gas":
         if regions:
             _render_rdl(rdl_res, regions)
         else:
             status_banner("No wind & solar region selected.", "warning")
-    with tabs[2]:
+    else:
         if ldz_res and rdl_res:
             _render_combined(ldz_res, rdl_res)
         else:

@@ -16,6 +16,8 @@ tables refreshed by a Databricks job (power_desk_refresh.py).
 """
 from __future__ import annotations
 
+import logging
+import sys
 from datetime import datetime, timezone
 
 import streamlit as st
@@ -29,6 +31,14 @@ from _historical import render_historical
 from _hydro import render_hydro
 from _gas import render_gas_demand
 from _strategy import render_strategy
+
+# Everything the app logs goes to stdout, where the Databricks Apps log viewer picks it up.
+if not logging.getLogger("power_desk").handlers:
+    _h = logging.StreamHandler(sys.stdout)
+    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger("power_desk").addHandler(_h)
+    logging.getLogger("power_desk").setLevel(logging.INFO)
+log = logging.getLogger("power_desk.app")
 
 st.set_page_config(page_title="Weather Power Desk", layout="wide", initial_sidebar_state="expanded")
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -163,4 +173,12 @@ section = st.session_state["section"]
 if section == HOME:
     render_home()
 else:
-    RENDERERS[section]()
+    try:
+        RENDERERS[section]()
+    except Exception as e:
+        if type(e).__name__ in ("RerunException", "StopException"):    # st.rerun / st.stop, not errors
+            raise
+        # the traceback goes to the app log, the page gets one line
+        log.exception("section %s failed", section)
+        st.error(f"{section} could not be drawn ({type(e).__name__}). The details are in the app logs; "
+                 "reloading the page usually helps if the warehouse was starting up.")

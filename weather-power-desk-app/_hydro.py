@@ -62,6 +62,7 @@ from _config import (
 from _data import (
     load_hydro_available, load_hydro_series, load_hydro_component, load_swe_country_daily, load_river_latest,
     load_river_series, load_hydro_prod, load_reservoir_outlook, load_reservoir_model,
+    data_version, load_snapshot_times, prefetch, VERSIONED_TTL,
 )
 from _charts import (
     make_hydro_climatology_chart, make_hydro_anomaly_bars, make_hydro_europe_map, make_river_chart,
@@ -72,7 +73,7 @@ from _hydro_quantify import (
     HYDRO_FAMILIES, HYDRO_DEFAULT_COUNTRIES, build_climatology, quantify_anomaly, split_recent_hist, stats_text,
     production_series, production_summary,
 )
-from _ui import info_tip, kpi_card, kpi_row, status_banner, ordinal
+from _ui import info_tip, kpi_card, kpi_row, status_banner, ordinal, view_switch
 
 NONE_LABEL = "— none —"
 
@@ -151,7 +152,17 @@ def _flags(q: dict, layer: str) -> list[tuple[str, str]]:
 # SERIES AND METRICS — every area × every layer, from each layer's source
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _hydro_version() -> str:
+    """Cache key of everything computed from the hydro layers: hydro_daily and swe_daily."""
+    return f"{data_version('hydro_daily')}|{data_version('swe_daily')}"
+
+
 def _layer_series(layer: str) -> dict[str, tuple[pd.Series, pd.Series | None]]:
+    return _layer_series_v(layer, _hydro_version())
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=16, show_spinner=False)
+def _layer_series_v(layer: str, version: str) -> dict[str, tuple[pd.Series, pd.Series | None]]:
     """area code -> (actual, normal) daily series for one layer.
 
     Sources (HYDRO_OVERVIEW_LAYERS[layer]['source']):
@@ -160,7 +171,7 @@ def _layer_series(layer: str) -> dict[str, tuple[pd.Series, pd.Series | None]]:
                    uploaded by pipeline/swe_upload.py; no normal → mean of years
     To add another (river levels, …): load its (area, day, actual[, normal])
     series here and register the layer — metrics, map, flags, grid and the deep
-    dive pick it up unchanged. The loaders are cached, so this is cheap to call.
+    dive pick it up unchanged.
     """
     cfg = HYDRO_OVERVIEW_LAYERS[layer]
     src = cfg.get("source", "hydro_daily")
@@ -184,10 +195,14 @@ def _layer_series(layer: str) -> dict[str, tuple[pd.Series, pd.Series | None]]:
     return series
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def _overview_metrics() -> dict[str, dict[str, dict]]:
     """layer -> hydro area code -> quantify_anomaly dict, for every area with a
     series — the report maths per area, exactly as the family tabs do it."""
+    return _overview_metrics_v(_hydro_version())
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=4, show_spinner=False)
+def _overview_metrics_v(version: str) -> dict[str, dict[str, dict]]:
     out: dict[str, dict[str, dict]] = {}
     for layer in HYDRO_OVERVIEW_LAYERS:
         per_area: dict[str, dict] = {}
@@ -202,6 +217,22 @@ def _overview_metrics() -> dict[str, dict[str, dict]]:
                 per_area[area] = q
         out[layer] = per_area
     return out
+
+
+def _area_climatology(layer: str, area: str) -> dict | None:
+    """build_climatology of one area's layer series (the deep dive's charts), or None."""
+    return _area_climatology_v(layer, area, _hydro_version())
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=64, show_spinner=False)
+def _area_climatology_v(layer: str, area: str, version: str) -> dict | None:
+    series = _layer_series(layer).get(area)
+    if not series:
+        return None
+    try:
+        return build_climatology(*series)
+    except Exception:
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -227,6 +258,7 @@ def _river_flags(value, anom, fc_max7, flow_pct=None) -> list[tuple[str, str]]:
     return out
 
 
+@st.cache_data(ttl=900, max_entries=4, show_spinner=False)
 def _river_rows(mode: str = "temperature") -> list[dict]:
     """One dict per station, every source: for the map (lat, lon, z, hover, code),
     the tables and the deep dive. `mode` picks the marker colour value: the
@@ -571,13 +603,8 @@ def _render_deep_dive(area: str, metrics: dict[str, dict[str, dict]], rivers: li
         cols = st.columns(2)
         i = 0
         for l in layers_with:
-            series = _layer_series(l).get(area)
-            if not series:
-                continue
-            actual, normal = series
-            try:
-                clim = build_climatology(actual, normal)
-            except Exception:
+            clim = _area_climatology(l, area)
+            if clim is None:
                 continue
             hist, recent = split_recent_hist(clim["years"], 3)
             with cols[i % 2]:
@@ -587,7 +614,7 @@ def _render_deep_dive(area: str, metrics: dict[str, dict[str, dict]], rivers: li
                 if clim["norm_source"] == "mean_of_years":
                     st.caption("norm = mean of completed years (no provider normal for this series)")
                 elif clim["norm_source"] == "volue_partial":
-                    first = actual.dropna().index.min()
+                    first = _layer_series(l)[area][0].dropna().index.min()
                     st.caption(f"series starts {pd.Timestamp(first):%d %b %Y} (the Volue share) — anomaly vs the provider "
                                "normal only; the percentile and the grey history need completed years")
             i += 1
@@ -793,6 +820,11 @@ def _country_kpis(country: str, q: dict, unit: str) -> list[str]:
 
 
 def _compute(country: str, family: str) -> tuple[dict | None, dict, str | None]:
+    return _compute_v(country, family, data_version("hydro_daily"))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=64, show_spinner=False)
+def _compute_v(country: str, family: str, version: str) -> tuple[dict | None, dict, str | None]:
     try:
         actual, normal = load_hydro_series(country, family)
     except Exception as e:
@@ -1132,23 +1164,36 @@ def _render_reservoir_outlook():
 
 def render_hydro():
     st.markdown("#### HYDRO MONITORING")
+    for k, v in (("hy_dd_area", None), ("hy_dd_station", None)):
+        st.session_state.setdefault(k, v)
+    keep = {"Overview": ("hy_ov_",), "Production": ("hy_prod_",), "Reservoir outlook": ("hy_res_",)}
+    keep.update({f: (f"hy_c_{HYDRO_COMPONENTS[f]}", f"hy_n_{HYDRO_COMPONENTS[f]}") for f in HYDRO_FAMILIES})
+    view = view_switch("View", list(keep), "hy_view", keep)
+
+    # Cold cache: the three hydro_daily components (every view needs the availability
+    # they give) and, for the overview, SWE and the river stations — in parallel. The
+    # version check runs first, once, so the parallel loads share it.
+    load_snapshot_times()
+    calls = [lambda c=c: load_hydro_component(c) for c in HYDRO_COMPONENTS.values()]
+    if view == "Overview":
+        calls += [load_swe_country_daily, load_river_latest]
+    prefetch(*calls)
     try:
         avail = load_hydro_available()
     except Exception as e:
         st.error(f"Cannot read hydro_daily ({e}). Has power_desk_refresh.py run?")
         return
     if not avail.empty:
-        last = avail["last_day"].max()
-        st.caption(f"Latest hydro observation: {pd.Timestamp(last):%d %b %Y}")
-    for k, v in (("hy_dd_area", None), ("hy_dd_station", None)):
-        st.session_state.setdefault(k, v)
-    tabs = st.tabs(["Overview", "Production", "Reservoir outlook"] + list(HYDRO_FAMILIES.keys()))
-    with tabs[0]:
+        # observations only: the normal (N) rows run into the coming years
+        last = avail.loc[avail["data_type"] == "SA", "last_day"].max()
+        if pd.notna(last):
+            st.caption(f"Latest hydro observation: {pd.Timestamp(last):%d %b %Y}")
+
+    if view == "Overview":
         _render_overview(avail)
-    with tabs[1]:
+    elif view == "Production":
         _render_production()
-    with tabs[2]:
+    elif view == "Reservoir outlook":
         _render_reservoir_outlook()
-    for tab, family in zip(tabs[3:], HYDRO_FAMILIES.keys()):
-        with tab:
-            _render_family(family, avail)
+    else:
+        _render_family(view, avail)

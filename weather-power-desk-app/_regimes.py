@@ -55,7 +55,7 @@ from _charts import (
     make_wr_persistence, make_wr_transition_heatmap,
 )
 from _data import load_wr_forecast_members, load_wr_reanalysis
-from _ui import kpi_card, kpi_row, status_banner
+from _ui import kpi_card, kpi_row, status_banner, view_switch
 
 IWR_COLS = [f"iwr_{r}" for r in WR_REGIMES]
 
@@ -263,13 +263,12 @@ def _render_headline(perc: pd.DataFrame, clim_share: pd.Series, n_members: int, 
     kpi_row(cards, max_cols=4)
 
 
-def _render_forecast(run: pd.DataFrame, clim: dict, model_label: str, n_members: int,
-                     clean: bool, extended: bool) -> pd.DataFrame:
+def _render_forecast(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, model_label: str, n_members: int,
+                     extended: bool) -> None:
     mean, thr, band, no_days = ensemble_iwr(run)
-    perc = member_percentages(run, clean=clean)
     if perc.empty:
         status_banner("This run has no member rows to summarise.", "warning")
-        return perc
+        return
 
     days = perc.index
     clim_share = window_climatology(clim, days)
@@ -301,7 +300,6 @@ def _render_forecast(run: pd.DataFrame, clim: dict, model_label: str, n_members:
                  use_container_width=True)
     st.download_button("Download member shares (CSV)", perc.to_csv().encode(),
                        "weather_regimes.csv", "text/csv", key="wr_dl")
-    return perc
 
 
 def _render_climatology(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, clean: bool) -> None:
@@ -426,13 +424,11 @@ def render_regimes():
         rean = pd.DataFrame()
     clim = climatology(rean) if not rean.empty else {}
 
-    tabs = st.tabs(["Forecast", "Climatology"])
-    with tabs[0]:
-        perc = _render_forecast(run, clim, model_label, n_members, clean,
-                                extended=int(horizon) > WR_DEFAULT_HORIZON_DAYS)
-    with tabs[1]:
-        if perc is not None and not perc.empty:
-            _render_climatology(run, perc, clim, clean)
+    perc = member_percentages(run, clean=clean)
+    if view_switch("Regime view", ["Forecast", "Climatology"], "wr_view", {"Forecast": ("wr_band",)}) == "Forecast":
+        _render_forecast(run, perc, clim, model_label, n_members, extended=int(horizon) > WR_DEFAULT_HORIZON_DAYS)
+    elif not perc.empty:
+        _render_climatology(run, perc, clim, clean)
 
     with st.expander("Method"):
         st.markdown(f"""

@@ -55,7 +55,7 @@ from _scenarios import (
 )
 from _regimes import render_regimes
 from _ui import (anomaly_kpi, kpi_card, kpi_row, status_banner, page_header, sec_header, tile, tiles, note,
-                 keyed)
+                 keyed, view_switch)
 from _style import PAGE_CSS
 
 
@@ -379,7 +379,7 @@ def region_members(info: dict, metric: str, regions: dict[str, list[str]] | None
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=900, max_entries=32, show_spinner=False)
 def cluster_spatial(source: str, weeks: tuple[str, ...], k: int, ref_iso: str) -> dict | None:
     """Cluster one source's members on their weekly-mean Z500 field over the given
     trading weeks (ISO dates of their Mondays), k fixed. `ref_iso` only keys the cache
@@ -421,7 +421,7 @@ def cluster_spatial(source: str, weeks: tuple[str, ...], k: int, ref_iso: str) -
     }
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=900, max_entries=32, show_spinner=False)
 def tail_fields(source: str, week_iso: str, ref_iso: str, assign_pairs: tuple[tuple[int, int], ...]) -> dict | None:
     """For a tail assignment (member_id, scenario) of one week: the Z500 centroid maps
     and names of the two tails and their 2 m temperature maps — the same fields the
@@ -837,12 +837,12 @@ def render_forecast():
         except Exception as e:
             runs_error = f"Cannot read the run list ({e}). Has power_desk_refresh.py run?"
 
-        tabs = st.tabs(["Values", "Uncertainty", "Scenarios", "Weather Regimes"])
-        for tab, render in zip(tabs[:3], (_render_values, _render_uncertainty, _render_scenarios)):
-            with tab:
-                if runs_error:
-                    st.error(runs_error)
-                else:
-                    render(runs)
-        with tabs[3]:
+        renders = {"Values": _render_values, "Uncertainty": _render_uncertainty, "Scenarios": _render_scenarios}
+        view = view_switch("View", list(renders) + ["Weather Regimes"], "fc_view",
+                           {"Values": ("fv_",), "Uncertainty": ("fu_",), "Scenarios": ("fs_",), "Weather Regimes": ("wr_",)})
+        if view == "Weather Regimes":
             render_regimes()
+        elif runs_error:
+            st.error(runs_error)
+        else:
+            renders[view](runs)

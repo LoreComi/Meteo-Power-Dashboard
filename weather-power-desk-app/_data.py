@@ -8,7 +8,10 @@ the user's forwarded token when the SP has no warehouse access.
 """
 from __future__ import annotations
 
+import logging
 import os
+import threading
+import time
 
 import numpy as np
 import pandas as pd
@@ -21,20 +24,47 @@ from _config import (
     GAS_VOLUE_FAMILIES, GAS_VOLUE_PATTERNS, GAS_VOLUE_AREAS, LIVE_HISTORY_DAYS, EXPECTED_HORIZON,
     DELTASHARE_PATTERN_MAP, hist_source, HIST_DEFAULT_SOURCE,
     MEMBER_TABLES, SCENARIO_SPATIAL_SOURCES, SPATIAL_METRIC, WR_MODELS, WR_MEMBERS_TABLE,
+    HYDRO_START_YEAR, HYDRO_PROD_TABLE, RESERVOIR_OUTLOOK_TABLE, RESERVOIR_OUTLOOK_RUNS_TABLE,
+    MORNING_SOURCES, GAS_SOURCES, enabled_sources,
 )
+
+log = logging.getLogger("power_desk.data")
 
 # ─── Connection config ───────────────────────────────────────────────────────────
 _raw_host = os.environ.get("DATABRICKS_HOST", "").rstrip("/")
 DATABRICKS_HOST = _raw_host if _raw_host.startswith("https://") else f"https://{_raw_host}"
 WAREHOUSE_ID = os.environ.get("DATABRICKS_SQL_WAREHOUSE_HTTP_PATH", "").split("/")[-1]
 
+# The big loaders are cached until their table is rewritten instead of on a short
+# timer: their cache key carries data_version(table), the table's last write time,
+# which load_snapshot_times reads for every table at once — one small query, cached
+# SNAPSHOT_CHECK_S, so new data shows up on the first interaction after that much
+# time. VERSIONED_TTL is only the safety net. Notebook tables stamp every row with
+# snapshot_ts, the pipeline's tables with loaded_at.
+VERSIONED_TTL = "12h"
+SNAPSHOT_CHECK_S = 300
+
+
+@st.cache_resource(show_spinner=False)
+def _workspace_client():
+    """One WorkspaceClient per app process — it caches the service principal's OAuth
+    token and refreshes it before expiry. Not cached when it raises (no SP credentials)."""
+    from databricks.sdk import WorkspaceClient
+    return WorkspaceClient()
+
+
+@st.cache_resource(show_spinner=False)
+def _http() -> requests.Session:
+    """One HTTP session for every Statement API call (submit, poll, chunks): keeps the
+    TLS connection to the workspace open instead of a new handshake per request."""
+    return requests.Session()
+
 
 def _headers() -> dict:
     """Auth headers: app service principal first, forwarded user token second."""
     h = {"Content-Type": "application/json"}
     try:
-        from databricks.sdk import WorkspaceClient
-        tok = WorkspaceClient().config.authenticate()
+        tok = _workspace_client().config.authenticate()
         if isinstance(tok, dict):
             h.update(tok)
             return h
@@ -53,21 +83,25 @@ def _headers() -> dict:
     raise RuntimeError("No Databricks credentials available (SP auth failed, no forwarded user token).")
 
 
-def run_query(sql: str, wait_timeout: str = "50s", poll_timeout: int = 180) -> pd.DataFrame:
+def run_query(sql: str, params: dict | None = None, wait_timeout: str = "50s",
+              poll_timeout: int = 180) -> pd.DataFrame:
     """Execute SQL via the Statement API and return a DataFrame (strings; cast downstream).
 
-    If the query does not finish within *wait_timeout* (max 50 s per API rules),
-    it is polled every 5 s for up to *poll_timeout* seconds before giving up.
+    `params` fills the statement's named markers (:name) — every value a caller
+    passes in (metric, areas, station keys, …) goes through them rather than into
+    the SQL text; table names and integers still do (markers cannot hold an
+    identifier). If the query does not finish within *wait_timeout* (max 50 s per
+    API rules), it is polled every 5 s for up to *poll_timeout* seconds.
     """
-    import time as _time
-    resp = requests.post(
-        f"{DATABRICKS_HOST}/api/2.0/sql/statements/",
-        headers=_headers(),
-        json={"warehouse_id": WAREHOUSE_ID, "statement": sql, "wait_timeout": wait_timeout,
-              "disposition": "INLINE", "format": "JSON_ARRAY"},
-        timeout=90,
-    )
+    t0 = time.monotonic()
+    http = _http()
+    body = {"warehouse_id": WAREHOUSE_ID, "statement": sql, "wait_timeout": wait_timeout,
+            "disposition": "INLINE", "format": "JSON_ARRAY"}
+    if params:
+        body["parameters"] = [{"name": k, "value": None if v is None else str(v)} for k, v in params.items()]
+    resp = http.post(f"{DATABRICKS_HOST}/api/2.0/sql/statements/", headers=_headers(), json=body, timeout=90)
     if resp.status_code != 200:
+        log.warning("query HTTP %s: %s | %s", resp.status_code, resp.text[:300], _sql_head(sql))
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:400]}")
     data = resp.json()
     state = data.get("status", {}).get("state")
@@ -75,19 +109,19 @@ def run_query(sql: str, wait_timeout: str = "50s", poll_timeout: int = 180) -> p
     stmt_id = data.get("statement_id")
     elapsed = 0
     while state in ("PENDING", "RUNNING") and elapsed < poll_timeout and stmt_id:
-        _time.sleep(5)
+        time.sleep(5)
         elapsed += 5
-        poll = requests.get(
-            f"{DATABRICKS_HOST}/api/2.0/sql/statements/{stmt_id}",
-            headers=_headers(), timeout=30,
-        )
+        poll = http.get(f"{DATABRICKS_HOST}/api/2.0/sql/statements/{stmt_id}", headers=_headers(), timeout=30)
         if poll.status_code != 200:
             raise RuntimeError(f"Poll HTTP {poll.status_code}: {poll.text[:400]}")
         data = poll.json()
         state = data.get("status", {}).get("state")
     if state == "FAILED":
-        raise RuntimeError(data["status"]["error"]["message"])
+        msg = data["status"]["error"]["message"]
+        log.warning("query failed: %s | %s", msg[:300], _sql_head(sql))
+        raise RuntimeError(msg)
     if state in ("PENDING", "RUNNING"):
+        log.warning("query still running after %ss | %s", elapsed, _sql_head(sql))
         raise RuntimeError(f"Query still running after {elapsed}s — narrow the selection or check the warehouse.")
     cols = [c["name"] for c in data.get("manifest", {}).get("schema", {}).get("columns", [])]
     rows = data.get("result", {}).get("data_array", [])
@@ -95,12 +129,60 @@ def run_query(sql: str, wait_timeout: str = "50s", poll_timeout: int = 180) -> p
     # follow chunked results if any
     next_link = data.get("result", {}).get("next_chunk_internal_link")
     while next_link:
-        r = requests.get(f"{DATABRICKS_HOST}{next_link}", headers=_headers(), timeout=90)
+        r = http.get(f"{DATABRICKS_HOST}{next_link}", headers=_headers(), timeout=90)
         r.raise_for_status()
         chunk = r.json()
         df = pd.concat([df, pd.DataFrame(chunk.get("data_array", []), columns=cols)], ignore_index=True)
         next_link = chunk.get("next_chunk_internal_link")
+    log.info("query %.1fs, %d rows | %s", time.monotonic() - t0, len(df), _sql_head(sql))
     return df
+
+
+def _sql_head(sql: str) -> str:
+    """The statement on one line, cut short — enough to tell queries apart in the log."""
+    return " ".join(sql.split())[:160]
+
+
+def _in(name: str, values, params: dict) -> str:
+    """An IN list as named markers (:name_0, :name_1, …), the values added to `params`."""
+    marks = []
+    for i, v in enumerate(values):
+        params[f"{name}_{i}"] = v
+        marks.append(f":{name}_{i}")
+    return ", ".join(marks) or "NULL"
+
+
+def prefetch(*calls) -> None:
+    """Run independent loaders at the same time so a cold page waits for the slowest
+    query, not the sum of them. Each call is a zero-argument callable (a cached
+    loader with its arguments bound); the results land in the loaders' caches, so
+    the page then reads them as usual. Failures are left for the page's own call to
+    raise and report."""
+    if len(calls) < 2:
+        for fn in calls:
+            _quiet(fn)
+        return
+    from concurrent.futures import ThreadPoolExecutor
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+        ctx = get_script_run_ctx()
+    except Exception:
+        add_script_run_ctx, ctx = None, None
+
+    def run(fn):
+        if add_script_run_ctx is not None and ctx is not None:
+            add_script_run_ctx(threading.current_thread(), ctx)
+        _quiet(fn)
+
+    with ThreadPoolExecutor(max_workers=min(len(calls), 6)) as pool:
+        list(pool.map(run, calls))
+
+
+def _quiet(fn) -> None:
+    try:
+        fn()
+    except Exception as e:
+        log.info("prefetch skipped: %s", str(e)[:200])
 
 
 def _num(df: pd.DataFrame, cols) -> pd.DataFrame:
@@ -198,8 +280,12 @@ def pick_run(df: pd.DataFrame, pattern: str, target_date: pd.Timestamp
 # SECTION 1 — FORECAST
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=900, show_spinner=False)
 def load_runs() -> pd.DataFrame:
+    return _load_runs(data_version("fcst_daily"))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=4, show_spinner=False)
+def _load_runs(version: str) -> pd.DataFrame:
     df = run_query(f"SELECT * FROM {SBX_SCHEMA}.fcst_runs ORDER BY model_family, run_rank")
     if df.empty:
         return df
@@ -223,21 +309,27 @@ def load_runs() -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=900, show_spinner=False)
 def load_fcst_daily(metric: str, areas: tuple[str, ...], model_families: tuple[str, ...],
                     max_run_rank: int = 6) -> pd.DataFrame:
     """Daily ensemble statistics for the selected metric / areas / model families."""
     if not areas or not model_families:
         return pd.DataFrame()
+    return _load_fcst_daily(metric, tuple(areas), tuple(model_families), int(max_run_rank), data_version("fcst_daily"))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=64, show_spinner=False)
+def _load_fcst_daily(metric: str, areas: tuple[str, ...], model_families: tuple[str, ...], max_run_rank: int,
+                     version: str) -> pd.DataFrame:
+    p = {"metric": metric}
     df = run_query(f"""
         SELECT provider, model_family, pattern, init_hour, reference_date, run_rank, run_label, metric, area, day,
                lead_day, ens_mean, p10, p25, p50, p75, p90, spread_std, ens_min, ens_max, n_members,
                normal, anomaly, anomaly_pct
         FROM {SBX_SCHEMA}.fcst_daily
-        WHERE metric = '{metric}' AND area IN ({_sql_list(areas)})
-          AND model_family IN ({_sql_list(model_families)}) AND run_rank <= {int(max_run_rank)}
+        WHERE metric = :metric AND area IN ({_in("area", areas, p)})
+          AND model_family IN ({_in("family", model_families, p)}) AND run_rank <= {int(max_run_rank)}
         ORDER BY model_family, run_rank, area, day
-    """)
+    """, p)
     if df.empty:
         return df
     df = _dt(df, ["reference_date"], utc=True)
@@ -246,18 +338,19 @@ def load_fcst_daily(metric: str, areas: tuple[str, ...], model_families: tuple[s
                      "ens_min", "ens_max", "n_members", "normal", "anomaly", "anomaly_pct"])
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, max_entries=32, show_spinner=False)
 def load_spread_clim(metric: str, areas: tuple[str, ...]) -> pd.DataFrame:
     """Normal ensemble spread per lead day (run_month 0 = all months)."""
     if not areas:
         return pd.DataFrame()
+    p = {"metric": metric}
     df = run_query(f"""
         SELECT metric, area, lead_day, run_month, spread_std_mean, spread_std_p25, spread_std_p75,
                spread_p90_p10_mean, n_runs
         FROM {SBX_SCHEMA}.fcst_spread_clim
-        WHERE metric = '{metric}' AND area IN ({_sql_list(areas)})
+        WHERE metric = :metric AND area IN ({_in("area", areas, p)})
         ORDER BY area, run_month, lead_day
-    """)
+    """, p)
     return _num(df, ["lead_day", "run_month", "spread_std_mean", "spread_std_p25", "spread_std_p75",
                      "spread_p90_p10_mean", "n_runs"])
 
@@ -295,7 +388,7 @@ def load_member_sources() -> pd.DataFrame:
     return _num(df, ["n_members", "n_areas"])
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=900, max_entries=64, show_spinner=False)
 def load_members(provider: str, model: str, metric: str, areas: tuple[str, ...], init=None) -> pd.DataFrame:
     """Per-member daily values (and anomaly) for one member source: the run whose init is
     `init` (± 1 h — the Volue rows are stamped with the init since the notebook keeps
@@ -305,6 +398,7 @@ def load_members(provider: str, model: str, metric: str, areas: tuple[str, ...],
     if not areas:
         return pd.DataFrame()
     table = _member_table(provider)
+    p = {"provider": provider, "model": model, "metric": metric}
     if init is not None:
         t = pd.Timestamp(init)
         t = t.tz_convert("UTC").tz_localize(None) if t.tzinfo is not None else t
@@ -312,15 +406,15 @@ def load_members(provider: str, model: str, metric: str, areas: tuple[str, ...],
                      f"AND TIMESTAMP '{t + pd.Timedelta(hours=1):%Y-%m-%d %H:%M:%S}'")
     else:
         run_where = (f"reference_date = (SELECT MAX(reference_date) FROM {table} "
-                     f"WHERE provider = '{provider}' AND model = '{model}' AND metric = '{metric}')")
+                     f"WHERE provider = :provider AND model = :model AND metric = :metric)")
     df = run_query(f"""
         SELECT provider, model, reference_date, metric, area, day, lead_day, member, value, normal, anomaly
         FROM {table}
-        WHERE provider = '{provider}' AND model = '{model}' AND metric = '{metric}'
-          AND area IN ({_sql_list(areas)})
+        WHERE provider = :provider AND model = :model AND metric = :metric
+          AND area IN ({_in("area", areas, p)})
           AND {run_where}
         ORDER BY area, day, member
-    """)
+    """, p)
     if df.empty:
         return df
     df = _dt(df, ["reference_date"], utc=True)
@@ -343,11 +437,11 @@ def load_spatial_sources() -> pd.DataFrame:
                        COUNT(DISTINCT CONCAT(latitude, '_', longitude)) AS n_points,
                        MIN(day) AS first_day, MAX(day) AS last_day
                 FROM {table}
-                WHERE model = '{cfg['model']}' AND metric = '{SPATIAL_METRIC}'
+                WHERE model = :model AND metric = :metric
                   AND reference_date = (SELECT MAX(reference_date) FROM {table}
-                                        WHERE model = '{cfg['model']}' AND metric = '{SPATIAL_METRIC}')
+                                        WHERE model = :model AND metric = :metric)
                 GROUP BY model
-            """)
+            """, {"model": cfg["model"], "metric": SPATIAL_METRIC})
         except Exception:
             continue
         if df.empty or pd.isna(df["reference_date"].iloc[0]):
@@ -362,7 +456,7 @@ def load_spatial_sources() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=900, max_entries=32, show_spinner=False)
 def load_member_spatial_days(source: str, day_min, day_max, metric: str = SPATIAL_METRIC) -> pd.DataFrame:
     """One member field of one source (Z500 to cluster on, T2M to map) averaged over
     the days of one trading week (one call per week): DataFrame(member, latitude,
@@ -377,29 +471,30 @@ def load_member_spatial_days(source: str, day_min, day_max, metric: str = SPATIA
                member, latitude, longitude, COUNT(DISTINCT day) AS n_days,
                AVG(anomaly) AS anomaly, AVG(value) AS value, AVG(ens_mean) AS ens_mean
         FROM {table}
-        WHERE model = '{cfg['model']}' AND metric = '{metric}'
+        WHERE model = :model AND metric = :metric
           AND reference_date = (SELECT MAX(reference_date) FROM {table}
-                                WHERE model = '{cfg['model']}' AND metric = '{SPATIAL_METRIC}')
+                                WHERE model = :model AND metric = :run_metric)
           AND day BETWEEN DATE '{d0}' AND DATE '{d1}'
         GROUP BY provider, model, metric, member, latitude, longitude
-    """)
+    """, {"model": cfg["model"], "metric": metric, "run_metric": SPATIAL_METRIC})
     if df.empty:
         return df
     df = _dt(df, ["reference_date"], utc=True)
     return _num(df, ["latitude", "longitude", "n_days", "value", "ens_mean", "anomaly"])
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=900, max_entries=16, show_spinner=False)
 def load_meteologica_members(metric: str, areas: tuple[str, ...]) -> pd.DataFrame:
     """Meteologica members if ingested; empty DataFrame otherwise (never raises)."""
     if not areas:
         return pd.DataFrame()
+    p = {"metric": metric}
     try:
         df = run_query(f"""
             SELECT provider, model, reference_date, metric, area, day, lead_day, member, value
             FROM {SBX_SCHEMA}.meteologica_members
-            WHERE metric = '{metric}' AND area IN ({_sql_list(areas)})
-        """)
+            WHERE metric = :metric AND area IN ({_in("area", areas, p)})
+        """, p)
     except Exception:
         return pd.DataFrame()
     if df.empty:
@@ -413,7 +508,6 @@ def load_meteologica_members(metric: str, areas: tuple[str, ...]) -> pd.DataFram
 # MORNING CALL
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=300, show_spinner=False)
 def load_morning_daily(source: str = "EQ") -> pd.DataFrame:
     """Daily values per run for the Morning Call, from the chosen source's table
     (MORNING_SOURCES): 'EQ' = morning_daily_eq written by Power_dashboard/pipeline
@@ -421,18 +515,24 @@ def load_morning_daily(source: str = "EQ") -> pd.DataFrame:
     notebook's morning_daily (00z/12z 'Avg' curves, the issue DAY in reference_date).
     Columns: provider, family (tt/wnd/spv/rre), region, pattern, reference_date,
     day, value, n_points, normal, init_time, init_date. Only the last
-    lookback_days of issues are read.
+    lookback_days of issues are read. Cached until the table is rewritten
+    (data_version), not on a timer.
     """
-    from _config import MORNING_SOURCES
+    return _load_morning_daily(source, data_version(MORNING_SOURCES[source]["table"]))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=8, show_spinner=False)
+def _load_morning_daily(source: str, version: str) -> pd.DataFrame:
     cfg = MORNING_SOURCES[source]
+    p = {"provider": cfg["provider"]} if cfg.get("provider") else {}
     df = run_query(f"""
         SELECT provider, family, region, pattern, reference_date, day,
                value, n_points, normal
         FROM {SBX_SCHEMA}.{cfg['table']}
         WHERE reference_date >= current_timestamp() - INTERVAL {int(cfg.get('lookback_days', 10))} DAYS
-          {f"AND provider = '{cfg['provider']}'" if cfg.get('provider') else ""}
+          {"AND provider = :provider" if p else ""}
         ORDER BY family, region, pattern, day
-    """)
+    """, p)
     if df.empty:
         return df
     df = _dt(df, ["reference_date"], utc=True)
@@ -515,7 +615,6 @@ def load_wr_reanalysis() -> pd.DataFrame:
 # GAS DEMAND
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=300, show_spinner=False)
 def load_gas_demand_daily(source: str = "Volue") -> pd.DataFrame:
     """Daily ens-mean temperature / wind / solar per run, from the chosen source
     (GAS_SOURCES): 'Volue' = the notebook's gas_demand_daily (per country, GW);
@@ -526,22 +625,27 @@ def load_gas_demand_daily(source: str = "Volue") -> pd.DataFrame:
 
     Columns: provider, family (tt/wnd/spv), pattern, area, reference_date, day,
     value, n_points, normal, init_time (the real cycle for EQ, the CET issue
-    day + cycle for Volue), init_date.
+    day + cycle for Volue), init_date. Cached until the table is rewritten.
     """
-    from _config import GAS_SOURCES
+    return _load_gas_demand_daily(source, data_version(GAS_SOURCES[source]["table"]))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=8, show_spinner=False)
+def _load_gas_demand_daily(source: str, version: str) -> pd.DataFrame:
     cfg = GAS_SOURCES[source]
+    lookback = int(cfg.get("lookback_days") or 10)
+    p = {"provider": cfg["provider"]} if cfg.get("provider") else {}
     if cfg.get("region_to_area"):
         r2a = cfg["region_to_area"]
-        lookback = int(cfg.get("lookback_days") or 10)
         df = run_query(f"""
             SELECT provider, family, pattern, region, reference_date, day,
                    value, n_points, normal
             FROM {SBX_SCHEMA}.{cfg['table']}
-            WHERE family IN ('tt', 'wnd', 'spv') AND region IN ({_sql_list(r2a)})
+            WHERE family IN ('tt', 'wnd', 'spv') AND region IN ({_in("region", r2a, p)})
               AND reference_date >= current_timestamp() - INTERVAL {lookback} DAYS
-              {f"AND provider = '{cfg['provider']}'" if cfg.get('provider') else ""}
+              {"AND provider = :provider" if cfg.get('provider') else ""}
             ORDER BY family, pattern, region, day
-        """)
+        """, p)
         if df.empty:
             return df
         df["area"] = df["region"].map(r2a)
@@ -551,8 +655,10 @@ def load_gas_demand_daily(source: str = "Volue") -> pd.DataFrame:
             SELECT provider, family, pattern, area, reference_date, day,
                    value, n_points, normal
             FROM {SBX_SCHEMA}.{cfg['table']}
+            WHERE reference_date >= current_timestamp() - INTERVAL {lookback} DAYS
+              {"AND provider = :provider" if cfg.get('provider') else ""}
             ORDER BY family, pattern, area, day
-        """)
+        """, p)
         if df.empty:
             return df
     df = _dt(df, ["reference_date"], utc=True)
@@ -588,7 +694,7 @@ def pick_run_at(df: pd.DataFrame, pattern: str, target_init: pd.Timestamp
     return p[p["init_time"] == latest], pd.Timestamp(latest)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, max_entries=16, show_spinner=False)
 def load_recent_actual_temp(areas: tuple[str, ...], days: int = 30) -> pd.DataFrame:
     """Trailing daily actual temperature per area — seeds the LDZ curves' multi-day
     effective temperature so the first forecast day is not cold-started.
@@ -605,14 +711,15 @@ def load_recent_actual_temp(areas: tuple[str, ...], days: int = 30) -> pd.DataFr
     # the forecast leg is Volue, so the seed must be the same series — never the
     # Meteomatics history the Historical section shows. On a sandbox written
     # before the `source` column existed every row is Volue's anyway.
+    p: dict = {}
     df = run_query(f"""
         SELECT area, day, actual, normal
         FROM {SBX_SCHEMA}.hist_daily
-        WHERE metric = 'Temperature' AND area IN ({_sql_list(areas)})
+        WHERE metric = 'Temperature' AND area IN ({_in("area", areas, p)})
           AND day >= current_date() - INTERVAL {int(days)} DAYS
-          {_hist_where(HIST_DEFAULT_SOURCE if hist_sources() else None)}
+          {_hist_where(HIST_DEFAULT_SOURCE if hist_sources() else None, p)}
         ORDER BY area, day
-    """)
+    """, p)
     if df.empty:
         return df
     df = _dt(df, ["day"])
@@ -779,52 +886,58 @@ def resolve_hist_source(metric: str, choice: str | None = None) -> tuple[str | N
                      "could not read the gold climatology on its last run (it must run with dna_prod_gold access).")
 
 
-def _hist_where(source: str | None) -> str:
-    return f"AND source = '{source}'" if source else ""
+def _hist_where(source: str | None, params: dict) -> str:
+    if not source:
+        return ""
+    params["source"] = source
+    return "AND source = :source"
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, max_entries=16, show_spinner=False)
 def load_hist_years(metric: str, source: str | None = None) -> list[int]:
+    p = {"metric": metric}
     df = run_query(f"SELECT DISTINCT year FROM {SBX_SCHEMA}.hist_daily "
-                   f"WHERE metric = '{metric}' {_hist_where(source)} ORDER BY year")
+                   f"WHERE metric = :metric {_hist_where(source, p)} ORDER BY year", p)
     return [int(y) for y in pd.to_numeric(df["year"], errors="coerce").dropna()] if not df.empty else []
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, max_entries=32, show_spinner=False)
 def load_hist_daily(metric: str, areas: tuple[str, ...], years: tuple[int, ...],
                     months: tuple[int, ...], source: str | None = None) -> pd.DataFrame:
     """Daily actual / normal / anomaly for the selected areas, years and months, from one source."""
     if not areas or not years or not months:
         return pd.DataFrame()
+    p = {"metric": metric}
     df = run_query(f"""
         SELECT metric, area, day, year, month, iso_week, week_start, actual, normal, anomaly, anomaly_pct
         FROM {SBX_SCHEMA}.hist_daily
-        WHERE metric = '{metric}' AND area IN ({_sql_list(areas)})
+        WHERE metric = :metric AND area IN ({_in("area", areas, p)})
           AND year IN ({",".join(str(int(y)) for y in years)})
           AND month IN ({",".join(str(int(m)) for m in months)})
-          {_hist_where(source)}
+          {_hist_where(source, p)}
         ORDER BY area, day
-    """)
+    """, p)
     if df.empty:
         return df
     df = _dt(df, ["day", "week_start"])
     return _num(df, ["year", "month", "iso_week", "actual", "normal", "anomaly", "anomaly_pct"])
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, max_entries=32, show_spinner=False)
 def load_hist_monthly_all(metric: str, areas: tuple[str, ...], source: str | None = None) -> pd.DataFrame:
     """Monthly mean actual / normal / anomaly for every year — powers the year×month heatmap."""
     if not areas:
         return pd.DataFrame()
+    p = {"metric": metric}
     df = run_query(f"""
         SELECT metric, area, year, month, AVG(actual) AS actual, AVG(normal) AS normal,
                AVG(anomaly) AS anomaly,
                CASE WHEN AVG(normal) != 0 THEN (AVG(actual) / AVG(normal) - 1) * 100 END AS anomaly_pct,
                COUNT(*) AS n_days
         FROM {SBX_SCHEMA}.hist_daily
-        WHERE metric = '{metric}' AND area IN ({_sql_list(areas)}) {_hist_where(source)}
+        WHERE metric = :metric AND area IN ({_in("area", areas, p)}) {_hist_where(source, p)}
         GROUP BY metric, area, year, month ORDER BY area, year, month
-    """)
+    """, p)
     return _num(df, ["year", "month", "actual", "normal", "anomaly", "anomaly_pct", "n_days"])
 
 
@@ -877,7 +990,7 @@ def load_index_recent(days: int = 45) -> pd.DataFrame:
     return _num(_dt(df, ["date"]), ["value"])
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, max_entries=32, show_spinner=False)
 def load_reanalysis_monthly(metric: str, areas: tuple[str, ...]) -> pd.DataFrame:
     """Meteologica ERA5 reanalysis generation (reanalysis_daily, built by the notebook's cell
     5b from the latest vintage of dna_prod_silver.meteologica.reanalysis) as monthly means
@@ -887,13 +1000,14 @@ def load_reanalysis_monthly(metric: str, areas: tuple[str, ...]) -> pd.DataFrame
     cols = ["area", "year", "month", "value_mw", "capacity_mw", "n_days"]
     if metric not in ("Wind", "Solar") or not areas:
         return pd.DataFrame(columns=cols)
+    p = {"metric": metric}
     try:
         df = run_query(f"""
             SELECT area, year, month, AVG(value_mw) AS value_mw, MAX(capacity_mw) AS capacity_mw, COUNT(*) AS n_days
             FROM {SBX_SCHEMA}.{TELE_REANALYSIS_TABLE}
-            WHERE metric = '{metric}' AND area IN ({_sql_list(areas)})
+            WHERE metric = :metric AND area IN ({_in("area", areas, p)})
             GROUP BY area, year, month ORDER BY area, year, month
-        """)
+        """, p)
     except Exception as e:
         if not _table_missing(e):
             raise
@@ -907,7 +1021,7 @@ def load_reanalysis_monthly(metric: str, areas: tuple[str, ...]) -> pd.DataFrame
 # SECTION 2b — ANOMALY MAPS (gold layer)
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, max_entries=32, show_spinner=False)
 def load_anomaly_map(metric: str, years: tuple[int, ...],
                      months: tuple[int, ...]) -> pd.DataFrame:
     """Average anomaly per grid point for the selected metric/months/years.
@@ -925,11 +1039,11 @@ def load_anomaly_map(metric: str, years: tuple[int, ...],
                AVG(value) AS value,
                AVG(normal) AS normal
         FROM {SBX_SCHEMA}.anomaly_map
-        WHERE metric = '{metric}'
+        WHERE metric = :metric
           AND year IN ({",".join(str(int(y)) for y in years)})
           AND month IN ({",".join(str(int(m)) for m in months)})
         GROUP BY latitude, longitude
-    """)
+    """, {"metric": metric})
     return _num(df, ["latitude", "longitude", "anomaly", "value", "normal"])
 
 
@@ -937,52 +1051,67 @@ def load_anomaly_map(metric: str, years: tuple[int, ...],
 # SECTION 3 — HYDRO
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def load_hydro_available() -> pd.DataFrame:
-    df = run_query(f"""
-        SELECT area, component, data_type, COUNT(*) AS n, MIN(day) AS first_day, MAX(day) AS last_day
-        FROM {SBX_SCHEMA}.hydro_daily GROUP BY area, component, data_type
-    """)
-    if df.empty:
-        return df
-    df = _dt(df, ["first_day", "last_day"])
-    return _num(df, ["n"])
+    """(area, component, data_type, n, first_day, last_day) per series in hydro_daily —
+    counted on the component frames the overview reads anyway, not a query of its own."""
+    parts = []
+    for comp in HYDRO_COMPONENTS.values():
+        df = load_hydro_component(comp)
+        if df.empty:
+            continue
+        g = df.groupby(["area", "data_type"])["day"].agg(n="size", first_day="min", last_day="max").reset_index()
+        g.insert(1, "component", comp)
+        parts.append(g)
+    if not parts:
+        return pd.DataFrame(columns=["area", "component", "data_type", "n", "first_day", "last_day"])
+    return pd.concat(parts, ignore_index=True)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def load_hydro_component(component: str) -> pd.DataFrame:
     """Every area's actual (SA) and normal (N) daily series for one component, in
     one query — the overview map quantifies all areas at once. ~11 areas × 2
-    curves × 13 years of days: around 100 k rows, well inside the inline limit."""
+    curves × 13 years of days: around 100 k rows, well inside the inline limit.
+    Read from HYDRO_START_YEAR on (the report's own history), cached until the
+    notebook rewrites hydro_daily."""
+    return _load_hydro_component(component, data_version("hydro_daily"))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=8, show_spinner=False)
+def _load_hydro_component(component: str, version: str) -> pd.DataFrame:
     df = run_query(f"""
         SELECT area, day, data_type, value FROM {SBX_SCHEMA}.hydro_daily
-        WHERE component = '{component}' ORDER BY area, day
-    """)
+        WHERE component = :component AND day >= DATE '{int(HYDRO_START_YEAR)}-01-01'
+        ORDER BY area, day
+    """, {"component": component})
     if df.empty:
         return df
     df = _dt(df, ["day"])
     return _num(df, ["value"])
 
 
-@st.cache_data(ttl=900, show_spinner=False)
 def load_hydro_prod(areas: tuple[str, ...]) -> pd.DataFrame:
     """hydro_prod_daily (pipeline/volue_hydro_prod.py) for the areas: actual (sa)
     and normal (n) rows of the last HYDRO_PROD_HISTORY_DAYS and every forecast
     issue of the last HYDRO_PROD_LOOKBACK_DAYS. Columns: area, variable (ror /
     tot / rre), data_type, pattern, reference_date, day, value (GWh/day),
     init_time. Empty (never raises on an empty table) until the pipeline has run."""
-    from _config import HYDRO_PROD_TABLE, HYDRO_PROD_LOOKBACK_DAYS, HYDRO_PROD_HISTORY_DAYS
     if not areas:
         return pd.DataFrame()
-    area_sql = ",".join(f"'{a}'" for a in areas)
+    return _load_hydro_prod(tuple(areas), data_version(HYDRO_PROD_TABLE))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=32, show_spinner=False)
+def _load_hydro_prod(areas: tuple[str, ...], version: str) -> pd.DataFrame:
+    from _config import HYDRO_PROD_LOOKBACK_DAYS, HYDRO_PROD_HISTORY_DAYS
+    p: dict = {}
     df = run_query(f"""
         SELECT area, variable, data_type, pattern, reference_date, day, value
         FROM {SBX_SCHEMA}.{HYDRO_PROD_TABLE}
-        WHERE area IN ({area_sql})
+        WHERE area IN ({_in("area", areas, p)})
           AND ((data_type IN ('sa', 'n') AND day >= current_date() - INTERVAL {int(HYDRO_PROD_HISTORY_DAYS)} DAYS)
                OR (data_type = 'f' AND reference_date >= current_timestamp() - INTERVAL {int(HYDRO_PROD_LOOKBACK_DAYS)} DAYS))
         ORDER BY area, variable, data_type, pattern, reference_date, day
-    """)
+    """, p)
     if df.empty:
         return df
     df = _dt(df, ["reference_date"], utc=True)
@@ -995,26 +1124,29 @@ def load_hydro_prod(areas: tuple[str, ...]) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=900, show_spinner=False)
 def load_reservoir_outlook(area: str, n_issues: int = 1) -> tuple[pd.DataFrame, pd.DataFrame]:
     """The last n issues of the reservoir outlook (pipeline/volue_reservoir_outlook.py):
     (paths, runs). paths: issue_date, series, day, value — every series of those issues
     (normal, baseline, weather, state, model, model_p10..p90, volue, analogue_<year>);
     runs: the inputs of each issue. Both empty until the pipeline has run."""
-    from _config import RESERVOIR_OUTLOOK_TABLE, RESERVOIR_OUTLOOK_RUNS_TABLE
+    return _load_reservoir_outlook(area, int(n_issues), data_version(RESERVOIR_OUTLOOK_TABLE))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=8, show_spinner=False)
+def _load_reservoir_outlook(area: str, n_issues: int, version: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     paths = run_query(f"""
         WITH issues AS (
             SELECT DISTINCT issue_date FROM {SBX_SCHEMA}.{RESERVOIR_OUTLOOK_TABLE}
-            WHERE area = '{area}' ORDER BY issue_date DESC LIMIT {int(n_issues)}
+            WHERE area = :area ORDER BY issue_date DESC LIMIT {int(n_issues)}
         )
         SELECT o.issue_date, o.series, o.day, o.value
         FROM {SBX_SCHEMA}.{RESERVOIR_OUTLOOK_TABLE} o JOIN issues i ON i.issue_date = o.issue_date
-        WHERE o.area = '{area}' ORDER BY o.issue_date, o.series, o.day
-    """)
+        WHERE o.area = :area ORDER BY o.issue_date, o.series, o.day
+    """, {"area": area})
     runs = run_query(f"""
         SELECT * FROM {SBX_SCHEMA}.{RESERVOIR_OUTLOOK_RUNS_TABLE}
-        WHERE area = '{area}' ORDER BY issue_date DESC LIMIT {int(n_issues)}
-    """)
+        WHERE area = :area ORDER BY issue_date DESC LIMIT {int(n_issues)}
+    """, {"area": area})
     if not paths.empty:
         paths = _dt(paths, ["issue_date", "day"])
         paths = _num(paths, ["value"])
@@ -1037,11 +1169,16 @@ def load_reservoir_model() -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def load_swe_country_daily() -> pd.DataFrame:
     """The internal Exolabs SWE model per Alpine country (mean mm, daily) from
     swe_daily — written by Power_dashboard/pipeline, not by the notebook. Empty
-    (never raises) until the pipeline has run."""
+    (never raises) until the pipeline has run. The whole record is read: it is the
+    history the SWE layer's percentile is taken against."""
+    return _load_swe_country_daily(data_version("swe_daily"))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=4, show_spinner=False)
+def _load_swe_country_daily(version: str) -> pd.DataFrame:
     try:
         df = run_query(f"""
             SELECT day, region, swe_mean_mm, swe_total, swe_mean_roll_mm
@@ -1150,7 +1287,7 @@ def load_river_latest() -> pd.DataFrame:
                      "flow", "flow_normal", "flow_pct"])
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=1800, max_entries=32, show_spinner=False)
 def load_river_series(source: str, station_keys: tuple[str, ...], months: int = 14) -> pd.DataFrame:
     """Daily series for the deep dive, one source at a time: observed (backcast /
     actual) and normal over the last `months` months (normal also 60 days
@@ -1162,12 +1299,13 @@ def load_river_series(source: str, station_keys: tuple[str, ...], months: int = 
     cfg = HYDRO_RIVER_SOURCES.get(source)
     if not cfg or not station_keys:
         return pd.DataFrame()
-    keys = _sql_list(station_keys)
     parts = []
     for variable, table in (("temperature", cfg["table"]), ("flow", cfg.get("flow_table"))):
         if not table:
             continue
         t = f"{SBX_SCHEMA}.{table}"
+        p: dict = {}
+        keys = _in("key", station_keys, p)
         try:
             df = run_query(f"""
                 WITH obs AS (
@@ -1186,7 +1324,7 @@ def load_river_series(source: str, station_keys: tuple[str, ...], months: int = 
                 SELECT station_key, station, data_type, tag, issued, day, value FROM obs
                 UNION ALL
                 SELECT station_key, station, data_type, tag, issued, day, value FROM fc WHERE issued = max_issued
-            """)
+            """, p)
         except Exception:
             continue
         if df.empty:
@@ -1202,23 +1340,18 @@ def load_river_series(source: str, station_keys: tuple[str, ...], months: int = 
     return _num(df, ["value"])
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
 def load_hydro_series(country: str, family: str) -> tuple[pd.Series, pd.Series | None]:
-    """(actual, normal) daily series for one country and hydro family.
+    """(actual, normal) daily series for one country and hydro family — cut out of
+    the component frame (load_hydro_component), so a country costs no query.
 
     Normal is None where Volue has no normal curve (hydro balance), matching
     quantify_hydro_balance.py which then uses the mean across years.
     """
     area = HYDRO_AREA_CODES[country]
-    comp = HYDRO_COMPONENTS[family]
-    df = run_query(f"""
-        SELECT day, data_type, value FROM {SBX_SCHEMA}.hydro_daily
-        WHERE area = '{area}' AND component = '{comp}' ORDER BY day
-    """)
+    df = load_hydro_component(HYDRO_COMPONENTS[family])
+    df = df[df["area"] == area] if not df.empty else df
     if df.empty:
         return pd.Series(dtype=float), None
-    df = _dt(df, ["day"])
-    df = _num(df, ["value"])
     actual = df[df["data_type"] == "SA"].set_index("day")["value"].sort_index()
     normal = df[df["data_type"] == "N"].set_index("day")["value"].sort_index()
     return actual, (normal if not normal.empty else None)
@@ -1228,13 +1361,51 @@ def load_hydro_series(country: str, family: str) -> tuple[pd.Series, pd.Series |
 # HEALTH
 # ══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=300, show_spinner=False)
+def _versioned_tables() -> dict[str, str]:
+    """table -> its write-time column, for every table a versioned loader reads (the
+    Morning Call / Gas sources switched off are left out: their table may not exist)."""
+    tables = {"fcst_daily": "snapshot_ts", "fcst_members": "snapshot_ts", "hydro_daily": "snapshot_ts",
+              "swe_daily": "loaded_at", HYDRO_PROD_TABLE: "loaded_at", RESERVOIR_OUTLOOK_TABLE: "loaded_at"}
+    for sources in (MORNING_SOURCES, GAS_SOURCES):
+        for name in enabled_sources(sources):
+            t = sources[name]["table"]
+            tables[t] = "snapshot_ts" if t in ("morning_daily", "gas_demand_daily") else "loaded_at"
+    return tables
+
+
+def _ts(v) -> pd.Timestamp | None:
+    t = pd.to_datetime(v, utc=True, errors="coerce")
+    return None if pd.isna(t) else t.tz_convert(None)
+
+
+@st.cache_data(ttl=SNAPSHOT_CHECK_S, show_spinner=False)
 def load_snapshot_times() -> dict[str, pd.Timestamp | None]:
+    """table -> when it was last written (None when unknown). One UNION ALL query; if
+    it fails (a table not created yet), each table on its own so the others still count."""
+    tables = _versioned_tables()
+    sql = " UNION ALL ".join(f"SELECT '{t}' AS t, MAX({col}) AS ts FROM {SBX_SCHEMA}.{t}" for t, col in tables.items())
+    try:
+        df = run_query(sql)
+        return {t: _ts(ts) for t, ts in zip(df["t"], df["ts"])}
+    except Exception as e:
+        log.info("snapshot check: union failed (%s), checking table by table", str(e)[:200])
     out = {}
-    for t in ("fcst_daily", "fcst_members", "hydro_daily"):
+    for t, col in tables.items():
         try:
-            df = run_query(f"SELECT MAX(snapshot_ts) AS ts FROM {SBX_SCHEMA}.{t}")
-            out[t] = pd.to_datetime(df["ts"].iloc[0], utc=True).tz_convert(None) if not df.empty else None
+            df = run_query(f"SELECT MAX({col}) AS ts FROM {SBX_SCHEMA}.{t}")
+            out[t] = _ts(df["ts"].iloc[0]) if not df.empty else None
         except Exception:
             out[t] = None
     return out
+
+
+def data_version(table: str) -> str:
+    """The cache-key part for loaders of `table`: its last write time. When that is
+    unknown (the check failed, the table is missing) a SNAPSHOT_CHECK_S time bucket
+    instead, so the loader falls back to refreshing on a short timer rather than
+    holding its data for the whole VERSIONED_TTL."""
+    try:
+        ts = load_snapshot_times().get(table)
+    except Exception:
+        ts = None
+    return ts.isoformat() if ts is not None else f"t{int(time.time() // SNAPSHOT_CHECK_S)}"

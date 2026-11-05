@@ -3,7 +3,7 @@ command:
   - run
   - app.py
   - --server.port
-  - "8000"
+  - "$DATABRICKS_APP_PORT"
   - --server.address
   - "0.0.0.0"
 

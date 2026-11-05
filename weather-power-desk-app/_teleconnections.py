@@ -38,7 +38,7 @@ from _charts import (
     make_corr_heatmap, make_index_period_bars, make_index_recent_chart, make_tele_scatter, make_composite_bars,
     make_regression_fit, make_year_month_heatmap,
 )
-from _ui import info_tip, kpi_card, kpi_row, status_banner
+from _ui import info_tip, kpi_card, kpi_row, status_banner, view_switch
 
 CORR_NOTE = ("* p < 0.05, ** p < 0.01 for each cell on its own — with this many cells about one in twenty shows a "
              "star by chance, so trust patterns (neighbouring countries, adjacent months, a physical reason) over a "
@@ -228,23 +228,25 @@ def render_teleconnections():
     if "Reanalysis" in sources:
         pass
 
-    tabs = st.tabs(["Indices", "Correlations", "Phase & analogue years", "Model & hit rate"])
+    view = view_switch("Result", ["Indices", "Correlations", "Phase & analogue years", "Model & hit rate"], "tc_view",
+                       {"Correlations": ("tc_sc_area",), "Phase & analogue years": ("tc_phase_mode", "tc_now", "tc_cond_"),
+                        "Model & hit rate": ("tc_reg_",)})
 
     # ══ INDICES ═══════════════════════════════════════════════════════════════
-    with tabs[0]:
+    if view == "Indices":
         _render_indices(sel, raw, all_frames, focus, focus_f, focus_m, period, plabel, thr, years)
 
     # ══ CORRELATIONS ══════════════════════════════════════════════════════════
-    with tabs[1]:
+    elif view == "Correlations":
         _render_correlations(all_frames, focus, focus_f, tgt, labels, areas, sources, resolution, period, plabel,
                              detrend, years, ctx, trend_note, metric, a_unit)
 
     # ══ PHASE & ANALOGUES ══════════════════════════════════════════════════════════════
-    with tabs[2]:
+    elif view == "Phase & analogue years":
         _render_phase(sel, frames, focus, focus_f, focus_m, tgt, labels, period, plabel, detrend, years, thr, a_unit, metric, ctx)
 
     # ══ MODEL ════════════════════════════════════════════════════════════
-    with tabs[3]:
+    else:
         _render_regression(sel, frames, tgt, labels, period, plabel, detrend, years, a_unit, metric, ctx)
 
 

@@ -13,3 +13,5 @@ enableXsrfProtection = false
 
 [client]
 toolbarMode = "viewer"
+# no tracebacks on the page: app.py logs them to stdout (the Apps log) instead
+showErrorDetails = false

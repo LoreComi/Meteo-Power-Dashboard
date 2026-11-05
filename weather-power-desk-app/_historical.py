@@ -16,6 +16,8 @@ Tab 3  Teleconnections (_teleconnections.py): the weather indices against temper
 """
 from __future__ import annotations
 
+import io
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -33,7 +35,7 @@ from _charts import (
     make_geo_anomaly_map,
 )
 from _teleconnections import render_teleconnections
-from _ui import anomaly_kpi, kpi_row, status_banner
+from _ui import anomaly_kpi, kpi_row, status_banner, view_switch
 
 
 def _aggregate(df: pd.DataFrame, granularity: str) -> pd.DataFrame:
@@ -165,6 +167,25 @@ def _render_history():
 # TAB 2 — ANOMALY MAPS (gold layer)
 # ══════════════════════════════════════════════════════════════════════════════
 
+@st.cache_data(ttl=3600, max_entries=16, show_spinner=False)
+def _anomaly_map_png(metric: str, years: tuple[int, ...], months: tuple[int, ...]) -> dict | None:
+    """The rendered map (griddata + Cartopy, the slow part) as PNG bytes with its
+    summary, per selection — None when the selection has no data. Rendered as
+    st.pyplot would (dpi 200, tight box)."""
+    import matplotlib.pyplot as plt
+    df = load_anomaly_map(metric, years, months)
+    if df.empty:
+        return None
+    m = MAP_METRICS[metric]
+    title = (f"{metric} anomaly \u2014 {', '.join(MONTH_NAMES[mm - 1] for mm in months)} "
+             f"{', '.join(str(y) for y in years)}")
+    fig = make_geo_anomaly_map(df, m["unit"], title, m["symmetric"], m["warm_is_positive"])
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=200)
+    plt.close(fig)
+    return {"png": buf.getvalue(), "n_points": len(df), "mean_anomaly": float(df["anomaly"].mean())}
+
+
 def _render_maps():
     """Gridded ERA5 anomaly maps from dna_prod_gold.weather for temperature,
     wind and precipitation. User selects metric, year(s) and month(s); the
@@ -187,35 +208,23 @@ def _render_maps():
     m = MAP_METRICS[metric]
     with st.spinner("Loading anomaly map..."):
         try:
-            df = load_anomaly_map(metric, tuple(sorted(years)), tuple(sorted(months)))
+            res = _anomaly_map_png(metric, tuple(sorted(years)), tuple(sorted(months)))
         except Exception as e:
             st.error(f"Failed to load anomaly map: {e}")
             return
-    if df.empty:
+    if res is None:
         st.warning("No data for that selection.")
         return
 
-    period_label = ", ".join(MONTH_NAMES[mm - 1] for mm in sorted(months))
-    year_label = ", ".join(str(y) for y in sorted(years))
-    title = f"{metric} anomaly \u2014 {period_label} {year_label}"
-
-    fig_mpl = make_geo_anomaly_map(df, m["unit"], title, m["symmetric"], m["warm_is_positive"])
-    st.pyplot(fig_mpl, use_container_width=True)
-    import matplotlib.pyplot as plt
-    plt.close(fig_mpl)
-
-    # Summary stats
-    mean_anom = df["anomaly"].mean()
-    st.caption(f"{len(df):,} grid points \u00b7 mean anomaly {mean_anom:+.2f} {m['unit']} "
+    st.image(res["png"], use_container_width=True)
+    st.caption(f"{res['n_points']:,} grid points \u00b7 mean anomaly {res['mean_anomaly']:+.2f} {m['unit']} "
                f"\u00b7 source: {SBX_SCHEMA}.anomaly_map (ERA5 via gold layer)")
 
 
 def render_historical():
     st.markdown("#### HISTORICAL & ANALYSIS")
-    tabs = st.tabs(["History by country", "Anomaly Maps", "Teleconnections"])
-    with tabs[0]:
-        _render_history()
-    with tabs[1]:
-        _render_maps()
-    with tabs[2]:
-        render_teleconnections()
+    renders = {"History by country": _render_history, "Anomaly Maps": _render_maps,
+               "Teleconnections": render_teleconnections}
+    view = view_switch("View", list(renders), "hist_view",
+                       {"History by country": ("h_",), "Anomaly Maps": ("map_",), "Teleconnections": ("tc_",)})
+    renders[view]()

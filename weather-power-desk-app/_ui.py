@@ -108,6 +108,56 @@ def icon_button(target, label: str, icon: str | None = None, **kw):
         return target.button(label, **kw)
 
 
+def _keepable(v) -> bool:
+    """A widget value that can be written back to session state as is (not a chart
+    selection or another state object)."""
+    import datetime as _dt
+    if v is None or isinstance(v, (bool, int, float, str, _dt.date, _dt.datetime, np.generic)):
+        return True
+    return isinstance(v, (list, tuple)) and all(_keepable(x) for x in v)
+
+
+def _restore_view(key: str, last_key: str, default: str) -> None:
+    # a segmented control clicked on its active option deselects it: keep the view
+    if st.session_state.get(key) is None:
+        st.session_state[key] = st.session_state.get(last_key, default)
+
+
+def view_switch(label: str, options: list[str], key: str, keep: dict[str, tuple[str, ...]] | None = None,
+                default: str | None = None) -> str:
+    """The section's views as one segmented control; the caller renders only the view
+    returned — unlike st.tabs, which runs every tab's code on every interaction.
+
+    Streamlit forgets a widget's value in any run where the widget is not drawn, so the
+    hidden views' widgets would come back at their defaults. `keep` maps each view to
+    the key prefixes of its widgets; the values of the hidden views' widgets are written
+    back to session state on every run, which keeps them (as st.tabs did) while the
+    section is open. On a Streamlit without segmented_control: a horizontal radio."""
+    default = default if default in options else options[0]
+    last_key = f"{key}__last"
+    current = st.session_state.get(key) or st.session_state.get(last_key) or default
+    if current not in options:
+        current = default
+    for view, prefixes in (keep or {}).items():
+        if view == current or not prefixes:
+            continue
+        for k in [k for k in st.session_state.keys() if isinstance(k, str) and k.startswith(tuple(prefixes))]:
+            v = st.session_state[k]
+            if _keepable(v):
+                st.session_state[k] = v
+    if st.session_state.get(key) not in options:
+        st.session_state[key] = current
+    seg = getattr(st, "segmented_control", None)
+    if seg is not None:
+        view = seg(label, options, key=key, on_change=_restore_view, args=(key, last_key, default),
+                   label_visibility="collapsed")
+    else:
+        view = st.radio(label, options, key=key, horizontal=True, label_visibility="collapsed")
+    view = view if view in options else current
+    st.session_state[last_key] = view
+    return view
+
+
 def section(key: str):
     """A white card around one section (keyed so the CSS can find it)."""
     return keyed(key, border=True)

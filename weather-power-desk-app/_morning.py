@@ -73,7 +73,7 @@ from _config import (
 from _charts import make_morning_anomaly_chart
 from _data import load_morning_daily
 from _style import BRIEF_CSS, PHONE_CSS, INK_MUTED, CAT_BLUE, STATUS_CRITICAL, DIV_NEG, DIV_MID, DIV_POS
-from _ui import status_banner, icon_button
+from _ui import status_banner, icon_button, view_switch
 
 # What a cell shows. "pair" = the two deltas as shaded pills with the value beneath (default);
 # None = the report's triple; otherwise the grid column to put in the cell, shaded.
@@ -951,12 +951,13 @@ def render_morning_call():
         status_banner(f"{ref.prev_wanted:%a %d %b %H}z is not in the table — the reference's Δ run is taken "
                       f"against {ref.prev_label} instead.", "warning")
 
-    cells = compute_grid(cols, win, blocks)
-
     # --- the report, and one country at a time on the same runs ---
     from _deep_dive import render_country_deep_dive     # local: _deep_dive imports this module's grid helpers
-    tab_report, tab_dd = st.tabs(["Morning Report", "Country deep dive"])
-    with tab_report:
+    # one view at a time: the deep dive (hydro loads, scenario clustering) only runs when opened
+    view = view_switch("View", ["Morning Report", "Country deep dive"], "mc_view",
+                       {"Morning Report": ("mcp_win",), "Country deep dive": ("dd_country",)})
+    if view == "Morning Report":
+        cells = compute_grid(cols, win, blocks)
         if phone:
             # --- phone: the reference run's issue up front, one window at a time ---
             st.markdown(f"<div class='mc-sub'><b>{ref.model}</b> {ref.init:%a %d %b} · {delta_label} vs {ref.prev_label}"
@@ -991,5 +992,5 @@ def render_morning_call():
         ctx = build_brief_context(ref.rows, ref.prev_rows, win, ref.model, ref.init, ref.prev_init, delta_label, today, blocks)
         gas_runs = tuple((c.pattern, c.init.isoformat()) for c in cols)
         _render_ai_brief(ctx, today, phone, source, gas_runs)
-    with tab_dd:
+    else:
         render_country_deep_dive(cols, win, delta_label, view_key, blocks, source)
