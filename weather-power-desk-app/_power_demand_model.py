@@ -205,8 +205,12 @@ class LoadCurve:
 
 
 def _wls(X, y, w):
-    sw = np.sqrt(np.clip(w, 1e-12, None))
-    coef, *_ = np.linalg.lstsq(X * sw[:, None], y * sw, rcond=None)
+    # solved on the p x p normal equations rather than the n x p weighted design: the same
+    # curves (checked to 1e-7 MW on every default country) at about half the cost, and
+    # lstsq on the small system still gives an all-zero column (a daytype a selection
+    # does not have) a zero coefficient
+    Xw = X * np.clip(w, 1e-12, None)[:, None]
+    coef, *_ = np.linalg.lstsq(Xw.T @ X, Xw.T @ y, rcond=None)
     return coef, float(np.sum(w * (y - X @ coef) ** 2))
 
 

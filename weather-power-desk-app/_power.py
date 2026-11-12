@@ -373,7 +373,7 @@ def _render_sensitivity(areas: list[str]) -> None:
 
     version = data_version(POWER_LOAD_TABLE)
     with st.spinner("Fitting the temperature-response curves…"):
-        prefetch(*[partial(load_power_load, a) for a in sel])
+        prefetch(*[partial(_curve, a, version) for a in sel])      # each loads its history, then fits
         per_area, rows, no_curve = {}, [], []
         for a in sel:
             try:
