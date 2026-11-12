@@ -33,8 +33,8 @@ import streamlit as st
 import _power_demand_model as pdm
 from _config import (
     AREAS, MONTH_NAMES, area_label, POWER_LOAD_TABLE, POWER_LOAD_FCST_TABLE, POWER_DEFAULT_AREA, POWER_DEFAULT_AREAS,
-    POWER_FCST_MODELS, POWER_DEFAULT_YEARS, POWER_SEED_DAYS, POWER_SHIFT_STEPS_C, POWER_SHIFT_DEFAULT_C,
-    POWER_SLOPE_REF_TEMPS_C, POWER_FLAT_PCT_PER_C, POWER_MEMBER_MIN_R2, POWER_PARTIAL_DAYS,
+    POWER_FCST_MODELS, POWER_DEFAULT_MONTHS, POWER_RECENT_DAYS, POWER_SEED_DAYS, POWER_SHIFT_STEPS_C,
+    POWER_SHIFT_DEFAULT_C, POWER_SLOPE_REF_TEMPS_C, POWER_FLAT_PCT_PER_C, POWER_MEMBER_MIN_R2, POWER_PARTIAL_DAYS,
 )
 from _charts import (
     make_load_scatter, make_load_slope_heatmap, make_sensitivity_bars, make_sensitivity_days, make_response_curve,
@@ -44,7 +44,8 @@ from _data import load_power_areas, load_power_load, load_power_fcst, data_versi
 from _ui import info_tip, kpi_card, kpi_row, status_banner, view_switch
 
 VIEWS = ["Load vs temperature", "Temperature sensitivity"]
-WINDOWS = ["Next week", "Rest of this week", "Next 7 days", "Days 8–14", "Whole forecast"]
+WINDOWS = ["Rest of the week", "Next week", "Week + 2"]
+DEFAULT_WINDOW = "Next week"
 FCST_STALE_HOURS = 36
 
 
@@ -121,10 +122,13 @@ def _render_explorer(areas: list[str]) -> None:
         return
 
     years_avail = sorted(d["year"].unique())
+    # opens on the last calendar months with load (over a turn of the year: both years)
+    latest = pd.period_range(end=d["day"].max().to_period("M"), periods=POWER_DEFAULT_MONTHS, freq="M")
     with c2:
-        years = st.multiselect("Years", years_avail, years_avail[-POWER_DEFAULT_YEARS:], key=f"pw_ex_years_{area}")
+        years = st.multiselect("Years", years_avail, [y for y in years_avail if y in set(latest.year)],
+                               key=f"pw_ex_years_{area}")
     with c3:
-        months = st.multiselect("Months", list(range(1, 13)), list(range(1, 13)),
+        months = st.multiselect("Months", list(range(1, 13)), sorted(set(latest.month)),
                                 format_func=lambda m: MONTH_NAMES[m - 1], key="pw_ex_months")
     if not (years and months):
         st.info("Select at least one year and one month.")
@@ -170,10 +174,15 @@ def _render_explorer(areas: list[str]) -> None:
         fits[label] = (fit, g)
         xs = np.linspace(fit.t_min, fit.t_max, 80)
         curves[label] = (xs, fit.curve(xs))
+    recent = pool.sort_values("day").tail(POWER_RECENT_DAYS)       # the latest days, whatever the selection
     st.plotly_chart(make_load_scatter(points, curves, colours,
                                       f"{area_label(area)} — daily load against temperature"
-                                      f"{' · working days' if working else ''}", x_title), use_container_width=True)
-    info_tip("Each dot is one day; each line is the curve fitted to its own year (or month): straight segments that "
+                                      f"{' · working days' if working else ''}", x_title, recent=recent),
+                    use_container_width=True)
+    info_tip(f"The dark path is the last {len(recent)} {'working ' if working else ''}days with load, in order, ending "
+             f"on the labelled day ({recent['day'].max():%a %d %b %Y}) — where load has just been against the "
+             "selection behind it. "
+             "Each dot is one day; each line is the curve fitted to its own year (or month): straight segments that "
              "may bend at a heating and at a cooling threshold, as the Gas Demand curves do. The lines are the plain "
              "relation in the dots, so across a whole year they also carry the season (dark, cold months have more "
              "load for reasons other than temperature). Pick single months to take the season out — or read the grid "
@@ -223,13 +232,17 @@ def forecast_windows(days: list[pd.Timestamp], issue_day: pd.Timestamp) -> dict[
     d1, last = issue_day + pd.Timedelta(days=1), max(days)
     monday = issue_day + pd.Timedelta(days=7 - issue_day.dayofweek)
     sunday = monday - pd.Timedelta(days=1)
-    out = {"Next week": (monday, monday + pd.Timedelta(days=6))}
-    if sunday >= d1 + pd.Timedelta(days=1):
-        out["Rest of this week"] = (d1, sunday)
-    out["Next 7 days"] = (d1, issue_day + pd.Timedelta(days=7))
-    out["Days 8–14"] = (issue_day + pd.Timedelta(days=8), issue_day + pd.Timedelta(days=14))
-    out["Whole forecast"] = (d1, last)
+    out = {}
+    if sunday >= d1:                                   # nothing left of the week on a Sunday run
+        out["Rest of the week"] = (d1, sunday)
+    out["Next week"] = (monday, monday + pd.Timedelta(days=6))
+    out["Week + 2"] = (monday + pd.Timedelta(days=7), monday + pd.Timedelta(days=13))
     return {k: (a, min(b, last)) for k, (a, b) in out.items() if a <= last}
+
+
+def _week_no(day: pd.Timestamp) -> str:
+    """ISO week of a window's first day, as the desk writes it."""
+    return f"W{day.isocalendar().week}"
 
 
 def country_sensitivity(curve: pdm.LoadCurve, hist: pd.DataFrame, fc: pd.DataFrame, delta: float) -> pd.DataFrame:
@@ -352,8 +365,10 @@ def _render_sensitivity(areas: list[str]) -> None:
     windows = forecast_windows(sorted(fc["day"].unique()), issue.normalize())
     with c2:
         names = [w for w in WINDOWS if w in windows]
-        window = st.selectbox("Window", names, key="pw_se_window",
-                              format_func=lambda w: f"{w} · {windows[w][0]:%d %b} – {windows[w][1]:%d %b}")
+        window = st.selectbox("Window", names, index=names.index(DEFAULT_WINDOW) if DEFAULT_WINDOW in names else 0,
+                              key="pw_se_window",
+                              format_func=lambda w: f"{w} · {_week_no(windows[w][0])} · "
+                                                    f"{windows[w][0]:%d %b} – {windows[w][1]:%d %b}")
     with c3:
         delta = st.selectbox("Temperature shift", POWER_SHIFT_STEPS_C, index=POWER_SHIFT_STEPS_C.index(POWER_SHIFT_DEFAULT_C),
                              format_func=lambda v: f"± {v:g} °C", key="pw_se_delta")
@@ -362,7 +377,9 @@ def _render_sensitivity(areas: list[str]) -> None:
         sel = st.multiselect("Countries", offered, [a for a in POWER_DEFAULT_AREAS if a in offered],
                              format_func=area_label, key="pw_se_areas")
     w0, w1 = windows[window]
-    st.caption(f"**{model}** {issue:%H}z · {issue:%a %d %b} — window {w0:%a %d %b} to {w1:%a %d %b}")
+    n_days = (w1 - w0).days + 1
+    st.caption(f"**{model}** {issue:%H}z · {issue:%a %d %b} — {window.lower()}, {_week_no(w0)}: {w0:%a %d %b} to "
+               f"{w1:%a %d %b}" + (f" ({n_days} of 7 days: the forecast ends there)" if window == "Week + 2" and n_days < 7 else ""))
     age_h = (pd.Timestamp.now(tz="UTC").tz_localize(None) - issue).total_seconds() / 3600
     if age_h > FCST_STALE_HOURS:
         status_banner(f"The latest {model} forecast in the table was issued {issue:%a %d %b %H}z — "

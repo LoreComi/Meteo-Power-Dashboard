@@ -592,9 +592,10 @@ GAS_TOTAL_SIGNAL_GWH = 1000          # |cumulative delta| above this = a trade s
 POWER_LOAD_TABLE = "power_load_daily"
 POWER_LOAD_FCST_TABLE = "power_load_fcst"
 POWER_DEFAULT_AREA = "DE"
-POWER_DEFAULT_AREAS = ["DE", "FR", "IT", "ES", "UK", "NL", "BE", "PL"]
+POWER_DEFAULT_AREAS = ["DE", "FR", "IT"]     # the sensitivity grid opens on these
 POWER_FCST_MODELS: dict[str, str] = {"EC-ENS": "ec-ens", "AIFS-ENS": "aifs-ens"}     # label -> the table's model tag
-POWER_DEFAULT_YEARS = 5              # the explorer opens on the last N years
+POWER_DEFAULT_MONTHS = 3             # the explorer opens on the last N calendar months with load
+POWER_RECENT_DAYS = 7                # the latest days drawn as a path on top of the scatter
 POWER_SEED_DAYS = 10                 # trailing actual temperature in front of the forecast (MAX_LAG_DAYS + 4)
 POWER_SHIFT_STEPS_C = [0.5, 1.0, 2.0, 3.0]
 POWER_SHIFT_DEFAULT_C = 1.0

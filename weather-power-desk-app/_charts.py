@@ -1594,9 +1594,11 @@ def power_group_colours(labels: list[str], by_month: bool = False) -> dict[str, 
 
 
 def make_load_scatter(points: pd.DataFrame, curves: dict[str, tuple], colours: dict[str, str], title: str,
-                      x_title: str = "Temperature (°C)") -> go.Figure:
+                      x_title: str = "Temperature (°C)", recent: pd.DataFrame | None = None) -> go.Figure:
     """Daily load against temperature, one colour per group (year or month), with each
-    group's fitted curve. `points`: x, load (MW), group, day; `curves`: group -> (x, MW)."""
+    group's fitted curve. `points`: x, load (MW), group, day; `curves`: group -> (x, MW).
+    `recent` (x, load, day): the latest days, drawn on top as a path in date order,
+    the dots growing towards the last one, which carries its date."""
     fig = _base_fig(title, height=520)
     for g in colours:
         d = points[points["group"] == g]
@@ -1610,6 +1612,17 @@ def make_load_scatter(points: pd.DataFrame, curves: dict[str, tuple], colours: d
         fig.add_trace(go.Scatter(x=xs, y=np.asarray(ys) / 1000.0, mode="lines", name=f"{g} fit", legendgroup=g,
                                  showlegend=False, line=dict(color=colours.get(g, INK_PRIMARY), width=2.6),
                                  hovertemplate=g + " fit · %{x:.1f} °C · %{y:.1f} GW<extra></extra>"))
+    if recent is not None and not recent.empty:
+        r = recent.sort_values("day")
+        n = len(r)
+        fig.add_trace(go.Scatter(x=r["x"], y=r["load"] / 1000.0, mode="lines+markers+text", name=f"Last {n} days",
+                                 line=dict(color=INK_PRIMARY, width=1.4, dash="dot"),
+                                 marker=dict(size=list(np.linspace(7, 11, n - 1)) + [16] if n > 1 else [16],
+                                             color=INK_PRIMARY, line=dict(color="#ffffff", width=1.5)),
+                                 text=[""] * (n - 1) + [f"<b>{r['day'].iloc[-1]:%d %b}</b>"], textposition="top center",
+                                 textfont=dict(size=12, color=INK_PRIMARY),
+                                 customdata=r["day"].dt.strftime("%a %d %b %Y"),
+                                 hovertemplate="%{customdata}<br>%{x:.1f} °C · %{y:.1f} GW<extra>latest days</extra>"))
     fig.update_layout(hovermode="closest")
     fig.update_xaxes(title_text=x_title)
     fig.update_yaxes(title_text="Load (GW, daily mean)")
