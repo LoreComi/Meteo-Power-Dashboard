@@ -67,3 +67,11 @@ SWE_MODEL_TIMEOUT_MIN=120
 # ── Local ──
 MERGE_CHUNK_ROWS=2000
 # PIPELINE_LOG_DIR=P:\QFA\TonyWeather\Power_dashboard\pipeline\logs
+
+# ── Power Demand (run_daily.py --only load; eq_load.py) ──
+# LOAD_AREAS=DE,FR,IT,ES,UK,NL,BE,PL,CZ,HU,NO,SE,FI,DK,PT,SI,SK,HR,EE,LV,LT
+# LOAD_FCST_MODELS=ec-ens,aifs-ens       EQ ensemble tags whose latest temperature / load forecast is kept
+# LOAD_HISTORY_START=2015-01-01          first day of a country's first load (EQ's actual consumption starts in 2015)
+# LOAD_REFRESH_DAYS=45                   days re-sent every run
+# LOAD_NORMAL_AHEAD_DAYS=20              normals loaded this far past today
+# LOAD_TABLE=power_load_daily   LOAD_FCST_TABLE=power_load_fcst

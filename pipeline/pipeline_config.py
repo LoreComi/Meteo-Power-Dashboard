@@ -171,6 +171,23 @@ class Settings:
     wr_retention_days: int = 8           # runs kept (WR_RUN_HISTORY_DAYS in the notebook)
     wr_cache_dir: Path = HERE / "cache"  # the ERA5 day-of-year climatology pulled once from wr_gph_clim
 
+    # ── Power Demand (eq_load.py) ──
+    load_table: str = "power_load_daily"
+    load_fcst_table: str = "power_load_fcst"
+    load_areas: list[str] = field(default_factory=lambda: list(DEFAULT_EQ_MEMBER_AREAS))
+    load_fcst_models: list[str] = field(default_factory=lambda: ["ec-ens", "aifs-ens"])   # EQ ensemble tags
+    load_history_start: dt.date = dt.date(2015, 1, 1)    # EQ's actual consumption starts in 2015
+    load_refresh_days: int = 45                          # days re-sent every run (TSOs revise actuals)
+    load_normal_ahead_days: int = 20                     # normals loaded this far past today (the forecast horizon)
+
+    @property
+    def load_table_fq(self) -> str:
+        return f"{self.schema}.{self.load_table}"
+
+    @property
+    def load_fcst_table_fq(self) -> str:
+        return f"{self.schema}.{self.load_fcst_table}"
+
     @property
     def z500_table_fq(self) -> str:
         return f"{self.schema}.{self.z500_table}"
@@ -296,6 +313,13 @@ def load_settings() -> Settings:
         wr_members_per_call=_int("WR_MEMBERS_PER_CALL", 5),
         wr_retention_days=_int("WR_RETENTION_DAYS", 8),
         wr_cache_dir=Path(os.environ.get("WR_CACHE_DIR", str(HERE / "cache"))),
+        load_table=os.environ.get("LOAD_TABLE", "power_load_daily"),
+        load_fcst_table=os.environ.get("LOAD_FCST_TABLE", "power_load_fcst"),
+        load_areas=_list("LOAD_AREAS", list(DEFAULT_EQ_MEMBER_AREAS)),
+        load_fcst_models=_list("LOAD_FCST_MODELS", ["ec-ens", "aifs-ens"]),
+        load_history_start=_date("LOAD_HISTORY_START", "2015-01-01"),
+        load_refresh_days=_int("LOAD_REFRESH_DAYS", 45),
+        load_normal_ahead_days=_int("LOAD_NORMAL_AHEAD_DAYS", 20),
     )
 
 

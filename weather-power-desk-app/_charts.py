@@ -1568,3 +1568,160 @@ def make_reservoir_verification_chart(observed: pd.Series, issues: pd.DataFrame,
     fig.update_yaxes(title_text="GWh", tickformat=",.0f")
     fig.update_layout(hovermode="x unified", legend=dict(orientation="h", yanchor="top", y=-0.15, x=0, font=dict(size=10)))
     return fig
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POWER DEMAND — load vs temperature, temperature sensitivity
+# ══════════════════════════════════════════════════════════════════════════════
+# Colour jobs: in the scatter, which year (or month) a day belongs to; in the
+# sensitivity charts, the direction of the temperature shift — colder blue, warmer
+# red, whatever the sign of the load change it produces.
+POWER_COLD_COLOR = DIV_NEG
+POWER_WARM_COLOR = DIV_POS
+# one hue per month, by season: winter blues, spring greens, summer yellow to red, autumn violets
+POWER_MONTH_COLORS = ["#184f95", "#2a78d6", "#1baf7a", "#008300", "#8fbf2f", "#eda100",
+                      "#eb6834", "#e34948", "#e87ba4", "#a45fc4", "#4a3aa7", "#0d366b"]
+
+
+def power_group_colours(labels: list[str], by_month: bool = False) -> dict[str, str]:
+    """Fixed colour per scatter group. Months: the seasonal wheel. Years: the categorical
+    hues while they last, beyond that a light-to-dark blue ramp with the latest year red."""
+    if by_month:
+        return {l: POWER_MONTH_COLORS[MONTH_NAMES.index(l)] for l in labels}
+    if len(labels) <= len(CATEGORICAL):
+        return {l: CATEGORICAL[i] for i, l in enumerate(labels)}
+    return dict(zip(labels, hydro_recent_colours(len(labels) - 1) + [HYDRO_CURRENT_RED]))
+
+
+def make_load_scatter(points: pd.DataFrame, curves: dict[str, tuple], colours: dict[str, str], title: str,
+                      x_title: str = "Temperature (°C)") -> go.Figure:
+    """Daily load against temperature, one colour per group (year or month), with each
+    group's fitted curve. `points`: x, load (MW), group, day; `curves`: group -> (x, MW)."""
+    fig = _base_fig(title, height=520)
+    for g in colours:
+        d = points[points["group"] == g]
+        if d.empty:
+            continue
+        fig.add_trace(go.Scattergl(x=d["x"], y=d["load"] / 1000.0, mode="markers", name=g, legendgroup=g,
+                                   marker=dict(size=5, color=hex_to_rgba(colours[g], 0.45), line=dict(width=0)),
+                                   customdata=d["day"].dt.strftime("%a %d %b %Y"),
+                                   hovertemplate="%{customdata}<br>%{x:.1f} °C · %{y:.1f} GW<extra>" + g + "</extra>"))
+    for g, (xs, ys) in curves.items():
+        fig.add_trace(go.Scatter(x=xs, y=np.asarray(ys) / 1000.0, mode="lines", name=f"{g} fit", legendgroup=g,
+                                 showlegend=False, line=dict(color=colours.get(g, INK_PRIMARY), width=2.6),
+                                 hovertemplate=g + " fit · %{x:.1f} °C · %{y:.1f} GW<extra></extra>"))
+    fig.update_layout(hovermode="closest")
+    fig.update_xaxes(title_text=x_title)
+    fig.update_yaxes(title_text="Load (GW, daily mean)")
+    return fig
+
+
+def make_load_slope_heatmap(slope: pd.DataFrame, r2: pd.DataFrame, title: str, min_r2: float = 0.15) -> go.Figure:
+    """Year × month grid of the load change per °C (MW). Blue = load rises as it gets
+    colder (heating), red = load rises as it gets warmer (cooling); a month whose line
+    explains less than `min_r2` of its days keeps its colour but loses its number."""
+    if slope.empty:
+        return _base_fig(title, height=300)
+    slope = slope.reindex(columns=range(1, 13))
+    r2 = r2.reindex(index=slope.index, columns=slope.columns)
+    z = slope.values.astype(float)
+    lim = max(float(np.nanmax(np.abs(z))) if np.isfinite(z).any() else 1.0, 1.0)
+    text = [[("" if not np.isfinite(v) or not (q >= min_r2) else f"{v:+,.0f}") for v, q in zip(zr, qr)]
+            for zr, qr in zip(z, r2.values.astype(float))]
+    fig = go.Figure(go.Heatmap(
+        z=z, x=MONTH_NAMES, y=[str(int(y)) for y in slope.index], customdata=r2.values.astype(float),
+        colorscale=DIVERGING_SCALE, zmid=0, zmin=-lim, zmax=lim, text=text, texttemplate="%{text}",
+        textfont=dict(size=10, color=INK_PRIMARY), colorbar=dict(title="MW/°C", thickness=12), xgap=2, ygap=2,
+        hovertemplate="%{y} %{x}<br>%{z:+,.0f} MW per °C · R² %{customdata:.2f}<extra></extra>",
+    ))
+    fig.update_layout(**PLOTLY_LAYOUT, title=dict(text=title, font=dict(size=14)),
+                      height=max(280, 60 + 26 * len(slope.index)))
+    fig.update_layout(hovermode="closest")
+    fig.update_yaxes(autorange="reversed")
+    return fig
+
+
+def make_sensitivity_bars(labels: list[str], colder: list[float], warmer: list[float], delta: float,
+                          title: str) -> go.Figure:
+    """Mean load change over the window per country, for the forecast `delta` °C colder
+    and warmer — two bars per country, so an asymmetric response (near a knot) shows."""
+    fig = _base_fig(title, height=340)
+    if not labels:
+        return fig
+    for name, vals, col in ((f"{delta:g} °C colder", colder, POWER_COLD_COLOR), (f"{delta:g} °C warmer", warmer, POWER_WARM_COLOR)):
+        fig.add_trace(go.Bar(x=labels, y=vals, name=name, marker_color=col, marker_line_width=0,
+                             text=[("" if v is None or np.isnan(v) else f"{v:+,.0f}") for v in vals],
+                             textposition="outside", textfont=dict(color=INK_PRIMARY, size=10),
+                             hovertemplate="%{x} · " + name + "<br>%{y:+,.0f} MW<extra></extra>"))
+    fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
+    fig.update_layout(barmode="group", bargap=0.3, bargroupgap=0.05, hovermode="closest")
+    fig.update_yaxes(title_text="Δ load (MW, window mean)")
+    return fig
+
+
+def make_sensitivity_days(days: pd.DataFrame, delta: float, w_start, w_end, title: str) -> go.Figure:
+    """One country, day by day: the temperature forecast (members' P10–P90, normal) on
+    top, the load change for the forecast `delta` °C colder / warmer underneath, the
+    window shaded. `days`: day, temp, temp_p10, temp_p90, temp_normal, d_cold, d_warm."""
+    from plotly.subplots import make_subplots
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.45, 0.55], vertical_spacing=0.08,
+                        subplot_titles=("Temperature forecast", f"Load change for ±{delta:g} °C"))
+    layout = {k: v for k, v in PLOTLY_LAYOUT.items() if k not in ("xaxis", "yaxis")}
+    fig.update_layout(**layout, title=dict(text=title, font=dict(size=14)), height=470, barmode="group", bargap=0.25)
+    d = days.sort_values("day")
+    if d["temp_p10"].notna().any():
+        fig.add_trace(go.Scatter(x=d["day"], y=d["temp_p90"], mode="lines", line=dict(width=0), showlegend=False,
+                                 hoverinfo="skip"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=d["day"], y=d["temp_p10"], mode="lines", line=dict(width=0), fill="tonexty",
+                                 fillcolor=hex_to_rgba(CAT_BLUE, ENS_FAN_ALPHA["outer"]), name="Members P10–P90",
+                                 hovertemplate="P10 %{y:.1f} °C<extra></extra>"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=d["day"], y=d["temp"], mode="lines+markers", name="Ensemble mean",
+                             line=dict(color=CAT_BLUE, width=2.4), marker=dict(size=5),
+                             hovertemplate="mean %{y:.1f} °C<extra></extra>"), row=1, col=1)
+    if d["temp_normal"].notna().any():
+        fig.add_trace(go.Scatter(x=d["day"], y=d["temp_normal"], mode="lines", name="Normal",
+                                 line=dict(color=INK_PRIMARY, width=1.6, dash="dash"),
+                                 hovertemplate="normal %{y:.1f} °C<extra></extra>"), row=1, col=1)
+    for name, col, colour in ((f"{delta:g} °C colder", "d_cold", POWER_COLD_COLOR), (f"{delta:g} °C warmer", "d_warm", POWER_WARM_COLOR)):
+        fig.add_trace(go.Bar(x=d["day"], y=d[col], name=name, marker_color=colour, marker_line_width=0,
+                             hovertemplate=name + " %{y:+,.0f} MW<extra></extra>"), row=2, col=1)
+    fig.add_hline(y=0, line_color=BASELINE, line_width=1.2, row=2, col=1)
+    half = pd.Timedelta(hours=12)
+    for row in (1, 2):
+        fig.add_vrect(x0=pd.Timestamp(w_start) - half, x1=pd.Timestamp(w_end) + half, fillcolor=INK_MUTED, opacity=0.08,
+                      line_width=0, row=row, col=1)
+        fig.update_xaxes(gridcolor=GRIDLINE, linecolor=GRIDLINE, tickfont=dict(color=INK_MUTED, size=10),
+                         tickformat="%a %d", row=row, col=1)
+    fig.update_yaxes(title_text="°C", gridcolor=GRIDLINE, linecolor=GRIDLINE, tickfont=dict(color=INK_MUTED, size=10), row=1, col=1)
+    fig.update_yaxes(title_text="Δ MW", gridcolor=GRIDLINE, linecolor=GRIDLINE, tickfont=dict(color=INK_MUTED, size=10),
+                     tickformat=",.0f", row=2, col=1)
+    for ann in fig.layout.annotations:
+        ann.font = dict(size=11, color=INK_SECONDARY)
+    return fig
+
+
+def make_response_curve(xs: np.ndarray, ys: np.ndarray, partial: pd.DataFrame, window: pd.DataFrame, delta: float,
+                        title: str, x_title: str = "Temperature (°C)") -> go.Figure:
+    """Where the forecast sits on the country's curve: the fitted response (a working
+    day, at the window's time of year), recent actual days adjusted to the same footing
+    behind it, the window's days as markers and the ±`delta` °C band around their mean.
+    `partial`: x, load (MW); `window`: x, load (MW), day."""
+    fig = _base_fig(title, height=470)
+    if partial is not None and not partial.empty:
+        fig.add_trace(go.Scattergl(x=partial["x"], y=partial["load"] / 1000.0, mode="markers", name="Actual days, season-adjusted",
+                                   marker=dict(size=4, color=hex_to_rgba(INK_MUTED, 0.35)), hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=xs, y=np.asarray(ys) / 1000.0, mode="lines", name="Fitted response",
+                             line=dict(color=INK_PRIMARY, width=2.6),
+                             hovertemplate="%{x:.1f} °C · %{y:.1f} GW<extra></extra>"))
+    if window is not None and not window.empty:
+        mid = float(window["x"].mean())
+        fig.add_vrect(x0=mid - delta, x1=mid + delta, fillcolor=CAT_ORANGE, opacity=0.12, line_width=0)
+        fig.add_trace(go.Scatter(x=window["x"], y=window["load"] / 1000.0, mode="markers", name="Forecast days in the window",
+                                 marker=dict(size=10, color=CAT_ORANGE, line=dict(color="#ffffff", width=1.2)),
+                                 customdata=window["day"].dt.strftime("%a %d %b"),
+                                 hovertemplate="%{customdata}<br>%{x:.1f} °C · %{y:.1f} GW<extra></extra>"))
+    fig.update_layout(hovermode="closest")
+    fig.update_xaxes(title_text=x_title)
+    fig.update_yaxes(title_text="Load (GW, working day)")
+    return fig

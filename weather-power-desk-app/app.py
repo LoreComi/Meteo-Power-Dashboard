@@ -8,7 +8,8 @@ sidebar mirrors them and adds a Home button. Sections:
   2. Historical & Analysis  — monthly / weekly history by country, anomalies, index analogues
   3. Hydro Monitoring       — Hydro Report quantify_* figures and stats, live
   4. Gas Demand             — LDZ heating demand and wind/solar as displaced gas, run over run
-  5. Strategy               — locked, work in progress
+  5. Power Demand           — load vs temperature by year and month, and the forecast's temperature sensitivity
+  6. Strategy               — locked, work in progress
 
 Structure follows the LPG desk dashboard (weather-lpg-desk-app): _config /
 _data / _charts / _style modules, one render function per section, sandbox
@@ -30,6 +31,7 @@ from _forecast import render_forecast
 from _historical import render_historical
 from _hydro import render_hydro
 from _gas import render_gas_demand
+from _power import render_power_demand
 from _strategy import render_strategy
 
 # Everything the app logs goes to stdout, where the Databricks Apps log viewer picks it up.
@@ -50,6 +52,7 @@ RENDERERS = {
     "Historical & Analysis": render_historical,
     "Hydro Monitoring": render_hydro,
     "Gas Demand": render_gas_demand,
+    "Power Demand": render_power_demand,
     "Strategy": render_strategy,
 }
 
@@ -117,7 +120,7 @@ if "device" not in st.session_state:
 NAV_ICONS = {
     HOME: ":material/home:", "Morning Call": ":material/wb_sunny:", "Forecast": ":material/insights:",
     "Historical & Analysis": ":material/history:", "Hydro Monitoring": ":material/water_drop:",
-    "Gas Demand": ":material/local_fire_department:", "Strategy": ":material/lock:",
+    "Gas Demand": ":material/local_fire_department:", "Power Demand": ":material/bolt:", "Strategy": ":material/lock:",
 }
 _LOGO = ('<svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" '
          'stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>')

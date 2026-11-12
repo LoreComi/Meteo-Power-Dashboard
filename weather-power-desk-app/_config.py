@@ -1,6 +1,6 @@
 """Configuration — Power Desk Weather Dashboard.
 
-Sections: Forecast, Historical & Analysis, Hydro Monitoring, Gas Demand, Strategy.
+Sections: Forecast, Historical & Analysis, Hydro Monitoring, Gas Demand, Power Demand, Strategy.
 
 Data sources
 ------------
@@ -113,8 +113,15 @@ SECTIONS: dict[str, dict] = {
                 "gas-for-power displacement — run-over-run deltas and the trade signal per country.",
         "color": CATEGORICAL[5], "locked": False,
     },
-    "Strategy": {
+    "Power Demand": {
         "num": "05",
+        "desc": "Electricity load against temperature: every day of actual load since 2015 per country, by year "
+                "and month, with the fitted temperature-response curves — and what one degree more or less in "
+                "the current forecast does to next week's load.",
+        "color": CATEGORICAL[2], "locked": False,
+    },
+    "Strategy": {
+        "num": "06",
         "desc": "Positioning views built on the other three sections.",
         "color": CATEGORICAL[6], "locked": True,
     },
@@ -562,6 +569,39 @@ GAS_DEFAULT_SOURCE = os.environ.get("GAS_SOURCE", MORNING_DEFAULT_SOURCE)
 GAS_FORECAST_DAYS = 14               # horizon pulled per run, as in dwld_fct
 GAS_HIST_LOOKBACK_DAYS = 10          # trailing actual days: MAX_LAG_DAYS (6) + 4
 GAS_TOTAL_SIGNAL_GWH = 1000          # |cumulative delta| above this = a trade signal
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POWER DEMAND (load vs temperature, and the forecast's temperature sensitivity)
+# ══════════════════════════════════════════════════════════════════════════════
+# Both tables are written by Power_dashboard/pipeline/eq_load.py (--only load):
+#   power_load_daily   area, day, load (MW, daily mean of the actual), temp (°C, the
+#                      consumption-weighted temperature), their normals — since 2015
+#   power_load_fcst    the latest issue per model: temperature and load per day, the
+#                      members' temperature range, and the MW per °C the members imply
+# The curves are fitted in the app from power_load_daily (_power_demand_model.py).
+#
+# Sensitivity method — the fitted curve, not the members. Both were tried on the
+# 12 Nov 2026 00z run: the load change per °C read across the forecast's members
+# (load forecast regressed on temperature, member by member) came out at 28 % (DE) to
+# 90 % (UK) of what actual load has done per °C in the last three winters (7-day
+# differences on working days, a check that uses no model), while the fitted curve
+# reproduced that figure within a few percent in every country. The members give the
+# sensitivity of the provider's load model, need a spread to read anything (nothing
+# on days 1–5) and exist only for the run in hand; the curve is the response of
+# actual load, at every lead. The member figure is kept as a cross-check column.
+POWER_LOAD_TABLE = "power_load_daily"
+POWER_LOAD_FCST_TABLE = "power_load_fcst"
+POWER_DEFAULT_AREA = "DE"
+POWER_DEFAULT_AREAS = ["DE", "FR", "IT", "ES", "UK", "NL", "BE", "PL"]
+POWER_FCST_MODELS: dict[str, str] = {"EC-ENS": "ec-ens", "AIFS-ENS": "aifs-ens"}     # label -> the table's model tag
+POWER_DEFAULT_YEARS = 5              # the explorer opens on the last N years
+POWER_SEED_DAYS = 10                 # trailing actual temperature in front of the forecast (MAX_LAG_DAYS + 4)
+POWER_SHIFT_STEPS_C = [0.5, 1.0, 2.0, 3.0]
+POWER_SHIFT_DEFAULT_C = 1.0
+POWER_SLOPE_REF_TEMPS_C = [0, 5, 10, 15, 20, 25]   # the per-year table reads every curve's slope at these
+POWER_FLAT_PCT_PER_C = 0.15          # |slope| under this % of load per °C reads as "flat" (between heating and cooling)
+POWER_MEMBER_MIN_R2 = 0.3            # a day's member-implied slope counts only above this R²
+POWER_PARTIAL_DAYS = 730             # season-adjusted actual days drawn behind the response curve
 
 # ══════════════════════════════════════════════════════════════════════════════
 # AI MORNING BRIEF (two agent families)

@@ -25,7 +25,7 @@ from _config import (
     DELTASHARE_PATTERN_MAP, hist_source, HIST_DEFAULT_SOURCE,
     MEMBER_TABLES, SCENARIO_SPATIAL_SOURCES, SPATIAL_METRIC, WR_MODELS, WR_MEMBERS_TABLE,
     HYDRO_START_YEAR, HYDRO_PROD_TABLE, RESERVOIR_OUTLOOK_TABLE, RESERVOIR_OUTLOOK_RUNS_TABLE,
-    MORNING_SOURCES, GAS_SOURCES, enabled_sources,
+    MORNING_SOURCES, GAS_SOURCES, enabled_sources, POWER_LOAD_TABLE, POWER_LOAD_FCST_TABLE,
 )
 
 log = logging.getLogger("power_desk.data")
@@ -727,6 +727,69 @@ def load_recent_actual_temp(areas: tuple[str, ...], days: int = 30) -> pd.DataFr
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# POWER DEMAND
+# ══════════════════════════════════════════════════════════════════════════════
+
+def load_power_areas() -> pd.DataFrame:
+    """Countries with load in power_load_daily: area, n_days, first_day, last_day."""
+    return _load_power_areas(data_version(POWER_LOAD_TABLE))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=2, show_spinner=False)
+def _load_power_areas(version: str) -> pd.DataFrame:
+    df = run_query(f"""
+        SELECT area, CAST(COUNT(load) AS INT) AS n_days, MIN(day) AS first_day, MAX(day) AS last_day
+        FROM {SBX_SCHEMA}.{POWER_LOAD_TABLE}
+        WHERE load IS NOT NULL
+        GROUP BY area
+    """)
+    if df.empty:
+        return df
+    return _num(_dt(df, ["first_day", "last_day"]), ["n_days"])
+
+
+def load_power_load(area: str) -> pd.DataFrame:
+    """One country's whole daily history: day, load (MW), temp (°C), load_normal,
+    temp_normal, load_source. The rows after the last actual carry the normals only.
+    Per country so the explorer reads one and the sensitivity grid prefetches its
+    selection in parallel; cached until the table is rewritten."""
+    return _load_power_load(area, data_version(POWER_LOAD_TABLE))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=32, show_spinner=False)
+def _load_power_load(area: str, version: str) -> pd.DataFrame:
+    df = run_query(f"""
+        SELECT day, load, temp, load_normal, temp_normal, load_source
+        FROM {SBX_SCHEMA}.{POWER_LOAD_TABLE}
+        WHERE area = :area
+        ORDER BY day
+    """, {"area": area})
+    if df.empty:
+        return df
+    return _num(_dt(df, ["day"]), ["load", "temp", "load_normal", "temp_normal"])
+
+
+def load_power_fcst() -> pd.DataFrame:
+    """The latest temperature / load forecast per country and model (power_load_fcst)."""
+    return _load_power_fcst(data_version(POWER_LOAD_FCST_TABLE))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=2, show_spinner=False)
+def _load_power_fcst(version: str) -> pd.DataFrame:
+    df = run_query(f"""
+        SELECT area, model, reference_date, day, lead_day, temp, load, temp_p10, temp_p90, n_members,
+               mem_slope, mem_se, mem_r2
+        FROM {SBX_SCHEMA}.{POWER_LOAD_FCST_TABLE}
+        ORDER BY model, area, day
+    """)
+    if df.empty:
+        return df
+    df = _dt(df, ["reference_date"], utc=True)
+    df = _dt(df, ["day"])
+    return _num(df, ["lead_day", "temp", "load", "temp_p10", "temp_p90", "n_members", "mem_slope", "mem_se", "mem_r2"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # RUN LISTING & COMPLETENESS HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1365,7 +1428,8 @@ def _versioned_tables() -> dict[str, str]:
     """table -> its write-time column, for every table a versioned loader reads (the
     Morning Call / Gas sources switched off are left out: their table may not exist)."""
     tables = {"fcst_daily": "snapshot_ts", "fcst_members": "snapshot_ts", "hydro_daily": "snapshot_ts",
-              "swe_daily": "loaded_at", HYDRO_PROD_TABLE: "loaded_at", RESERVOIR_OUTLOOK_TABLE: "loaded_at"}
+              "swe_daily": "loaded_at", HYDRO_PROD_TABLE: "loaded_at", RESERVOIR_OUTLOOK_TABLE: "loaded_at",
+              POWER_LOAD_TABLE: "loaded_at", POWER_LOAD_FCST_TABLE: "loaded_at"}
     for sources in (MORNING_SOURCES, GAS_SOURCES):
         for name in enabled_sources(sources):
             t = sources[name]["table"]
