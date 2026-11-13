@@ -64,6 +64,9 @@ IWR_COLS = [f"iwr_{r}" for r in WR_REGIMES]
 # SHARED MATHS
 # ══════════════════════════════════════════════════════════════════════════════
 
+WR_TRANS_MIN_DAYS = 4   # a transition counts only if the regime it lands in lasts this long
+
+
 def doy_365(days: pd.Series) -> pd.Series:
     """Day of year on a fixed 365-day calendar — 29 Feb folds onto 28 Feb, so a
     day-of-year climatology has the same number of samples everywhere."""
@@ -169,7 +172,8 @@ def dominant_regime(perc: pd.DataFrame) -> pd.Series:
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def climatology(rean: pd.DataFrame, window: int = WR_CLIM_DOY_WINDOW) -> dict:
+def climatology(rean: pd.DataFrame, window: int = WR_CLIM_DOY_WINDOW,
+                season_doy: int | None = None, season_days: int = 30) -> dict:
     """Everything the reanalysis says is normal.
 
     Returns
@@ -179,8 +183,15 @@ def climatology(rean: pd.DataFrame, window: int = WR_CLIM_DOY_WINDOW) -> dict:
                ~45 samples alone
     persistence  per regime: episode count, mean, p25, p75 (episodes >= 5 days,
                the filter the tool's histograms use)
-    transitions  8 x 8 — % of exits from each regime into the next
+    transitions  8 x 8 — % of exits from each regime into the next. Only
+               transitions whose destination (a regime or "no regime") then lasts
+               at least WR_TRANS_MIN_DAYS days are counted.
     years      how many years the record spans
+
+    season_doy  if given, persistence and transitions only use episodes that
+               start within +/- `season_days` of this day of year, in every year
+               of the record (episodes are built on the full series first, so
+               their durations are not cut at the window edge).
     """
     if rean.empty:
         return {}
@@ -203,8 +214,14 @@ def climatology(rean: pd.DataFrame, window: int = WR_CLIM_DOY_WINDOW) -> dict:
     doy_freq = pd.DataFrame(freq, index=range(1, 366), columns=WR_ALL_LABELS)
 
     # persistence and transitions, from maximal runs
-    eps = episodes(list(df.sort_values("day")["regime"]))
-    ep = pd.DataFrame([(r, n) for r, n, _ in eps], columns=["regime", "duration"])
+    ds = df.sort_values("day")
+    eps = episodes(list(ds["regime"]))
+    start_doy = doy_365(ds["day"].reset_index(drop=True))
+    ep = pd.DataFrame([(r, n, int(start_doy.iloc[st])) for r, n, st in eps],
+                      columns=["regime", "duration", "doy"])
+    if season_doy is not None:
+        gap = (ep["doy"] - season_doy).abs()
+        ep = ep[np.minimum(gap, 365 - gap) <= season_days]
     long_ep = ep[(ep.regime != WR_NO_REGIME) & (ep.duration >= 5)]
     pers = {}
     for r in WR_REGIMES:
@@ -214,9 +231,17 @@ def climatology(rean: pd.DataFrame, window: int = WR_CLIM_DOY_WINDOW) -> dict:
                    "p25": float(d.quantile(0.25)) if len(d) else np.nan,
                    "p75": float(d.quantile(0.75)) if len(d) else np.nan}
 
-    seq = ep["regime"].tolist()
+    # consecutive episodes in the (possibly seasonal) set; the pair must be adjacent
+    # in the full series, so work from the unfiltered list and filter by the
+    # destination's start date
     tm = pd.DataFrame(0.0, index=WR_ALL_LABELS, columns=WR_ALL_LABELS)
-    for a, b in zip(seq[:-1], seq[1:]):
+    for (a, _, _), (b, nb, sb) in zip(eps[:-1], eps[1:]):
+        if nb < WR_TRANS_MIN_DAYS:
+            continue
+        if season_doy is not None:
+            g = abs(int(start_doy.iloc[sb]) - season_doy)
+            if min(g, 365 - g) > season_days:
+                continue
         tm.loc[a, b] += 1
     tm = tm.div(tm.sum(axis=1).replace(0, np.nan), axis=0) * 100
 
@@ -330,6 +355,19 @@ def _render_climatology(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, clean
                                               "Climatological frequency through the year"),
                         use_container_width=True)
 
+    seasonal = st.checkbox("Climatology: only ±30 days around today's date, all years",
+                           value=False, key="wr_season",
+                           help="Restricts the climatological persistence and transitions to "
+                                "episodes starting within 30 days of today's calendar date in "
+                                "any year of the record, so the statistic reflects the current season.")
+    st.caption(f"A transition is counted only when the regime it turns into — including "
+               f"\"no regime\" — lasts at least {WR_TRANS_MIN_DAYS} days.")
+    if seasonal:
+        today_doy = int(doy_365(pd.Series([pd.Timestamp.today().normalize()])).iloc[0])
+        clim_t = climatology(st.session_state["_wr_rean"], season_doy=today_doy)
+        clim_title = f"Climatology, ±30 days around {pd.Timestamp.today():%d %b}"
+    else:
+        clim_t, clim_title = clim, "Climatology — % of exits into each regime"
     st.markdown("###### Persistence — forecast episodes against the climatological spread")
     seqs = member_sequences(run, clean=clean)
     per_regime: dict[str, list] = {r: [] for r in WR_REGIMES}
@@ -344,7 +382,7 @@ def _render_climatology(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, clean
     else:
         cols = st.columns(min(3, len(shown)))
         for i, (regime, durations) in enumerate(shown[:6]):
-            p = clim["persistence"].get(regime, {})
+            p = clim_t["persistence"].get(regime, {})
             with cols[i % len(cols)]:
                 st.plotly_chart(
                     make_wr_persistence(durations, p.get("p25"), p.get("mean"), p.get("p75"),
@@ -355,9 +393,10 @@ def _render_climatology(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, clean
     t1, t2 = st.columns(2)
     fc_tm = pd.DataFrame(0.0, index=WR_ALL_LABELS, columns=WR_ALL_LABELS)
     for seq in seqs.values():
-        eps = [r for r, _, _ in episodes(seq)]
-        for a, b in zip(eps[:-1], eps[1:]):
-            fc_tm.loc[a, b] += 1
+        eps = episodes(seq)
+        for (a, _, _), (b, nb, _) in zip(eps[:-1], eps[1:]):
+            if nb >= WR_TRANS_MIN_DAYS:
+                fc_tm.loc[a, b] += 1
     total = fc_tm.to_numpy().sum()
     with t1:
         st.plotly_chart(make_wr_transition_heatmap(
@@ -365,7 +404,7 @@ def _render_climatology(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, clean
             f"This run — {int(total)} member transitions"), use_container_width=True)
     with t2:
         st.plotly_chart(make_wr_transition_heatmap(
-            clim["transitions"], "Climatology — % of exits into each regime"),
+            clim_t["transitions"], clim_title),
             use_container_width=True)
 
 
@@ -423,6 +462,7 @@ def render_regimes():
     except Exception:
         rean = pd.DataFrame()
     clim = climatology(rean) if not rean.empty else {}
+    st.session_state["_wr_rean"] = rean
 
     perc = member_percentages(run, clean=clean)
     if view_switch("Regime view", ["Forecast", "Climatology"], "wr_view", {"Forecast": ("wr_band",)}) == "Forecast":
