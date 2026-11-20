@@ -1066,11 +1066,17 @@ EXPECTED_HORIZON: dict[str, int] = {
 #   hydro_level      the hydro_daily area of the reservoir / groundwater / balance series (Hydro overview)
 #   scenario         fcst_members country code(s) the scenarios are read on — several = an
 #                    aggregate: temperature averaged, wind and solar summed, per member
-# A key a country lacks (hydro for the UK, temperature for SEE) is simply not shown.
+#   block_overrides  per family, block keys replaced for this country — a country curve is far
+#                    smaller than the report's aggregates, so its shading scale (heat_scale, sized
+#                    like the report's: ~12 % of the precipitation normal, ~40 % of the solar one)
+#                    and its decimals (fmt) are its own
+# A key a country lacks (hydro for the UK, solar for the UK) is simply not shown.
 DEEP_DIVE_COUNTRIES: dict[str, dict] = {
-    "Germany":     {"tt": "de", "wnd": "de", "spv": "de", "rre": "cwe", "rre_label": "CWE (FR DE AT CH)",
+    "Germany":     {"tt": "de", "wnd": "de", "spv": "de", "rre": "de", "rre_label": "Germany",
+                    "block_overrides": {"rre": {"fmt": "{:.2f}", "heat_scale": 0.1}},
                     "hydro_prod": "de", "hydro_level": "DE", "scenario": ["DE"]},
-    "France":      {"tt": "fr", "wnd": "fr", "spv": "fr", "rre": "cwe", "rre_label": "CWE (FR DE AT CH)",
+    "France":      {"tt": "fr", "wnd": "fr", "spv": "fr", "rre": "fr", "rre_label": "France",
+                    "block_overrides": {"rre": {"fmt": "{:.2f}", "heat_scale": 0.4}},
                     "hydro_prod": "fr", "hydro_level": "FR", "scenario": ["FR"]},
     "Italy":       {"tt": "it", "wnd": "it", "spv": "it", "rre": "it-nord", "rre_label": "Italy North",
                     "hydro_prod": "it-nord", "hydro_level": "IT", "scenario": ["IT"]},
@@ -1079,11 +1085,12 @@ DEEP_DIVE_COUNTRIES: dict[str, dict] = {
     "UK":          {"tt": "uk", "wnd": "uk", "scenario": ["UK"]},
     "Nordics":     {"tt": "np", "wnd": "np", "spv": "np", "rre": "np", "rre_label": "Nordic pool",
                     "hydro_prod": "np", "hydro_level": "NP", "scenario": ["NO", "SE", "FI"]},
-    "SEE":         {"wnd": "see", "spv": "see", "rre": "see", "rre_label": "SEE",
+    "SEE":         {"tt": "see", "wnd": "see", "spv": "see", "rre": "see", "rre_label": "SEE",
                     "hydro_prod": "see", "hydro_level": "SEE", "scenario": ["SI", "HR"]},
     "Netherlands": {"tt": "nl", "wnd": "nl", "spv": "nl", "scenario": ["NL"]},
     "Belgium":     {"tt": "be", "wnd": "be", "spv": "be", "scenario": ["BE"]},
-    "Hungary":     {"tt": "hu", "scenario": ["HU"]},
+    "Hungary":     {"tt": "hu", "spv": "hu", "block_overrides": {"spv": {"fmt": "{:.2f}", "heat_scale": 0.2}},
+                    "scenario": ["HU"]},
 }
 DEEP_DIVE_DEFAULT = "Germany"
 DEEP_DIVE_HYDRO_WINDOW_DAYS = HYDRO_PROD_WINDOW_DAYS

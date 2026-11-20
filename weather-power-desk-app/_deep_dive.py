@@ -22,7 +22,8 @@ Then three section cards:
                variables of the same member IDs.
 
 Country → sources in _config.DEEP_DIVE_COUNTRIES. A source the country does not have
-(hydro for the UK, temperature for SEE) is left out and said so. Precipitation-energy
+(hydro for the UK) is left out and said so. Germany and France read precipitation energy on
+their own country curve (rre de / rre fr), not the report's CWE aggregate. Precipitation-energy
 members are not in the member tables (notebook cell 4 skips them), so the scenarios cannot
 yet be read on precipitation — the hydro outlook's run-over-run change stands in.
 """
@@ -132,12 +133,13 @@ def _country_blocks(country: str, cfg: dict, blocks: dict) -> dict:
     """The report's blocks cut down to this country's single row each; a block the
     country has no region for is dropped."""
     out = {}
+    overrides = cfg.get("block_overrides", {})
     for name, block in blocks.items():
         region = cfg.get(block["family"])
         if region is None:
             continue
         label = cfg.get("rre_label", country) if block["family"] == "rre" else country
-        out[name] = {**block, "rows": [(label, region)]}
+        out[name] = {**block, **overrides.get(block["family"], {}), "rows": [(label, region)]}
     return out
 
 

@@ -8,13 +8,14 @@ written to Databricks the way eq_morning.py writes the EQ table:
             — the ensemble-mean 'Avg' series, daily; the report drops the last day of the
             temperature series (it holds 12 hours only) and so does this
   normal    '<…> cet min15 n'.get_data(function=…, frequency='D')
-  curves    tt  'tt {r} con {run} °c cet min15 f'            regions fr de uk it hu np ib be nl
+  curves    tt  'tt {r} con {run} °c cet min15 f'            regions fr de uk it hu np ib see be nl
             wnd 'pro {r} wnd {run} mwh/h cet min15 f'        regions de uk fr it see np ib be nl
-            spv 'pro {r} spv {run} mwh/h cet min15 f'        regions de fr it see np ib be nl
-            rre 'rre {r} {run} gwh cet min15 f' (daily SUM)  regions cwe it-nord np see ib
+            spv 'pro {r} spv {run} mwh/h cet min15 f'        regions de fr it see np ib hu be nl
+            rre 'rre {r} {run} gwh cet min15 f' (daily SUM)  regions cwe it-nord np see ib de fr
   runs      ec00ens ec12ens gfs00ens gfs12ens (whichever Volue has issued)
 
-be / nl are there for the Gas Demand section (its LDZ countries), as in rdl_forecast.py.
+be / nl are there for the Gas Demand section (its LDZ countries), as in rdl_forecast.py; tt see,
+spv hu and rre de / fr for the Morning Call's country deep dive (not in the report grid).
 
 Table morning_daily_volue (MERGE key: family, region, pattern, reference_date, day), the
 shape of morning_daily and morning_daily_eq: provider 'Volue', family, region, pattern,
@@ -59,13 +60,13 @@ RETRIES, BACKOFF_S = 3, 5
 # family -> curve template, normal template, daily function, drop the last (partial) day?
 FAMILIES = {
     "tt":  {"curve": "tt {r} con {run} °c cet min15 f", "normal": "tt {r} con °c cet min15 n", "fn": "AVERAGE", "drop_last": True,
-            "regions": ["fr", "de", "uk", "it", "hu", "np", "ib", "be", "nl"]},
+            "regions": ["fr", "de", "uk", "it", "hu", "np", "ib", "see", "be", "nl"]},
     "wnd": {"curve": "pro {r} wnd {run} mwh/h cet min15 f", "normal": "pro {r} wnd mwh/h cet min15 n", "fn": "AVERAGE", "drop_last": False,
             "regions": ["de", "uk", "fr", "it", "see", "np", "ib", "be", "nl"]},
     "spv": {"curve": "pro {r} spv {run} mwh/h cet min15 f", "normal": "pro {r} spv mwh/h cet min15 n", "fn": "AVERAGE", "drop_last": False,
-            "regions": ["de", "fr", "it", "see", "np", "ib", "be", "nl"]},
+            "regions": ["de", "fr", "it", "see", "np", "ib", "hu", "be", "nl"]},
     "rre": {"curve": "rre {r} {run} gwh cet min15 f", "normal": "rre {r} gwh cet min15 n", "fn": "SUM", "drop_last": False,
-            "regions": ["cwe", "it-nord", "np", "see", "ib"]},
+            "regions": ["cwe", "it-nord", "np", "see", "ib", "de", "fr"]},
 }
 
 

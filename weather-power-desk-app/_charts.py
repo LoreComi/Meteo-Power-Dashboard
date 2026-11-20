@@ -798,7 +798,7 @@ def make_hydro_climatology_chart(clim: dict, hist_years: list[int], recent_years
         fig.add_trace(go.Scatter(x=[ty.index[-1]], y=[ty.iloc[-1]], mode="markers+text",
                                  marker=dict(size=9, color=HYDRO_CURRENT_RED, line=dict(color="#ffffff", width=1.5)),
                                  text=[f"{ty.iloc[-1]:,.0f}"], textposition="middle right" if ty.index[-1].dayofyear < 300 else "middle left",
-                                 textfont=dict(color=HYDRO_CURRENT_RED, size=11, family="JetBrains Mono, monospace"),
+                                 textfont=dict(color=HYDRO_CURRENT_RED, size=11, family="Roboto Mono, monospace"),
                                  showlegend=False, hoverinfo="skip"))
     fig.update_xaxes(tickformat="%b", dtick="M1", range=[x[0], x[-1]])
     fig.update_yaxes(title_text=unit, tickformat=",.0f")
@@ -862,7 +862,7 @@ def make_hydro_europe_map(painted: list[dict], zmin: float, zmax: float, zmid: f
         fig.add_trace(go.Scattergeo(
             lat=[r["lat"] for r in labelled], lon=[r["lon"] for r in labelled], mode="text",
             text=[r["label"] for r in labelled],
-            textfont=dict(family="JetBrains Mono, monospace", size=10,
+            textfont=dict(family="Roboto Mono, monospace", size=10,
                           color=[INK_PRIMARY if r.get("z") is not None else INK_MUTED for r in labelled]),
             hoverinfo="skip", showlegend=False))
     for subset, has_z in ((
@@ -1230,7 +1230,7 @@ def make_morning_anomaly_chart(cells: pd.DataFrame, blocks: dict, windows: list[
                 fig.add_trace(go.Scatter(x=cur_x, y=cur_y, mode="markers+text", name=f"{col_labels[0]} — vs normal",
                                          marker=dict(size=13, color=cur_c, line=dict(width=1.2, color="#ffffff")),
                                          text=cur_t, textposition=cur_p,
-                                         textfont=dict(size=10.5, color=INK_SECONDARY, family="JetBrains Mono, monospace"),
+                                         textfont=dict(size=10.5, color=INK_SECONDARY, family="Roboto Mono, monospace"),
                                          legendgroup="ref", showlegend=_legend("ref"),
                                          hovertext=cur_h, hoverinfo="text"), row=r, col=c)
             for ci in sorted(int(i) for i in sel["col"].unique() if int(i) > 0):

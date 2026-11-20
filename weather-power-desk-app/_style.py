@@ -97,7 +97,7 @@ def hex_to_rgba(hex_color: str, alpha: float = 0.15) -> str:
 
 CUSTOM_CSS = f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Roboto+Mono:wght@400;500;600;700&display=swap');
 
 :root {{
     --bg-app: {PAGE_PLANE};
@@ -261,7 +261,7 @@ p, .stMarkdown, span, label {{ color: var(--text-primary); }}
 .section-tile:hover {{ box-shadow: var(--shadow-pop); transform: translateY(-1px); }}
 .section-tile-accent {{ height: 4px; border-radius: 999px; width: 44px; margin-bottom: 16px; }}
 .section-tile-num {{
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'Roboto Mono', monospace;
     font-size: 0.72rem;
     color: var(--text-muted);
     letter-spacing: 0.12em;
@@ -329,7 +329,7 @@ p, .stMarkdown, span, label {{ color: var(--text-primary); }}
     letter-spacing: 0.12em;
 }}
 .kpi-value {{
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'Roboto Mono', monospace;
     font-size: 1.6rem;
     font-weight: 600;
     color: var(--text-primary) !important;
@@ -434,113 +434,113 @@ hr {{ border-color: var(--border) !important; }}
     box-shadow: var(--shadow-card);
 }}
 .mc-title {{
-    font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.10em;
+    font-size: 0.8rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.10em;
     color: var(--text-secondary); margin-bottom: 6px;
 }}
-.mc-table {{ width: 100%; border-collapse: collapse; font-size: 0.86rem; }}
+.mc-table {{ width: 100%; border-collapse: collapse; font-size: 0.98rem; }}
 .mc-table th {{
-    text-align: right; font-size: 0.66rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+    text-align: right; font-size: 0.74rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
     color: var(--text-muted); padding: 4px 8px; border-bottom: 1px solid var(--border);
 }}
 .mc-table th:first-child, .mc-table td:first-child {{ text-align: left; }}
 .mc-table td {{
     padding: 5px 8px; border-bottom: 1px solid var(--border); text-align: right;
-    font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; color: var(--text-primary);
+    font-family: 'Roboto Mono', monospace; font-variant-numeric: tabular-nums; color: var(--text-primary);
 }}
 .mc-table td.mc-region {{ font-family: 'Inter', sans-serif; font-weight: 600; }}
 .mc-table tr:last-child td {{ border-bottom: none; }}
 .mc-pos {{ color: {CAT_GREEN} !important; font-weight: 600; }}
 .mc-neg {{ color: {CAT_RED} !important; font-weight: 600; }}
 .mc-zero {{ color: var(--text-muted) !important; }}
-.mc-muted {{ color: var(--text-muted) !important; font-size: 0.78rem; }}
+.mc-muted {{ color: var(--text-muted) !important; font-size: 0.86rem; }}
 .mc-week {{
-    font-size: 1.05rem; font-weight: 800; letter-spacing: -0.01em; color: var(--text-primary);
+    font-size: 1.2rem; font-weight: 800; letter-spacing: -0.01em; color: var(--text-primary);
 }}
-.mc-sub {{ font-size: 0.78rem; color: var(--text-muted); margin-bottom: 8px; }}
+.mc-sub {{ font-size: 0.88rem; color: var(--text-muted); margin-bottom: 8px; }}
 
 /* Morning Call grid — columns are window → run; every cell carries the
    report's triple (Detail) or one quantity, shaded on the diverging pair.
    Fixed layout + shared <colgroup> so the four block tables line up. */
 .mcg-table {{ table-layout: fixed; }}
-.mcg-table col.mcg-c0 {{ width: 104px; }}
+.mcg-table col.mcg-c0 {{ width: 136px; }}
 .mcg-table th.mcg-corner {{
-    text-align: left; vertical-align: bottom; color: var(--text-secondary); font-size: 0.70rem;
+    text-align: left; vertical-align: bottom; color: var(--text-secondary); font-size: 0.82rem;
     text-transform: none; letter-spacing: 0; border-bottom: 1px solid var(--border-bright); padding-bottom: 5px;
 }}
 .mcg-corner-name {{ text-transform: uppercase; letter-spacing: 0.08em; }}
 .mcg-corner-unit {{ font-weight: 500; color: var(--text-muted); }}
 .mcg-corner-sub {{
     font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--text-muted);
-    font-size: 0.64rem; margin-top: 3px;
+    font-size: 0.72rem; margin-top: 3px;
 }}
 .mcg-table th.mcg-win {{
-    text-align: center; color: var(--text-primary); font-size: 0.74rem; letter-spacing: 0.01em;
+    text-align: center; color: var(--text-primary); font-size: 1.02rem; font-weight: 800; letter-spacing: 0;
     text-transform: none; padding: 3px 8px 3px; border-bottom: 1px solid var(--border);
     border-left: 2px solid var(--border-bright);
 }}
-.mcg-range {{ color: var(--text-muted); font-weight: 500; margin-left: 6px; }}
+.mcg-range {{ color: var(--text-muted); font-weight: 500; font-size: 0.84rem; margin-left: 8px; }}
 .mcg-table th.mcg-col {{
     text-align: center; text-transform: none; letter-spacing: 0; padding: 3px 4px 5px;
     border-bottom: 1px solid var(--border-bright); vertical-align: bottom;
 }}
-.mcg-model {{ display: block; font-weight: 700; font-size: 0.68rem; color: var(--text-secondary); }}
-.mcg-date {{ display: block; font-weight: 500; font-size: 0.63rem; color: var(--text-muted); margin-top: 1px; }}
+.mcg-model {{ display: block; font-weight: 700; font-size: 0.8rem; color: var(--text-secondary); }}
+.mcg-date {{ display: block; font-weight: 500; font-size: 0.72rem; color: var(--text-muted); margin-top: 1px; }}
 .mcg-table th.mcg-ref {{ box-shadow: inset 0 -2px 0 var(--accent); }}
 .mcg-table th.mcg-ref .mcg-model {{ color: var(--accent); }}
 .mcg-table .mcg-first {{ border-left: 2px solid var(--border-bright); }}
 .mcg-table td.mcg-cell {{ text-align: center; padding: 4px 5px; }}
 .mcg-table td.mcg-refcell {{ background: rgba(42,120,214,0.035); }}
-.mcg-v {{ font-size: 0.9rem; font-weight: 600; line-height: 1.15; }}
-.mcg-d {{ font-size: 0.69rem; line-height: 1.2; margin-top: 1px; white-space: nowrap; }}
+.mcg-v {{ font-size: 1.04rem; font-weight: 600; line-height: 1.15; }}
+.mcg-d {{ font-size: 0.8rem; line-height: 1.2; margin-top: 1px; white-space: nowrap; }}
 .mcg-sep {{ color: var(--text-muted); margin: 0 3px; }}
-.mcg-table td.mcg-heat {{ font-weight: 600; font-size: 0.88rem; }}
+.mcg-table td.mcg-heat {{ font-weight: 600; font-size: 1.0rem; }}
 .mcg-table td.mcg-spread, .mcg-table th.mcg-spread {{
-    color: var(--text-muted); font-weight: 500; font-size: 0.8rem; border-left: 1px dashed var(--border);
+    color: var(--text-muted); font-weight: 500; font-size: 0.9rem; border-left: 1px dashed var(--border);
 }}
 sup.mcg-n {{
-    font-size: 0.56rem; color: var(--text-muted); font-weight: 500; margin-left: 2px;
+    font-size: 0.64rem; color: var(--text-muted); font-weight: 500; margin-left: 2px;
     font-family: 'Inter', sans-serif;
 }}
 /* "Change · anomaly" cells: the anomaly (Δ norm) as a shaded pill, the move since the
    previous run in brackets after it — arrow and number as large as the pill's — and the
    absolute value beneath in dark ink. */
-.mcg-pair {{ display: flex; gap: 6px; justify-content: center; align-items: center; }}
-.mcg-move {{ font-size: 0.82rem; font-weight: 700; line-height: 1.2; white-space: nowrap; }}
-.mcg-move-a {{ font-size: 0.95rem; margin-right: 1px; }}
+.mcg-pair {{ display: flex; flex-wrap: wrap; gap: 1px 5px; justify-content: center; align-items: center; }}
+.mcg-move {{ font-size: 0.94rem; font-weight: 700; line-height: 1.2; white-space: nowrap; }}
+.mcg-move-a {{ font-size: 1.05rem; margin-right: 1px; }}
 .mcg-move-v {{ margin-left: 1px; }}
 .mcg-move-a, .mcg-move-v {{ color: inherit; }}          /* the global `span` colour would otherwise win over the cell's red / blue */
 .mcg-br {{ color: var(--text-secondary); font-weight: 500; }}
 .mcg-move-flat {{ color: var(--text-muted) !important; font-weight: 500; }}
 .mcg-pill {{
-    display: inline-block; min-width: 46px; padding: 2px 5px; border-radius: 5px;
-    font-weight: 600; font-size: 0.8rem; line-height: 1.25; color: var(--text-primary);
+    display: inline-block; min-width: 52px; padding: 2px 5px; border-radius: 5px;
+    font-weight: 600; font-size: 0.92rem; line-height: 1.25; color: var(--text-primary);
 }}
 .mcg-pill-na {{ color: var(--text-muted) !important; font-weight: 500; }}
-.mcg-abs {{ font-size: 0.74rem; color: var(--text-primary); font-weight: 600; margin-top: 3px; line-height: 1.1; }}
+.mcg-abs {{ font-size: 0.86rem; color: var(--text-primary); font-weight: 600; margin-top: 3px; line-height: 1.1; }}
 
 /* At a glance — the reference run's biggest moves and anomalies as chips, ranked
    across blocks on each block's own scale, shaded on the same diverging pair. */
 .mc-glance {{ display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: 0 0 8px; }}
 .mc-glance-label {{
-    font-size: 0.64rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
-    color: var(--text-muted); min-width: 158px; line-height: 1.3;
+    font-size: 0.74rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text-muted); min-width: 180px; line-height: 1.3;
 }}
 .mc-chip {{
     display: inline-flex; align-items: baseline; gap: 6px; padding: 5px 10px; border-radius: 8px;
-    border: 1px solid var(--border); background: var(--bg-surface); font-size: 0.8rem; line-height: 1.2;
+    border: 1px solid var(--border); background: var(--bg-surface); font-size: 0.92rem; line-height: 1.2;
     color: var(--text-primary);
 }}
 .mc-chip b {{ font-weight: 700; }}
-.mc-chip .mc-chip-q {{ font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 0.88rem; font-variant-numeric: tabular-nums; }}
-.mc-chip .mc-chip-w {{ color: var(--text-secondary); font-size: 0.68rem; }}
-.mc-chip-empty {{ color: var(--text-muted); font-size: 0.78rem; }}
+.mc-chip .mc-chip-q {{ font-family: 'Roboto Mono', monospace; font-weight: 700; font-size: 1.0rem; font-variant-numeric: tabular-nums; }}
+.mc-chip .mc-chip-w {{ color: var(--text-secondary); font-size: 0.78rem; }}
+.mc-chip-empty {{ color: var(--text-muted); font-size: 0.88rem; }}
 
 .mcg-legend {{
-    display: flex; flex-wrap: wrap; gap: 18px; align-items: center; font-size: 0.76rem;
+    display: flex; flex-wrap: wrap; gap: 18px; align-items: center; font-size: 0.84rem;
     color: var(--text-muted); margin: -4px 0 8px 2px;
 }}
 .mcg-swatch {{ display: inline-block; width: 34px; height: 10px; border-radius: 3px; vertical-align: middle; margin: 0 6px; }}
-.mcg-runs {{ font-size: 0.76rem; color: var(--text-muted); line-height: 1.6; margin: 0 0 8px 2px; }}
+.mcg-runs {{ font-size: 0.86rem; color: var(--text-muted); line-height: 1.6; margin: 0 0 8px 2px; }}
 .mcg-runs b {{ color: var(--text-secondary); font-weight: 600; }}
 
 /* Scenario side-by-side table */
@@ -552,7 +552,7 @@ sup.mcg-n {{
 .sc-table th.sc-scen {{ color: var(--text-primary); font-size: 0.72rem; border-bottom: 2px solid; }}
 .sc-table td {{
     padding: 5px 8px; border-bottom: 1px solid var(--border); text-align: right;
-    font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums;
+    font-family: 'Roboto Mono', monospace; font-variant-numeric: tabular-nums;
 }}
 .sc-table th:first-child, .sc-table td:first-child {{ text-align: left; font-family: 'Inter', sans-serif; font-weight: 600; }}
 .sc-table tr:last-child td {{ border-bottom: none; }}
@@ -651,7 +651,7 @@ h4 {{ font-size: 0.8rem !important; }}
 .mcp-table th .mcg-date {{ display: block; font-weight: 500; text-transform: none; letter-spacing: 0; font-size: 0.62rem; }}
 .mcp-table td {{
     padding: 9px 4px; border-bottom: 1px solid var(--border); text-align: right;
-    font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; font-size: 1.0rem;
+    font-family: 'Roboto Mono', monospace; font-variant-numeric: tabular-nums; font-size: 1.0rem;
 }}
 .mcp-table td.mc-region {{ font-family: 'Inter', sans-serif; font-weight: 600; font-size: 0.95rem; }}
 .mcp-table tr:last-child td {{ border-bottom: none; }}
@@ -744,7 +744,7 @@ div[class*="st-key-pg_"] [data-baseweb="tab-highlight"], div[class*="st-key-pg_"
 .dd-country {{ font-size: 2.1rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.1;
     color: #ffffff !important; margin-top: 4px; }}
 .dd-meta {{ font-size: 0.78rem; color: rgba(255,255,255,0.62) !important; margin-top: 6px;
-    font-family: 'JetBrains Mono', monospace; }}
+    font-family: 'Roboto Mono', monospace; }}
 .dd-out-box {{ text-align: right; min-width: 240px; }}
 .dd-out-label {{ font-size: 0.66rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
     color: rgba(255,255,255,0.55) !important; }}

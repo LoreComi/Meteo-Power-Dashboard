@@ -84,7 +84,7 @@ st.markdown(f"""
             border:1px solid rgba(12,163,12,0.28); border-radius:999px; font-size:0.72rem; font-weight:600; color:#0f5c0f;">
             <span style="width:6px;height:6px;background:#0ca30c;border-radius:50%;display:inline-block;"></span> Live
         </span>
-        <span style="font-size:0.72rem; color:var(--text-muted); font-family:'JetBrains Mono',monospace;">
+        <span style="font-size:0.72rem; color:var(--text-muted); font-family:'Roboto Mono',monospace;">
             {_now:%d %b %Y} &middot; {_now:%H:%M} UTC
         </span>
     </div>
