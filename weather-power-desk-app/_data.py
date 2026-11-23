@@ -26,6 +26,7 @@ from _config import (
     MEMBER_TABLES, SCENARIO_SPATIAL_SOURCES, SPATIAL_METRIC, WR_MODELS, WR_MEMBERS_TABLE,
     HYDRO_START_YEAR, HYDRO_PROD_TABLE, RESERVOIR_OUTLOOK_TABLE, RESERVOIR_OUTLOOK_RUNS_TABLE,
     MORNING_SOURCES, GAS_SOURCES, enabled_sources, POWER_LOAD_TABLE, POWER_LOAD_FCST_TABLE,
+    GOOGLE_WN, INIT_STAMPED_PATTERNS,
 )
 
 log = logging.getLogger("power_desk.data")
@@ -244,10 +245,88 @@ _VOLUE_INIT_HOUR = {"ec00ens": 0, "ec12ens": 12, "gfs00ens": 0, "gfs12ens": 12, 
 
 def init_time_for(pattern: str, ref_dt: pd.Timestamp) -> pd.Timestamp:
     """Init time for any run pattern in the sandbox tables: Volue patterns from the
-    issue day + cycle, Meteomatics models from their creation timestamp."""
+    issue day + cycle, Meteomatics models from their creation timestamp, and the
+    patterns the pipeline stamps with the init itself (Google WeatherNext) as they are."""
     if pattern in _VOLUE_INIT_HOUR:
         return volue_init_time(ref_dt, _VOLUE_INIT_HOUR[pattern])
+    if pattern in INIT_STAMPED_PATTERNS:
+        return pd.Timestamp(ref_dt).floor("h")
     return snap_to_init_time(ref_dt, [0, 12])
+
+
+# ─── Google WeatherNext (pipeline/google_weathernext.py → GOOGLE_WN['table']) ────
+# One pipeline table feeds three views. It is read on its own, never UNIONed into the
+# notebook tables' queries: until the pipeline's first run it does not exist, and a
+# missing table must cost the app nothing but an empty frame.
+
+@st.cache_data(ttl=SNAPSHOT_CHECK_S, show_spinner=False)
+def _google_wn_version() -> str:
+    """The table's last write time as a cache-key part; 'none' while it is missing or empty."""
+    if not GOOGLE_WN.get("enabled"):
+        return "off"
+    try:
+        df = run_query(f"SELECT MAX(loaded_at) AS ts FROM {SBX_SCHEMA}.{GOOGLE_WN['table']}")
+        return str(df["ts"].iloc[0]) if not df.empty and df["ts"].iloc[0] else "none"
+    except Exception:
+        return "none"
+
+
+def _google_version_for(cfg: dict) -> str:
+    return _google_wn_version() if cfg.get("google") else ""
+
+
+def _google_region_rows(lookback_days: int) -> pd.DataFrame:
+    """The WeatherNext runs in the layout of morning_daily (family 'tt', the Morning Call's
+    regions) — raw strings, as run_query returns them. Empty when there is nothing to read."""
+    if not GOOGLE_WN.get("enabled") or _google_wn_version() in ("off", "none"):
+        return pd.DataFrame()
+    try:
+        return run_query(f"""
+            SELECT provider, 'tt' AS family, key AS region, pattern, reference_date, day,
+                   value, n_points, normal
+            FROM {SBX_SCHEMA}.{GOOGLE_WN['table']}
+            WHERE scope = 'region' AND pattern = :pattern
+              AND reference_date >= current_timestamp() - INTERVAL {int(lookback_days)} DAYS
+            ORDER BY key, reference_date, day
+        """, {"pattern": GOOGLE_WN["pattern"]})
+    except Exception as e:
+        log.info("google weathernext rows not read: %s", str(e)[:200])
+        return pd.DataFrame()
+
+
+def load_google_fcst_daily(metric: str, areas: tuple[str, ...]) -> pd.DataFrame:
+    """The latest WeatherNext run as country means, in the columns of fcst_daily the
+    values view draws its 'other means' from (temperature only; whole days only)."""
+    if metric != "Temperature" or not areas or not GOOGLE_WN.get("enabled"):
+        return pd.DataFrame()
+    return _load_google_fcst_daily(tuple(areas), _google_wn_version())
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=32, show_spinner=False)
+def _load_google_fcst_daily(areas: tuple[str, ...], version: str) -> pd.DataFrame:
+    if version in ("off", "none"):
+        return pd.DataFrame()
+    t = f"{SBX_SCHEMA}.{GOOGLE_WN['table']}"
+    p = {"pattern": GOOGLE_WN["pattern"]}
+    try:
+        df = run_query(f"""
+            SELECT provider, model_family, pattern, init_hour, reference_date, 1 AS run_rank, 'Latest' AS run_label,
+                   'Temperature' AS metric, key AS area, day, lead_day, value AS ens_mean,
+                   normal, value - normal AS anomaly
+            FROM {t}
+            WHERE scope = 'country' AND pattern = :pattern AND key IN ({_in("area", areas, p)})
+              AND n_points >= {int(GOOGLE_WN['min_points'])}
+              AND reference_date = (SELECT MAX(reference_date) FROM {t} WHERE scope = 'country' AND pattern = :pattern)
+            ORDER BY key, day
+        """, p)
+    except Exception as e:
+        log.info("google weathernext forecast rows not read: %s", str(e)[:200])
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    df = _dt(df, ["reference_date"], utc=True)
+    df = _dt(df, ["day"])
+    return _num(df, ["init_hour", "run_rank", "lead_day", "ens_mean", "normal", "anomaly"])
 
 
 def format_run(init_dt: pd.Timestamp) -> str:
@@ -518,21 +597,27 @@ def load_morning_daily(source: str = "EQ") -> pd.DataFrame:
     lookback_days of issues are read. Cached until the table is rewritten
     (data_version), not on a timer.
     """
-    return _load_morning_daily(source, data_version(MORNING_SOURCES[source]["table"]))
+    cfg = MORNING_SOURCES[source]
+    return _load_morning_daily(source, data_version(cfg["table"]) + _google_version_for(cfg))
 
 
 @st.cache_data(ttl=VERSIONED_TTL, max_entries=8, show_spinner=False)
 def _load_morning_daily(source: str, version: str) -> pd.DataFrame:
     cfg = MORNING_SOURCES[source]
+    lookback = int(cfg.get("lookback_days", 10))
     p = {"provider": cfg["provider"]} if cfg.get("provider") else {}
     df = run_query(f"""
         SELECT provider, family, region, pattern, reference_date, day,
                value, n_points, normal
         FROM {SBX_SCHEMA}.{cfg['table']}
-        WHERE reference_date >= current_timestamp() - INTERVAL {int(cfg.get('lookback_days', 10))} DAYS
+        WHERE reference_date >= current_timestamp() - INTERVAL {lookback} DAYS
           {"AND provider = :provider" if p else ""}
         ORDER BY family, region, pattern, day
     """, p)
+    if cfg.get("google"):
+        extra = _google_region_rows(lookback)
+        if not extra.empty:
+            df = pd.concat([df, extra], ignore_index=True) if not df.empty else extra
     if df.empty:
         return df
     df = _dt(df, ["reference_date"], utc=True)
@@ -627,7 +712,8 @@ def load_gas_demand_daily(source: str = "Volue") -> pd.DataFrame:
     value, n_points, normal, init_time (the real cycle for EQ, the CET issue
     day + cycle for Volue), init_date. Cached until the table is rewritten.
     """
-    return _load_gas_demand_daily(source, data_version(GAS_SOURCES[source]["table"]))
+    cfg = GAS_SOURCES[source]
+    return _load_gas_demand_daily(source, data_version(cfg["table"]) + _google_version_for(cfg))
 
 
 @st.cache_data(ttl=VERSIONED_TTL, max_entries=8, show_spinner=False)
@@ -646,6 +732,11 @@ def _load_gas_demand_daily(source: str, version: str) -> pd.DataFrame:
               {"AND provider = :provider" if cfg.get('provider') else ""}
             ORDER BY family, pattern, region, day
         """, p)
+        if cfg.get("google"):
+            extra = _google_region_rows(lookback)
+            if not extra.empty:
+                extra = extra[extra["region"].isin(list(r2a))]
+                df = pd.concat([df, extra], ignore_index=True) if not df.empty else extra
         if df.empty:
             return df
         df["area"] = df["region"].map(r2a)

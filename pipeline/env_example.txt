@@ -58,6 +58,19 @@ RIVER_FORECAST_RUNS=1
 # WR_MEMBERS_PER_CALL=5                  wr_ecens.py: EC-ENS members per gateway call on the regime domain (0.5°, 121 × 241)
 # WR_INCLUDE_CONTROL=true  WR_RETENTION_DAYS=8  WR_CACHE_DIR=P:\QFA\TonyWeather\Power_dashboard\pipeline\cache
 
+# ── Google WeatherNext 3 (run_daily.py --only google; google_weathernext.py) ──
+# Needs zarr >= 3 and obstore in the environment (pip install "numpy==1.26.4" zarr obstore) and a Google login:
+# `gcloud auth application-default login` once — the file it writes under %APPDATA%\gcloud is found by itself.
+# GOOGLE_WN_CREDENTIALS=                 another credentials file (else GOOGLE_APPLICATION_CREDENTIALS, else gcloud's)
+# GOOGLE_WN_BILLING_PROJECT=             x-goog-user-project, only for a Requester-Pays bucket (the statistics one is not)
+# GOOGLE_WN_CYCLES=0,12                  inits loaded (6 and 18 exist too, 360 h each)
+# GOOGLE_WN_STEP_HOURS=3                 lead times read per day: every N hours (1 = all 24; one 26 MB global field each)
+# GOOGLE_WN_MIN_AGE_HOURS=2              a cycle is tried once it is this old (>= 1: younger data is not CC BY)
+# GOOGLE_WN_RUNS=2   GOOGLE_WN_BACKFILL_RUNS=6   GOOGLE_WN_RETENTION_DAYS=10
+# GOOGLE_WN_BUCKET=weathernext3_statistics_spatial
+# GOOGLE_WN_PREFIX=weathernext_3_0_0_statistics/zarr/2026_to_present     GOOGLE_WN_VARIABLE=temperature_2m_mean
+# GOOGLE_WN_TABLE=google_wn_daily        must equal GOOGLE_WN['table'] in the app's _config.py
+
 # ── SWE model ──
 SWE_ROOT=P:\QFA\TonyWeather\Hydro_Report\SWE_Exolabs
 SWE_REFRESH_DAYS=30

@@ -64,6 +64,7 @@ PROVIDER_COLORS = {
     "Meteologica": CAT_GREEN,
     "Meteomatics EC-ENS": CAT_ORANGE,
     "Meteomatics AIFS-ENS": CAT_VIOLET,
+    "Google WeatherNext": CAT_AQUA,
 }
 
 # Scenario clusters — ordered by cluster size (largest first). Cluster 1 is

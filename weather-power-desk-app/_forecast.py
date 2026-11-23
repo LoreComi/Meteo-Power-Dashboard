@@ -2,7 +2,8 @@
 
 Three tabs:
   Values        every Volue ensemble value by country (mean, median, P10-P90),
-                normal, earlier runs, Meteomatics EC-ENS / AIFS-ENS means
+                normal, earlier runs, Meteomatics EC-ENS / AIFS-ENS means and
+                the Google WeatherNext mean (the pipeline's google_wn_daily)
   Uncertainty   spread of the ensemble distribution and how it compares with
                 the normal spread for the same lead day — is this forecast
                 more or less certain than usual?
@@ -41,7 +42,7 @@ from _config import (
 )
 from _data import (
     load_runs, load_fcst_daily, load_spread_clim, load_members, load_spatial_sources, load_member_spatial_days,
-    format_run, volue_init_time, snap_to_init_time,
+    load_google_fcst_daily, format_run, volue_init_time, snap_to_init_time,
 )
 from _charts import (
     AREA_COLORS, make_fan_chart, make_anomaly_heatmap,
@@ -125,10 +126,12 @@ def _render_values(runs: pd.DataFrame):
         with o1:
             show_prev = st.checkbox("Earlier runs", value=True, key="fv_prev", help="Faded ensemble-mean lines of the previous runs")
         with o2:
-            show_mm = st.checkbox("Meteomatics EC / AIFS means", value=(metric == "Temperature"), key="fv_mm",
-                                  disabled=(metric != "Temperature"),
+            show_mm = st.checkbox("Meteomatics EC / AIFS + Google WeatherNext means", value=(metric == "Temperature"),
+                                  key="fv_mm", disabled=(metric != "Temperature"),
                                   help="Population-weighted country mean of the Meteomatics ensemble MEAN (silver tables; "
-                                       "weights from GHS-POP, see pop_weights_0p5.csv)")
+                                       "weights from GHS-POP, see pop_weights_0p5.csv) and, on the same weights, of the "
+                                       "Google WeatherNext 3 ensemble mean (latest run; pipeline --only google; "
+                                       "contains WeatherNext data from Google, CC BY 4.0)")
     if not areas:
         st.info("Select at least one country.")
         return
@@ -138,6 +141,10 @@ def _render_values(runs: pd.DataFrame):
         df = load_fcst_daily(metric, tuple(areas), (family,), max_run_rank=6)
         mm_df = (load_fcst_daily(metric, tuple(areas), tuple(METEOMATICS_MODELS.keys()), 1)
                  if show_mm and metric == "Temperature" else pd.DataFrame())
+        if show_mm and metric == "Temperature":
+            gw_df = load_google_fcst_daily(metric, tuple(areas))     # empty until the pipeline has written a run
+            if not gw_df.empty:
+                mm_df = pd.concat([mm_df, gw_df], ignore_index=True) if not mm_df.empty else gw_df
     except Exception as e:
         st.error(f"Failed to load forecast data: {e}")
         return

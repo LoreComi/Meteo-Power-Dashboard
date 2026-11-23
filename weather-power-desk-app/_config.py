@@ -136,7 +136,7 @@ AREAS: dict[str, str] = {
     "NL": "Netherlands", "BE": "Belgium", "PL": "Poland", "CZ": "Czech Republic",
     "HU": "Hungary", "NO": "Norway", "SE": "Sweden", "FI": "Finland", "DK": "Denmark",
     "PT": "Portugal", "SI": "Slovenia", "SK": "Slovakia", "HR": "Croatia",
-    "EE": "Estonia", "LV": "Latvia", "LT": "Lithuania",
+    "EE": "Estonia", "LV": "Latvia", "LT": "Lithuania", "AT": "Austria", "CH": "Switzerland",
 }
 DEFAULT_AREAS = ["DE", "FR", "IT", "ES", "UK", "NL"]
 # The Forecast → Values tab (the anomaly heatmap and the fan charts) opens on these
@@ -221,6 +221,25 @@ METEOMATICS_MODELS: dict[str, dict] = {
     "Meteomatics AIFS-ENS": {"model": "ecmwf-aifs-ens", "curve": "t_mean_2m_24h_c_ecmwf_aifs_ens_p1d"},
 }
 
+# Google WeatherNext 3 — Google's AI ensemble (64 members), shown wherever the Meteomatics
+# AIFS-ENS mean is: a run of the "AI models" source in the Morning Call and Gas Demand, and a
+# mean line in the Forecast section's values view. Not in the silver layer: the local pipeline
+# (pipeline/google_weathernext.py, run_daily.py --only google) reads the ensemble-MEAN 2 m
+# temperature from Google's statistics Zarr store on Google Cloud Storage and writes it on the
+# Meteomatics method — 0.1° field → 0.5° cells → the same population weights, per country
+# (scope 'country') and per Morning Call region (scope 'region'), with the Volue normal.
+# reference_date is the INIT time (00z / 12z), not a load time like the Meteomatics rows.
+# Temperature only, ensemble mean only. Contains WeatherNext data from Google (CC BY 4.0).
+GOOGLE_WN: dict = {
+    "enabled": True,                       # False: the app never queries the table
+    "table": "google_wn_daily",
+    "pattern": "google-weathernext",      # the run pattern of its rows (PATTERN in the pipeline module)
+    "model_family": "Google WeatherNext",
+    "min_points": 86,                      # a whole day = 96; the Forecast overlay drops partial days
+}
+# Run patterns whose reference_date already is the init time (_data.init_time_for)
+INIT_STAMPED_PATTERNS: set[str] = {GOOGLE_WN["pattern"]}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # UNCERTAINTY
 # ══════════════════════════════════════════════════════════════════════════════
@@ -297,6 +316,7 @@ MORNING_MODEL_LABELS: dict[str, str] = {
     "ec00ens": "EC-ENS", "ec12ens": "EC-ENS", "gfs00ens": "GFS-ENS", "gfs12ens": "GFS-ENS", "ecmonthly": "EC-Extended",
     "ec00": "EC Op", "gfs00": "GFS Op",
     "ecmwf-ens": "MM EC-ENS", "ecmwf-aifs-ens": "MM AIFS-ENS", "ncep-gfs-ens": "MM GFS-ENS",
+    "google-weathernext": "WeatherNext",       # Google's AI ensemble (GOOGLE_WN), in the AI models source
     # Energy Quantified tags (morning_daily_eq) — the cycle hour is appended from the issue time
     "ec-ens": "EC-ENS", "ec": "EC Op", "gfs-ens": "GFS-ENS", "gfs": "GFS Op", "aifs-ens": "AIFS-ENS",
     "aifs": "AIFS Op", "icon": "ICON", "ecsr": "EC short-range", "ec-ext": "EC-Extended", "gfs-ext": "GFS-Extended",
@@ -313,12 +333,15 @@ MORNING_SOURCES: dict[str, dict] = {
               "desc": "Volue 'Avg' ensemble means (00z / 12z) with the Volue normal, the Morning Report's own curves, "
                       "loaded by Power_dashboard/pipeline (--only volue, run_morning.bat)"},
     "AI models": {"table": "morning_daily", "provider": "Meteomatics", "reference": "ecmwf-aifs-ens", "enabled": True,
-                  "compare": ["ecmwf-ens", "ncep-gfs-ens"], "lookback_days": 10, "families": ["tt"],
+                  "compare": ["google-weathernext", "ecmwf-ens", "ncep-gfs-ens"], "lookback_days": 10, "families": ["tt"],
+                  "google": True,              # + the Google WeatherNext runs of GOOGLE_WN['table'] (scope 'region')
                   "note": "Temperature only: Meteomatics carries no wind, solar or precipitation-energy production, "
                           "so the other blocks are not shown for this source.",
                   "desc": "AI weather models through the Meteomatics method: the ECMWF AIFS-ENS ensemble mean on the "
                           "Meteomatics grid, reduced to population-weighted means on the report's regions (notebook cell 7) "
-                          "with the Volue normal; Meteomatics EC-ENS and GFS-ENS next to it, on the same method"},
+                          "with the Volue normal; Google WeatherNext 3 (ensemble mean from Google's own store, same "
+                          "weights — contains WeatherNext data from Google, CC BY 4.0), Meteomatics EC-ENS and GFS-ENS "
+                          "next to it, on the same method"},
     "EQ":    {"table": "morning_daily_eq", "reference": "ec-ens", "enabled": False,     # switched off: set True to bring it back
               "compare": ["gfs-ens", "aifs-ens", "ec", "gfs"], "lookback_days": 10,
               "desc": "Energy Quantified: every model and cycle, EQ normals; loaded by Power_dashboard/pipeline "
@@ -542,14 +565,16 @@ GAS_SOURCES: dict[str, dict] = {
     "AI models": {
         "table": "morning_daily", "provider": "Meteomatics", "lookback_days": 10, "enabled": True,
         "time_mode": "volue",                                    # Meteomatics created_at snaps to the 00z / 12z cycle
-        "patterns": ["ecmwf-aifs-ens", "ecmwf-ens", "ncep-gfs-ens"],
-        "default_patterns": ["ecmwf-aifs-ens", "ecmwf-ens"],
+        "patterns": ["ecmwf-aifs-ens", "google-weathernext", "ecmwf-ens", "ncep-gfs-ens"],
+        "default_patterns": ["ecmwf-aifs-ens", "google-weathernext", "ecmwf-ens"],
+        "google": True,                                          # + the Google WeatherNext runs (GOOGLE_WN, scope 'region')
         "region_to_area": {"de": "DE", "uk": "UK", "fr": "FR", "be": "BE", "nl": "NL", "it": "IT", "ib": "IB"},
         "prod_scale": 1.0, "rdl_regions": {}, "legs": ["ldz"],  # temperature only -> the LDZ leg only
         "note": "Temperature only: Meteomatics carries no wind or solar production, so this source has the LDZ leg "
                 "alone. BE and NL appear once the notebook has run with cell 7's be / nl regions.",
         "desc": "AI weather models through the Meteomatics method: AIFS-ENS population-weighted temperature per country "
-                "(notebook cell 7), Meteomatics EC-ENS / GFS-ENS for comparison; LDZ leg only",
+                "(notebook cell 7), Google WeatherNext 3 on the same weights (contains WeatherNext data from Google, "
+                "CC BY 4.0), Meteomatics EC-ENS / GFS-ENS for comparison; LDZ leg only",
     },
     "EQ": {
         "table": "morning_daily_eq", "lookback_days": 10, "enabled": False,                 # switched off
@@ -815,7 +840,7 @@ TELE_INDICES: dict[str, tuple[str, str]] = {
     "GWO_AMPLITUDE":   ("Tropical convection", "Global Wind Oscillation amplitude"),
 }
 TELE_DEFAULT_INDICES = ["NINO34"]
-TELE_AREAS: dict[str, str] = {**AREAS, "AT": "Austria", "CH": "Switzerland"}   # the reanalysis also has AT and CH
+TELE_AREAS: dict[str, str] = dict(AREAS)                 # incl. AT and CH, which the reanalysis also has
 TELE_REANALYSIS_BASE_YEARS = (1991, 2020)     # climatology the reanalysis anomalies are taken against (WMO normal)
 TELE_REANALYSIS_TABLE = "reanalysis_daily"
 
@@ -1050,6 +1075,7 @@ EXPECTED_HORIZON: dict[str, int] = {
     "ec-ens": 15, "ec": 15, "gfs-ens": 15, "gfs": 16, "aifs-ens": 15, "aifs": 15, "icon": 4, "ecsr": 5,
     # Meteomatics models (morning_daily, provider 'Meteomatics'): daily means over the ensemble range
     "ecmwf-ens": 15, "ecmwf-aifs-ens": 15, "ncep-gfs-ens": 16,
+    "google-weathernext": 15,           # 360 h: 15 whole UTC days from a 00z init, 14 from a 12z
     "ec-ext": 46, "gfs-ext": 35,
 }
 

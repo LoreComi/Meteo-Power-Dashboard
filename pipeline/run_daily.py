@@ -14,8 +14,13 @@ Steps, each isolated so one failure does not stop the others:
  11. wr-ecens    EC-ENS members projected onto the 7 European weather regimes to {schema}.wr_forecast_members_ecens
  12. load        Energy Quantified actual power demand and temperature per country, and the latest temperature / load
                  forecast, to {schema}.power_load_daily / power_load_fcst (the Power Demand section)
+ 13. fcst-extra  Volue (wapi) forecasts and normals the silver tables lack (AT, CH; national precipitation energy of
+                 NO SE ES IT PT; temperature normals of CZ ES PT SK SI HR NO SE DK) to {schema}.fcst_extra_daily /
+                 fcst_extra_normals — the Forecast section, merged into fcst_daily by power_desk_refresh.py cell 2
+ 14. google      Google WeatherNext 3 ensemble-mean temperature (Zarr on Google Cloud Storage), population-weighted per
+                 country and Morning Call region, to {schema}.google_wn_daily — the AI models source and the Forecast overlay
 
-    python run_daily.py                      everything, incremental
+    python run_daily.py                      everything except google, incremental
     python run_daily.py --skip-swe-model     upload only (the model already ran today)
     python run_daily.py --backfill           full history for both tables (first run)
     python run_daily.py --dry-run            no Databricks: frames to pipeline/out/, SQL logged
@@ -27,6 +32,8 @@ Steps, each isolated so one failure does not stop the others:
     python run_daily.py --only indices       the Teleconnections tab's indices (after refreshing the CSV)
     python run_daily.py --only z500 --only eq-members --only wr-ecens   the Scenarios / Weather Regimes inputs (run_scenarios.bat, twice a day)
     python run_daily.py --only load          the Power Demand section's feed (--backfill reloads the history since 2015)
+    python run_daily.py --only fcst-extra    the Forecast section's extra countries / normals (--backfill: the last 7 issue days)
+    python run_daily.py --only google        Google WeatherNext (needs zarr + obstore and a Google login; see google_weathernext.py)
 
 Exit code 0 when every requested step succeeded, 1 otherwise. Logs in pipeline/logs/.
 """
@@ -47,8 +54,11 @@ from pipeline_config import load_settings, setup_logging  # noqa: E402
 
 log = logging.getLogger("pipeline")
 STEPS = ["swe-model", "swe", "rivers", "morning", "volue", "hydro-prod", "reservoir", "indices", "z500", "eq-members",
-         "wr-ecens", "load"]
+         "wr-ecens", "load", "fcst-extra", "google"]
 UPLOAD_STEPS = [s for s in STEPS if s != "swe-model"]
+# Not part of the plain "everything" run: google needs zarr + obstore and a Google login on the machine
+# (google_weathernext.py), so it runs where it is asked for with --only google.
+ONLY_ON_REQUEST = {"google"}
 
 
 def run_swe_model(settings) -> None:
@@ -96,6 +106,7 @@ def main(argv=None) -> int:
     ap.add_argument("--skip-eq-members", action="store_true")
     ap.add_argument("--skip-wr-ecens", action="store_true")
     ap.add_argument("--skip-load", action="store_true")
+    ap.add_argument("--skip-fcst-extra", action="store_true")
     ap.add_argument("--backfill", action="store_true", help="full history instead of the incremental window")
     ap.add_argument("--dry-run", action="store_true", help="do not touch Databricks; write frames to pipeline/out/")
     ap.add_argument("--no-heightbands", action="store_true", help="skip the per-catchment height-band rows")
@@ -109,8 +120,9 @@ def main(argv=None) -> int:
 
     steps = list(a.only) if a.only else [s for s, skip in zip(STEPS, [a.skip_swe_model, a.skip_swe, a.skip_rivers, a.skip_morning,
                                                                       a.skip_volue, a.skip_hydro_prod, a.skip_reservoir, a.skip_indices,
-                                                                      a.skip_z500, a.skip_eq_members, a.skip_wr_ecens, a.skip_load])
-                                        if not skip]
+                                                                      a.skip_z500, a.skip_eq_members, a.skip_wr_ecens, a.skip_load,
+                                                                      a.skip_fcst_extra])
+                                        if not skip and s not in ONLY_ON_REQUEST]
     results: dict[str, str] = {}
     writer = None
     try:
@@ -193,6 +205,13 @@ def main(argv=None) -> int:
             except Exception as e:
                 log.exception("wr-ecens failed")
                 results["wr-ecens"] = f"FAILED: {str(e)[:200]}"
+        if "fcst-extra" in steps:
+            try:
+                import volue_fcst_extra
+                results["fcst-extra"] = f"ok {volue_fcst_extra.run(settings, writer, backfill=a.backfill)}"
+            except Exception as e:
+                log.exception("fcst-extra failed")
+                results["fcst-extra"] = f"FAILED: {str(e)[:200]}"
         if "load" in steps:
             try:
                 import eq_load
@@ -200,6 +219,13 @@ def main(argv=None) -> int:
             except Exception as e:
                 log.exception("load failed")
                 results["load"] = f"FAILED: {str(e)[:200]}"
+        if "google" in steps:
+            try:
+                import google_weathernext
+                results["google"] = f"ok {google_weathernext.run(settings, writer, backfill=a.backfill)}"
+            except Exception as e:
+                log.exception("google weathernext failed")
+                results["google"] = f"FAILED: {str(e)[:300]}"
     finally:
         if writer is not None:
             writer.close()

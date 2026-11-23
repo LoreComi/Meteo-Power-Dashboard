@@ -89,7 +89,7 @@ except Exception as e:  # governance jobs sometimes own these grants
 
 # DBTITLE 1,Lookup tables (mirror _config.py)
 AREAS = ["DE", "FR", "IT", "ES", "UK", "NL", "BE", "PL", "CZ", "HU", "NO", "SE", "FI", "DK",
-         "PT", "SI", "SK", "HR", "EE", "LV", "LT"]
+         "PT", "SI", "SK", "HR", "EE", "LV", "LT", "AT", "CH"]
 AREA_SQL = ",".join(f"'{a}'" for a in AREAS)
 
 METRICS = {
@@ -290,6 +290,50 @@ count("fcst_runs")
 # COMMAND ----------
 
 # DBTITLE 1,2. Daily ensemble statistics per run / metric / area (Volue)
+# The silver layer carries only part of Volue's catalogue: no Austria / Switzerland, precipitation
+# energy only for some zones (NO1-5, SE1-4, IB…), no national temperature normal for CZ ES PT SK SI
+# HR NO SE DK. Power_dashboard/pipeline (volue_fcst_extra.py, run_morning.bat) reads those from
+# wapi into two sandbox tables in this cell's own units and daily convention (raw Volue unit,
+# CET-day average): fcst_extra_daily (the ensemble statistics below, per run) and
+# fcst_extra_normals. They fill ONLY what silver lacks — a run / area silver has, or a normal day
+# silver has, is never taken from them — and are skipped while they do not exist.
+EXTRA_DAILY, EXTRA_NORMALS = f"{SBX}.fcst_extra_daily", f"{SBX}.fcst_extra_normals"
+
+
+def _table_ok(name: str) -> bool:
+    try:
+        spark.table(name).limit(1).collect()
+        return True
+    except Exception as e:
+        print(f"{name} not readable ({str(e)[:80]}) — skipped")
+        return False
+
+
+HAS_EXTRA_DAILY, HAS_EXTRA_NORMALS = _table_ok(EXTRA_DAILY), _table_ok(EXTRA_NORMALS)
+SCALE_CASE = "CASE {col} " + " ".join(f"WHEN '{n}' THEN {m[3]}" for n, m in METRICS.items()) + " END"
+
+
+def normals_sql(names, days_back: int = 2, days_ahead: int = 50) -> str:
+    """metric, area, day, normal (display unit) for the given METRICS names: the silver history
+    table's 'N' curves, topped up from fcst_extra_normals for the (metric, area, day) silver lacks."""
+    window = f"current_date() - INTERVAL {days_back} DAYS AND current_date() + INTERVAL {days_ahead} DAYS"
+    silver = " UNION ALL ".join(f"""
+        SELECT '{n}' AS metric, area, {CET_DAY} AS day, AVG(value) * {METRICS[n][3]} AS normal
+        FROM {VOLUE}.{METRICS[n][2]}
+        WHERE array_contains(categories, '{METRICS[n][0]}') AND data_type = 'N'
+          AND area IN ({AREA_SQL}) AND delivery_start BETWEEN {window}
+        GROUP BY area, {CET_DAY}""" for n in names)
+    if not HAS_EXTRA_NORMALS:
+        return silver
+    in_names = ",".join(f"'{n}'" for n in names)
+    return f"""
+        SELECT * FROM ({silver})
+        UNION ALL
+        SELECT e.metric, e.area, e.day, e.normal * {SCALE_CASE.format(col="e.metric")} AS normal
+        FROM {EXTRA_NORMALS} e LEFT ANTI JOIN ({silver}) s ON s.metric = e.metric AND s.area = e.area AND s.day = e.day
+        WHERE e.metric IN ({in_names}) AND e.area IN ({AREA_SQL}) AND e.day BETWEEN {window}"""
+
+
 metric_blocks = []
 for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
     metric_blocks.append(f"""
@@ -305,21 +349,32 @@ for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
     GROUP BY r.model_family, r.pattern, r.init_hour, r.reference_date, r.run_rank, r.run_label, f.area, {CET_DAY}, f.tag
     """)
 
-normal_blocks = []
-for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
-    normal_blocks.append(f"""
-    SELECT '{name}' AS metric, area, {CET_DAY} AS day, AVG(value) * {scale} AS normal
-    FROM {VOLUE}.{hist_tbl}
-    WHERE array_contains(categories, '{cat}') AND data_type = 'N'
-      AND area IN ({AREA_SQL})
-      AND delivery_start BETWEEN current_date() - INTERVAL 2 DAYS AND current_date() + INTERVAL 50 DAYS
-    GROUP BY area, {CET_DAY}
-    """)
+# the pipeline's statistics for the runs / areas silver lacks, on the same run list and ranks
+_sc = SCALE_CASE.format(col="e.metric")
+extra_cte = f""",
+extra AS (
+  SELECT 'Volue' AS provider, r.model_family, r.pattern, r.init_hour, r.reference_date, r.run_rank, r.run_label,
+         e.metric, e.area, e.day,
+         e.ens_mean * {_sc} AS ens_mean, e.p10 * {_sc} AS p10, e.p25 * {_sc} AS p25, e.p50 * {_sc} AS p50,
+         e.p75 * {_sc} AS p75, e.p90 * {_sc} AS p90, e.spread_std * {_sc} AS spread_std,
+         e.ens_min * {_sc} AS ens_min, e.ens_max * {_sc} AS ens_max, CAST(e.n_members AS BIGINT) AS n_members
+  FROM {EXTRA_DAILY} e
+  JOIN {SBX}.fcst_runs r
+    ON r.pattern = e.pattern
+   AND e.reference_date BETWEEN r.reference_date - INTERVAL 3 HOURS AND r.reference_date + INTERVAL 3 HOURS
+  WHERE e.area IN ({AREA_SQL}) AND e.day >= current_date() - INTERVAL 2 DAYS
+),
+agg_all AS (
+  SELECT * FROM agg_silver
+  UNION ALL
+  SELECT x.* FROM extra x LEFT ANTI JOIN agg_silver a
+    ON a.pattern = x.pattern AND a.reference_date = x.reference_date AND a.metric = x.metric AND a.area = x.area
+)""" if HAS_EXTRA_DAILY else ",\nagg_all AS (SELECT * FROM agg_silver)"
 
 spark.sql(f"""
 CREATE OR REPLACE TABLE {SBX}.fcst_daily AS
 WITH member_daily AS ({" UNION ALL ".join(metric_blocks)}),
-agg AS (
+agg_silver AS (
   SELECT provider, model_family, pattern, init_hour, reference_date, run_rank, run_label, metric, area, day,
          MAX(CASE WHEN tag = 'Avg' THEN value END)                          AS ens_mean,
          percentile_approx(CASE WHEN tag != 'Avg' THEN value END, 0.10)     AS p10,
@@ -333,8 +388,8 @@ agg AS (
          COUNT(DISTINCT CASE WHEN tag != 'Avg' THEN tag END)                AS n_members
   FROM member_daily
   GROUP BY provider, model_family, pattern, init_hour, reference_date, run_rank, run_label, metric, area, day
-),
-normals AS ({" UNION ALL ".join(normal_blocks)})
+){extra_cte},
+normals AS ({normals_sql(list(METRICS))})
 SELECT a.provider, a.model_family, a.pattern, a.init_hour, a.reference_date, a.run_rank, a.run_label,
        a.metric, a.area, a.day,
        DATEDIFF(a.day, DATE(a.reference_date)) AS lead_day,
@@ -345,7 +400,7 @@ SELECT a.provider, a.model_family, a.pattern, a.init_hour, a.reference_date, a.r
        CASE WHEN n.normal IS NOT NULL AND n.normal != 0
             THEN (COALESCE(a.ens_mean, a.p50) / n.normal - 1) * 100 END AS anomaly_pct,
        current_timestamp() AS snapshot_ts
-FROM agg a
+FROM agg_all a
 LEFT JOIN normals n ON n.metric = a.metric AND n.area = a.area AND n.day = a.day
 """)
 count("fcst_daily")
@@ -373,13 +428,7 @@ for label, (model, curve) in METEOMATICS_MODELS.items():
 spark.sql(f"""
 INSERT INTO {SBX}.fcst_daily
 WITH mm AS ({" UNION ALL ".join(mm_blocks)}),
-normals AS (
-  SELECT area, {CET_DAY} AS day, AVG(value) AS normal
-  FROM {VOLUE}.temperature_consumption
-  WHERE array_contains(categories, 'TT') AND data_type = 'N' AND area IN ({AREA_SQL})
-    AND delivery_start BETWEEN current_date() - INTERVAL 2 DAYS AND current_date() + INTERVAL 50 DAYS
-  GROUP BY area, {CET_DAY}
-)
+normals AS ({normals_sql(["Temperature"])})
 SELECT m.provider, m.model_family, m.pattern,
        -- the cycle this load belongs to: the latest 00z / 12z at least 5 h before created_at. The silver
        -- layer is loaded about 07:45 and 19:45 UTC and both loads of a day cover the same days with
@@ -478,25 +527,7 @@ for name, (cat, fcst_tbl, hist_tbl, scale) in METRICS.items():
 spark.sql(f"""
 CREATE OR REPLACE TABLE {SBX}.fcst_members AS
 WITH members AS ({" UNION ALL ".join(member_blocks)}),
-normals AS (
-  SELECT 'Temperature' AS metric, area, {CET_DAY} AS day, AVG(value) AS normal
-  FROM {VOLUE}.temperature_consumption
-  WHERE array_contains(categories, 'TT') AND data_type = 'N' AND area IN ({AREA_SQL})
-    AND delivery_start BETWEEN current_date() AND current_date() + INTERVAL 20 DAYS
-  GROUP BY area, {CET_DAY}
-  UNION ALL
-  SELECT 'Wind', area, {CET_DAY}, AVG(value) * 0.001
-  FROM {VOLUE}.production
-  WHERE array_contains(categories, 'WND') AND data_type = 'N' AND area IN ({AREA_SQL})
-    AND delivery_start BETWEEN current_date() AND current_date() + INTERVAL 20 DAYS
-  GROUP BY area, {CET_DAY}
-  UNION ALL
-  SELECT 'Solar', area, {CET_DAY}, AVG(value) * 0.001
-  FROM {VOLUE}.production
-  WHERE array_contains(categories, 'SPV') AND data_type = 'N' AND area IN ({AREA_SQL})
-    AND delivery_start BETWEEN current_date() AND current_date() + INTERVAL 20 DAYS
-  GROUP BY area, {CET_DAY}
-)
+normals AS ({normals_sql(["Temperature", "Wind", "Solar"], 0, 20)})
 SELECT m.provider, m.model, m.reference_date, m.metric, m.area, m.day,
        DATEDIFF(m.day, DATE(m.reference_date)) AS lead_day,
        m.member, m.value, n.normal, m.value - n.normal AS anomaly,
@@ -624,13 +655,7 @@ else:
                 AND {MM_BBOX}
               GROUP BY t.{run_col}, {CM['area']}, CAST(t.delivery_start AS DATE), t.{member_col}
             ),
-            normals AS (
-              SELECT area, {CET_DAY} AS day, AVG(value) AS normal
-              FROM {VOLUE}.temperature_consumption
-              WHERE array_contains(categories, 'TT') AND data_type = 'N' AND area IN ({AREA_SQL})
-                AND delivery_start BETWEEN current_date() AND current_date() + INTERVAL 20 DAYS
-              GROUP BY area, {CET_DAY}
-            )
+            normals AS ({normals_sql(["Temperature"], 0, 20)})
             SELECT 'Meteomatics' AS provider, '{model}' AS model, c.reference_date, 'Temperature' AS metric,
                    c.area, c.day, DATEDIFF(c.day, DATE(c.reference_date)) AS lead_day,
                    c.member, c.value, n.normal, c.value - n.normal AS anomaly, current_timestamp() AS snapshot_ts
