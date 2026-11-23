@@ -2,8 +2,9 @@
 
 Three tabs:
   Values        every Volue ensemble value by country (mean, median, P10-P90),
-                normal, earlier runs, Meteomatics EC-ENS / AIFS-ENS means and
-                the Google WeatherNext mean (the pipeline's google_wn_daily)
+                normal, earlier runs, and the model means picked in the
+                "AI models" selector — EC-AI (Meteomatics AIFS-ENS) and Google
+                WeatherNext 3 by default, Meteomatics EC-ENS on request
   Uncertainty   spread of the ensemble distribution and how it compares with
                 the normal spread for the same lead day — is this forecast
                 more or less certain than usual?
@@ -34,7 +35,7 @@ import streamlit as st
 
 from _config import (
     AREAS, DEFAULT_AREAS, ANOMALY_VIEW_DEFAULT_AREAS, METRICS, DEFAULT_METRIC, VOLUE_MODELS, DEFAULT_MODEL,
-    METEOMATICS_MODELS, SPREAD_RATIO_HIGH, SPREAD_RATIO_LOW,
+    FORECAST_OVERLAY_MODELS, FORECAST_OVERLAY_DEFAULT, SPREAD_RATIO_HIGH, SPREAD_RATIO_LOW,
     SCENARIO_SPATIAL_SOURCES, SCENARIO_DEFAULT_SOURCE, SCENARIO_K_DEFAULT, SCENARIO_K_MAX,
     SCENARIO_NWE_AREAS, SCENARIO_REGIONS, SPATIAL_GRID_RES, SPATIAL_BBOX, SPATIAL_MAP_METRIC,
     SCENARIO_SIGNAL_MIN_D, SCENARIO_TAIL_FRACTION, SCENARIO_TAIL_DRIVERS, SCENARIO_TAIL_LABELS,
@@ -122,16 +123,23 @@ def _render_values(runs: pd.DataFrame):
             run_pick = st.selectbox("Run", run_opts, key="fv_run")
         run_rank = int(fam_runs.loc[fam_runs["run_display"] == run_pick, "run_rank"].iloc[0]) if not fam_runs.empty else 1
 
-        o1, o2, _ = st.columns([1.2, 1.6, 4])
+        try:        # the selector has a label line, the checkbox has none: sit them on one baseline
+            o1, o2, _ = st.columns([1.2, 3.2, 2.4], vertical_alignment="bottom")
+        except TypeError:                                   # Streamlit < 1.36
+            o1, o2, _ = st.columns([1.2, 3.2, 2.4])
         with o1:
             show_prev = st.checkbox("Earlier runs", value=True, key="fv_prev", help="Faded ensemble-mean lines of the previous runs")
         with o2:
-            show_mm = st.checkbox("Meteomatics EC / AIFS + Google WeatherNext means", value=(metric == "Temperature"),
-                                  key="fv_mm", disabled=(metric != "Temperature"),
-                                  help="Population-weighted country mean of the Meteomatics ensemble MEAN (silver tables; "
-                                       "weights from GHS-POP, see pop_weights_0p5.csv) and, on the same weights, of the "
-                                       "Google WeatherNext 3 ensemble mean (latest run; pipeline --only google; "
-                                       "contains WeatherNext data from Google, CC BY 4.0)")
+            overlay = st.multiselect(
+                "AI models", list(FORECAST_OVERLAY_MODELS),
+                default=FORECAST_OVERLAY_DEFAULT if metric == "Temperature" else [],
+                key=f"fv_ai_{'tt' if metric == 'Temperature' else 'off'}", disabled=(metric != "Temperature"),
+                placeholder="Add a model mean" if metric == "Temperature" else "Temperature only",
+                help="Model means drawn on the Volue fan, temperature only — pick any of them. Each is the "
+                     "population-weighted country mean of the model's ensemble MEAN, latest run (weights from "
+                     "GHS-POP, pop_weights_0p5.csv): EC-AI and EC-ENS from the Meteomatics silver tables, "
+                     "WeatherNext 3 from Google's own store (pipeline --only google; contains WeatherNext data "
+                     "from Google, CC BY 4.0).")
     if not areas:
         st.info("Select at least one country.")
         return
@@ -139,12 +147,16 @@ def _render_values(runs: pd.DataFrame):
     m = METRICS[metric]
     try:
         df = load_fcst_daily(metric, tuple(areas), (family,), max_run_rank=6)
-        mm_df = (load_fcst_daily(metric, tuple(areas), tuple(METEOMATICS_MODELS.keys()), 1)
-                 if show_mm and metric == "Temperature" else pd.DataFrame())
-        if show_mm and metric == "Temperature":
-            gw_df = load_google_fcst_daily(metric, tuple(areas))     # empty until the pipeline has written a run
-            if not gw_df.empty:
-                mm_df = pd.concat([mm_df, gw_df], ignore_index=True) if not mm_df.empty else gw_df
+        mm_df = pd.DataFrame()
+        if metric == "Temperature" and overlay:
+            picked = [FORECAST_OVERLAY_MODELS[k] for k in overlay]
+            silver = tuple(m["family"] for m in picked if m["source"] == "fcst_daily")
+            parts = [load_fcst_daily(metric, tuple(areas), silver, 1)] if silver else []
+            if any(m["source"] == "google" for m in picked):
+                parts.append(load_google_fcst_daily(metric, tuple(areas)))     # empty until the pipeline has written a run
+            parts = [p for p in parts if not p.empty]
+            if parts:
+                mm_df = pd.concat(parts, ignore_index=True)
     except Exception as e:
         st.error(f"Failed to load forecast data: {e}")
         return

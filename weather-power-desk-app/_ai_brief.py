@@ -239,14 +239,17 @@ No bullets, no headers, no preamble.
 
 # ── Agent families ────────────────────────────────────────────────────────────
 # key -> (label, system prompt, which Morning Call blocks it is shown)
+# _WS_BLOCK is _config.MORNING_WS_BLOCK: the AI models source has no GW wind block, its wind is a
+# capacity-weighted 100 m wind speed in m/s without a normal — the block's name and unit say so.
+_WS_BLOCK = "Wind speed (100 m, capacity-weighted)"
 POWER_FAMILY: dict[str, tuple[str, str, list[str]]] = {
     "pw_temp":       ("Temperature → load",              _SYS_PW_TEMP,       ["Temperatures"]),
-    "pw_wind_solar": ("Wind & solar → residual load",    _SYS_PW_WIND_SOLAR, ["Wind", "Solar PV"]),
+    "pw_wind_solar": ("Wind & solar → residual load",    _SYS_PW_WIND_SOLAR, ["Wind", "Solar PV", _WS_BLOCK]),
     "pw_precip":     ("Precipitation → hydro",           _SYS_PW_PRECIP,     ["Precip (sum of coming 2 weeks)"]),
 }
 GAS_FAMILY: dict[str, tuple[str, str, list[str]]] = {
     "gas_temp":       ("Temperature → LDZ demand",       _SYS_GAS_TEMP,       ["Temperatures"]),
-    "gas_wind_solar": ("Wind & solar → gas-for-power",   _SYS_GAS_WIND_SOLAR, ["Wind", "Solar PV"]),
+    "gas_wind_solar": ("Wind & solar → gas-for-power",   _SYS_GAS_WIND_SOLAR, ["Wind", "Solar PV", _WS_BLOCK]),
 }
 FAMILIES = {
     "power": {"label": "Power market", "agents": POWER_FAMILY, "synthesis": _SYS_PW_SYNTHESIS,

@@ -1,10 +1,10 @@
-"""Google WeatherNext 3 ensemble-mean 2 m temperature → {schema}.google_wn_daily.
+"""Google WeatherNext 3 ensemble means — 2 m temperature and 100 m wind speed → {schema}.google_wn_daily.
 
-The app shows one AI model today — ECMWF's AIFS-ENS, read by the notebook from the
-Meteomatics silver tables and reduced to population-weighted means (cells 2b and 7).
-This job puts Google's AI ensemble next to it on the same method, from Google's own
-bucket, so the Morning Call / Gas Demand "AI models" source and the Forecast section's
-model-mean overlay carry both.
+The app shows one AI model from the silver layer — ECMWF's AIFS-ENS, read by the notebook
+from the Meteomatics tables and reduced to weighted means (cells 2b and 7). This job puts
+Google's AI ensemble next to it on the same method, from Google's own bucket, so the
+Morning Call / Gas Demand "AI models" source and the Forecast section's model-mean
+overlay carry both.
 
 Source — the WeatherNext 3 *statistics* store on Google Cloud Storage (Zarr v3), one
 store per initialisation:
@@ -12,9 +12,9 @@ store per initialisation:
   gs://weathernext3_statistics_spatial/weathernext_3_0_0_statistics/zarr/2026_to_present/
       <YYYYMMDD>_<HH>hr_<XX>_preds/predictions.zarr
 
-  temperature_2m_mean (lead_time, lat_0p1, lon_0p1) — the mean of the 64 members, Kelvin,
-  0.1° global grid (longitudes 0–360), hourly lead times 1 h … 360 h for the 00/06/12/18
-  UTC inits. One chunk per lead time holds the whole globe.
+  temperature_2m_mean, wind_speed_100m_mean (lead_time, lat_0p1, lon_0p1) — the mean of the
+  64 members (Kelvin, m/s), 0.1° global grid (longitudes 0–360), hourly lead times 1 h … 360 h
+  for the 00/06/12/18 UTC inits. One chunk per lead time holds the whole globe.
 
 It is opened the way Google's starter notebook does (obstore + zarr + xarray). The
 bucket is not anonymous: the reader authenticates with Google application-default
@@ -24,28 +24,32 @@ GOOGLE_APPLICATION_CREDENTIALS, else gcloud's own file (%APPDATA%\\gcloud on Win
 The statistics bucket is not Requester Pays; GOOGLE_WN_BILLING_PROJECT adds the
 x-goog-user-project header for a bucket that is (the full-ensemble one).
 
-What is computed, per run:
+What is computed, per run and per field (FIELDS):
 
   daily mean   the lead times every GOOGLE_WN_STEP_HOURS (3) are averaged into the UTC
-               day they end in (valid 03 … 24 UTC = 8 fields a day; step 1 reads all 24) —
-               the UTC day of the Meteomatics 'p1d' curves. n_points is the day's coverage
-               on the 96-per-day scale of the other morning tables (a 12z run's first and
-               last day are 48), so the app drops partial days by the rule it already has.
-  0.5° cells   the 0.1° field is averaged over the 5 × 5 points of each 0.5° cell of
-               weather-power-desk-app/pop_weights_0p5.csv (cell centre ± 0.2°)
-  means        SUM(value × population) / SUM(population) over a country's cells, and over
-               ALL the cells of a region's countries (REGION_GROUPS — the notebook's
-               MM_REGION_GROUPS), exactly as the notebook's CM fragments do
-  normal       the Volue normal the Meteomatics rows carry: per region from
+               day they end in (valid 03 … 24 UTC = 8 fields a day; step 1 reads all 24).
+               n_points is the day's coverage on the 96-per-day scale of the other morning
+               tables (a 12z run's first and last day are 48), so the app drops partial
+               days by the rule it already has.
+  0.5° cells   the 0.1° field is averaged over the 5 × 5 points of each 0.5° cell of the
+               field's weights file (cell centre ± 0.2°)
+  means        SUM(value × weight) / SUM(weight) over a country's cells, and over ALL the
+               cells of a region's countries, exactly as the notebook's joins do:
+                 tt  temperature, °C — population (pop_weights_0p5.csv), the regions of the
+                     notebook's MM_REGION_GROUPS and every country
+                 ws  100 m wind speed, m/s — installed wind capacity (wind_weights_0p5.csv,
+                     build_wind_weights.py), the regions of the notebook's MM_WIND_GROUPS:
+                     the wind where the turbines stand, not a production figure
+  normal       tt only — the Volue normal the Meteomatics rows carry: per region from
                morning_daily_volue, per country from fcst_daily (read from the sandbox;
-               left NULL on a dry run)
+               left NULL on a dry run). There is no 100 m wind-speed normal in Databricks.
 
-Table google_wn_daily — one row per run / scope / key / day (MERGE; runs older than
-GOOGLE_WN_RETENTION_DAYS pruned):
-  provider 'Google', model_family, pattern 'google-weathernext', curve_name (the Zarr
-  variable), reference_date (the INIT time, UTC — not a load time), init_hour,
-  scope ('region' = the Morning Call's regions, 'country' = the Forecast section's areas),
-  key, day, lead_day, value (°C), n_points, normal, loaded_at
+Table google_wn_daily — one row per run / family / scope / key / day (MERGE; runs older
+than GOOGLE_WN_RETENTION_DAYS pruned):
+  provider 'Google', model_family, pattern 'google-weathernext', family ('tt' | 'ws'),
+  curve_name (the Zarr variable), reference_date (the INIT time, UTC — not a load time),
+  init_hour, scope ('region' = the Morning Call's regions, 'country' = the Forecast
+  section's areas), key, day, lead_day, value, n_points, normal, loaded_at
 
     python run_daily.py --only google              the latest cycles not in the table yet
     python run_daily.py --only google --backfill   the last GOOGLE_WN_BACKFILL_RUNS cycles, re-written
@@ -70,6 +74,7 @@ import pandas as pd
 log = logging.getLogger("pipeline.google")
 
 HERE = Path(__file__).resolve().parent
+APP_DIR = HERE.parent / "weather-power-desk-app"
 
 
 def _env_list(name: str, default: str) -> list[str]:
@@ -80,7 +85,6 @@ TABLE = os.environ.get("GOOGLE_WN_TABLE", "google_wn_daily")
 BUCKET = os.environ.get("GOOGLE_WN_BUCKET", "weathernext3_statistics_spatial")
 PREFIX = os.environ.get("GOOGLE_WN_PREFIX", "weathernext_3_0_0_statistics/zarr/2026_to_present").strip("/")
 RUN_SUFFIX = os.environ.get("GOOGLE_WN_RUN_SUFFIX", "01")                  # the <XX> of <YYYYMMDD>_<HH>hr_<XX>_preds
-VARIABLE = os.environ.get("GOOGLE_WN_VARIABLE", "temperature_2m_mean")
 CYCLES = tuple(int(h) for h in _env_list("GOOGLE_WN_CYCLES", "0,12"))       # 6 and 18 exist too (360 h each)
 STEP_HOURS = int(os.environ.get("GOOGLE_WN_STEP_HOURS", "3"))              # lead times read: every N hours
 MIN_AGE_HOURS = float(os.environ.get("GOOGLE_WN_MIN_AGE_HOURS", "2"))      # a cycle is tried once it is this old
@@ -89,8 +93,6 @@ BACKFILL_RUNS = int(os.environ.get("GOOGLE_WN_BACKFILL_RUNS", "6"))
 RETENTION_DAYS = int(os.environ.get("GOOGLE_WN_RETENTION_DAYS", "10"))     # the app looks 10 days back
 CREDENTIALS = os.environ.get("GOOGLE_WN_CREDENTIALS", "")
 BILLING_PROJECT = os.environ.get("GOOGLE_WN_BILLING_PROJECT", "")
-WEIGHTS_CSV = Path(os.environ.get("GOOGLE_WN_WEIGHTS_CSV",
-                                  str(HERE.parent / "weather-power-desk-app" / "pop_weights_0p5.csv")))
 # A folder holding <run>/predictions.zarr stores read instead of the bucket (tests, a downloaded run)
 LOCAL_ROOT = os.environ.get("GOOGLE_WN_LOCAL_ROOT", "")
 
@@ -108,31 +110,53 @@ REGION_GROUPS: dict[str, list[str]] = {
     "np": ["NO", "SE", "FI", "DK"], "ib": ["ES", "PT"], "see": ["SI", "HR", "SK", "HU"],
     "be": ["BE"], "nl": ["NL"],
 }
+# The Morning Call's wind regions — power_desk_refresh.py's MM_WIND_GROUPS (cell 7). SEE is every
+# south-eastern country with wind farms in the weights (Romania and Greece carry most of it).
+WIND_REGION_GROUPS: dict[str, list[str]] = {
+    "de": ["DE"], "uk": ["UK"], "fr": ["FR"], "it": ["IT"],
+    "np": ["NO", "SE", "FI", "DK"], "ib": ["ES", "PT"],
+    "see": ["HU", "HR", "RO", "BG", "GR", "RS", "BA", "MK", "ME", "AL", "XK"],
+}
+
+# family → the Zarr variable, its weights and what is written. `kelvin`: converted to °C;
+# `valid`: the range a whole, physical field stays in (a missing chunk reads as NaN or 0).
+FIELDS: dict[str, dict] = {
+    "tt": {"variable": os.environ.get("GOOGLE_WN_VARIABLE", "temperature_2m_mean"),
+           "weights": Path(os.environ.get("GOOGLE_WN_WEIGHTS_CSV", str(APP_DIR / "pop_weights_0p5.csv"))),
+           "weight_col": "population", "groups": REGION_GROUPS, "scopes": ("country", "region"),
+           "kelvin": True, "valid": (180.0, 340.0)},
+    "ws": {"variable": os.environ.get("GOOGLE_WN_WIND_VARIABLE", "wind_speed_100m_mean"),
+           "weights": Path(os.environ.get("GOOGLE_WN_WIND_WEIGHTS_CSV", str(APP_DIR / "wind_weights_0p5.csv"))),
+           "weight_col": "capacity_mw", "groups": WIND_REGION_GROUPS, "scopes": ("region",),
+           "kelvin": False, "valid": (0.0, 90.0)},
+}
+FAMILIES = [f for f in _env_list("GOOGLE_WN_FAMILIES", "tt,ws") if f in FIELDS]
 
 COLUMNS = [
-    ("provider", "STRING"), ("model_family", "STRING"), ("pattern", "STRING"), ("curve_name", "STRING"),
-    ("reference_date", "TIMESTAMP"), ("init_hour", "INT"), ("scope", "STRING"), ("key", "STRING"),
-    ("day", "DATE"), ("lead_day", "INT"), ("value", "DOUBLE"), ("n_points", "INT"), ("normal", "DOUBLE"),
-    ("loaded_at", "TIMESTAMP"),
+    ("provider", "STRING"), ("model_family", "STRING"), ("pattern", "STRING"), ("family", "STRING"),
+    ("curve_name", "STRING"), ("reference_date", "TIMESTAMP"), ("init_hour", "INT"), ("scope", "STRING"),
+    ("key", "STRING"), ("day", "DATE"), ("lead_day", "INT"), ("value", "DOUBLE"), ("n_points", "INT"),
+    ("normal", "DOUBLE"), ("loaded_at", "TIMESTAMP"),
 ]
-KEYS = ["pattern", "reference_date", "scope", "key", "day"]
+KEYS = ["pattern", "family", "reference_date", "scope", "key", "day"]
 
 
 class RunIncomplete(RuntimeError):
     """The run's store exists but a field read from it has gaps — still being written."""
 
 
-# ─── population weights on the 0.5° grid ────────────────────────────────────────
+# ─── weights on the 0.5° grid ───────────────────────────────────────────────────
 
 class Grid:
-    """The weights file as a 0.5° cell grid, the 0.1° points each cell averages, and per
-    country / region the cells and normalised population weights of its mean."""
+    """A weights file as a 0.5° cell grid, the 0.1° points each cell averages, and per
+    country / region the cells and normalised weights of its mean."""
 
-    def __init__(self, weights: pd.DataFrame, region_groups: dict[str, list[str]] = REGION_GROUPS):
-        need = {"area", "latitude", "longitude", "population"}
+    def __init__(self, weights: pd.DataFrame, region_groups: dict[str, list[str]] = REGION_GROUPS,
+                 weight_col: str = "population", scopes: tuple = ("country", "region")):
+        need = {"area", "latitude", "longitude", weight_col}
         if not need <= set(weights.columns):
-            raise ValueError(f"population weights need the columns {sorted(need)}, got {list(weights.columns)}")
-        w = weights[weights["population"] > 0]
+            raise ValueError(f"the weights need the columns {sorted(need)}, got {list(weights.columns)}")
+        w = weights[weights[weight_col] > 0]
         res = 1.0 / 2
         self.lat_c = np.arange(w["latitude"].min(), w["latitude"].max() + res / 2, res)      # cell centres, south → north
         self.lon_c = np.arange(w["longitude"].min(), w["longitude"].max() + res / 2, res)    # west → east, −180…180
@@ -142,30 +166,33 @@ class Grid:
         i = np.rint((w["latitude"].to_numpy() - self.lat_c[0]) / res).astype(int)
         j = np.rint((w["longitude"].to_numpy() - self.lon_c[0]) / res).astype(int)
         cell = i * len(self.lon_c) + j
-        pop = w["population"].to_numpy(dtype=float)
+        wt = w[weight_col].to_numpy(dtype=float)
         area = w["area"].to_numpy()
         self.targets: list[tuple[str, str, np.ndarray, np.ndarray]] = []      # (scope, key, cells, weights)
-        for a in sorted(set(area)):
-            m = area == a
-            self.targets.append(("country", a, cell[m], pop[m] / pop[m].sum()))
-        for region, countries in region_groups.items():
-            m = np.isin(area, countries)
-            missing = [c for c in countries if c not in set(area)]
-            if missing:
-                log.warning("region %s: no population weights for %s — left out", region, ", ".join(missing))
-            if m.any():
-                self.targets.append(("region", region, cell[m], pop[m] / pop[m].sum()))
+        if "country" in scopes:
+            for a in sorted(set(area)):
+                m = area == a
+                self.targets.append(("country", a, cell[m], wt[m] / wt[m].sum()))
+        if "region" in scopes:
+            for region, countries in region_groups.items():
+                m = np.isin(area, countries)
+                missing = [c for c in countries if c not in set(area)]
+                if missing:
+                    log.warning("region %s: no %s weights for %s — left out", region, weight_col, ", ".join(missing))
+                if m.any():
+                    self.targets.append(("region", region, cell[m], wt[m] / wt[m].sum()))
 
     def means(self, field: np.ndarray) -> list[tuple[str, str, float]]:
-        """Population-weighted means of a (lat_c × lon_c) field."""
+        """Weighted means of a (lat_c × lon_c) field."""
         flat = field.ravel()
         return [(scope, key, float((flat[cells] * wts).sum())) for scope, key, cells, wts in self.targets]
 
 
-def load_grid(path: Path = WEIGHTS_CSV) -> Grid:
-    if not path.exists():
-        raise FileNotFoundError(f"population weights not found at {path} (GOOGLE_WN_WEIGHTS_CSV)")
-    return Grid(pd.read_csv(path))
+def load_grid(family: str = "tt") -> Grid:
+    f = FIELDS[family]
+    if not f["weights"].exists():
+        raise FileNotFoundError(f"{family} weights not found at {f['weights']}")
+    return Grid(pd.read_csv(f["weights"]), f["groups"], f["weight_col"], f["scopes"])
 
 
 # ─── the bucket ─────────────────────────────────────────────────────────────────
@@ -239,7 +266,7 @@ def open_run(name: str):
         return xr.open_zarr(zstore, chunks=None, decode_timedelta=True)
 
 
-# ─── one run → daily population-weighted means ──────────────────────────────────
+# ─── one run → daily weighted means ─────────────────────────────────────────────
 
 def recent_cycles(now: dt.datetime, n: int, min_age_hours: float = MIN_AGE_HOURS, cycles=CYCLES) -> list[dt.datetime]:
     """The n latest inits of `cycles` at least min_age_hours before now (UTC, naive), newest first."""
@@ -270,8 +297,10 @@ def _axis_index(coord: np.ndarray, wanted: np.ndarray, circular: bool = False) -
     return idx
 
 
-def daily_means(ds, init: dt.datetime, grid: Grid, variable: str = VARIABLE, step_hours: int = STEP_HOURS) -> pd.DataFrame:
-    """scope, key, day, value (°C), n_points for every UTC day the run covers."""
+def daily_means(ds, init: dt.datetime, grid: Grid, family: str = "tt", step_hours: int = STEP_HOURS) -> pd.DataFrame:
+    """scope, key, day, value, n_points for every UTC day the run covers, for one field of FIELDS."""
+    spec = FIELDS[family]
+    variable = spec["variable"]
     if variable not in ds.variables:
         raise KeyError(f"{variable} is not in the store (it has {len(ds.data_vars)} variables, e.g. "
                        f"{', '.join(list(ds.data_vars)[:4])})")
@@ -302,24 +331,21 @@ def daily_means(ds, init: dt.datetime, grid: Grid, variable: str = VARIABLE, ste
     per_day = 24 // step_hours
     out = []
     t0 = time.time()
-    kelvin = None
+    lo_ok, hi_ok = spec["valid"]
     for day in days.unique():
         idx = keep[days == day]
         band = _read(da, {lead_dim: idx, lat_dim: slice(lo, hi)})     # (n, lat band, every longitude)
         fine = band[:, rows_in_band][:, :, ilon]                      # (n, 0.1° window south → north, west → east)
-        if kelvin is None:
-            kelvin = bool(np.nanmedian(fine[0]) > 150)                # Kelvin, as documented
-        lo_ok, hi_ok = (180.0, 340.0) if kelvin else (-95.0, 65.0)
         # A chunk not written yet reads as the store's fill value (NaN or 0): every field must be
-        # a whole, physical temperature field before it is averaged into the day.
+        # a whole, physical field before it is averaged into the day.
         if not np.isfinite(fine).all() or fine.min() < lo_ok or fine.max() > hi_ok:
             raise RunIncomplete(f"{variable} has gaps or fill values on {day:%Y-%m-%d} — the run is still being written")
         cells = fine.mean(axis=0, dtype=np.float64).reshape(n_lat, FINE_PER_CELL, n_lon, FINE_PER_CELL).mean(axis=(1, 3))
-        if kelvin:
+        if spec["kelvin"]:
             cells = cells - 273.15
         n_points = int(round(N_POINTS_FULL * len(idx) / per_day))
         out += [(scope, key, day.date(), value, n_points) for scope, key, value in grid.means(cells)]
-        log.info("  %s: %d fields (%.0f s)", f"{day:%d %b}", len(idx), time.time() - t0)
+    log.info("  %s: %d days, %d fields (%.0f s)", variable, len(days.unique()), len(keep), time.time() - t0)
     return pd.DataFrame(out, columns=["scope", "key", "day", "value", "n_points"])
 
 
@@ -337,9 +363,10 @@ def _read(da, sel: dict) -> np.ndarray:
     raise RuntimeError(_explain(last))
 
 
-def build_frame(means: pd.DataFrame, init: dt.datetime, loaded: pd.Timestamp) -> pd.DataFrame:
+def build_frame(means: pd.DataFrame, init: dt.datetime, loaded: pd.Timestamp, family: str = "tt") -> pd.DataFrame:
     df = means.copy()
-    df["provider"], df["model_family"], df["pattern"], df["curve_name"] = PROVIDER, MODEL_FAMILY, PATTERN, VARIABLE
+    df["provider"], df["model_family"], df["pattern"] = PROVIDER, MODEL_FAMILY, PATTERN
+    df["family"], df["curve_name"] = family, FIELDS[family]["variable"]
     df["reference_date"] = pd.Timestamp(init)
     df["init_hour"] = int(init.hour)
     df["lead_day"] = [(d - init.date()).days for d in df["day"]]
@@ -351,11 +378,12 @@ def build_frame(means: pd.DataFrame, init: dt.datetime, loaded: pd.Timestamp) ->
 # ─── sandbox reads: the Volue normals, the runs already loaded ──────────────────
 
 def load_normals(writer, schema: str) -> pd.DataFrame:
-    """scope, key, day, normal — the Volue temperature normal per Morning Call region
-    (morning_daily_volue) and per country (the Volue rows of fcst_daily). Empty on a dry run."""
+    """family 'tt': scope, key, day, normal — the Volue temperature normal per Morning Call
+    region (morning_daily_volue) and per country (the Volue rows of fcst_daily). Empty on a dry run."""
+    cols = ["family", "scope", "key", "day", "normal"]
     query = getattr(writer, "query_df", None)
     if query is None:
-        return pd.DataFrame(columns=["scope", "key", "day", "normal"])
+        return pd.DataFrame(columns=cols)
     regions = ",".join(f"'{r}'" for r in REGION_GROUPS)
     parts = []
     for scope, sql in (
@@ -375,19 +403,23 @@ def load_normals(writer, schema: str) -> pd.DataFrame:
             d["scope"] = scope
             parts.append(d)
     if not parts:
-        return pd.DataFrame(columns=["scope", "key", "day", "normal"])
+        return pd.DataFrame(columns=cols)
     n = pd.concat(parts, ignore_index=True)
+    n["family"] = "tt"
     n["day"] = pd.to_datetime(n["day"]).dt.date
     n["normal"] = pd.to_numeric(n["normal"], errors="coerce")
-    return n[["scope", "key", "day", "normal"]]
+    return n[cols]
 
 
-def runs_in_table(writer, table: str) -> set[pd.Timestamp]:
+def runs_in_table(writer, table: str, families: list[str] = FAMILIES) -> set[pd.Timestamp]:
+    """The runs the table holds with every family — a run loaded before a family was added is redone."""
     query = getattr(writer, "query_df", None)
     if query is None:
         return set()
+    fam = ",".join(f"'{f}'" for f in families)
     try:
-        d = query(f"SELECT DISTINCT reference_date FROM {table} WHERE pattern = '{PATTERN}'")
+        d = query(f"SELECT reference_date FROM {table} WHERE pattern = '{PATTERN}' AND family IN ({fam}) "
+                  f"GROUP BY reference_date HAVING COUNT(DISTINCT family) >= {len(families)}")
     except Exception as e:
         log.info("%s: cannot list its runs (%s) — treating as empty", table, str(e)[:120])
         return set()
@@ -404,11 +436,12 @@ def run(settings, writer, backfill: bool = False, now: dt.datetime | None = None
     now = now or dt.datetime.utcnow()
     table = f"{settings.schema}.{TABLE}"
     writer.ensure_table(table, COLUMNS,
-                        "Google WeatherNext 3 ensemble-mean 2 m temperature (statistics Zarr store on Google Cloud Storage): "
-                        "daily UTC-day means, population-weighted per country and per Morning Call region, with the Volue "
-                        "normal; reference_date = the init time. Contains WeatherNext data from Google (CC BY 4.0). "
+                        "Google WeatherNext 3 ensemble means (statistics Zarr store on Google Cloud Storage): daily UTC-day "
+                        "means of 2 m temperature (family tt, population-weighted per country and Morning Call region, with the "
+                        "Volue normal) and 100 m wind speed (family ws, weighted by installed wind capacity per region); "
+                        "reference_date = the init time. Contains WeatherNext data from Google (CC BY 4.0). "
                         "Written by Power_dashboard/pipeline (google_weathernext.py).")
-    grid = load_grid()
+    grids = {f: load_grid(f) for f in FAMILIES}
     cycles = recent_cycles(now, BACKFILL_RUNS if backfill else RUNS_PER_PASS)
     have = set() if backfill else runs_in_table(writer, table)
     todo = [c for c in cycles if pd.Timestamp(c) not in have]
@@ -442,11 +475,12 @@ def run(settings, writer, backfill: bool = False, now: dt.datetime | None = None
             log.info("%s: not in the bucket yet", f"{init:%Y-%m-%d %Hz}")
             waiting.append(f"{init:%Y-%m-%d %Hz}")
             continue
-        log.info("%s: reading %s every %d h from %s", f"{init:%Y-%m-%d %Hz}", VARIABLE, STEP_HOURS, name)
+        log.info("%s: reading %s every %d h from %s", f"{init:%Y-%m-%d %Hz}",
+                 ", ".join(FIELDS[f]["variable"] for f in FAMILIES), STEP_HOURS, name)
         try:
             ds = open_run(name)
-            means = daily_means(ds, init, grid)
-        except RunIncomplete as e:
+            parts = [build_frame(daily_means(ds, init, grids[f], f), init, loaded, f) for f in FAMILIES]
+        except RunIncomplete as e:                              # a run is written whole or not at all
             log.info("%s: %s", f"{init:%Y-%m-%d %Hz}", e)
             waiting.append(f"{init:%Y-%m-%d %Hz}")
             continue
@@ -454,7 +488,7 @@ def run(settings, writer, backfill: bool = False, now: dt.datetime | None = None
             raise                                               # the store is not what the docs describe
         except Exception as e:
             raise RuntimeError(_explain(e)) from e
-        frames.append(build_frame(means, init, loaded))
+        frames += parts
         done.append(f"{init:%Y-%m-%d %Hz}")
     if not frames:
         return {"runs": [], "rows": 0, "waiting": waiting}
@@ -462,11 +496,12 @@ def run(settings, writer, backfill: bool = False, now: dt.datetime | None = None
     df = pd.concat(frames, ignore_index=True)
     normals = load_normals(writer, settings.schema)
     if not normals.empty:
-        df = df.drop(columns=["normal"]).merge(normals, on=["scope", "key", "day"], how="left")[[c for c, _ in COLUMNS]]
+        df = df.drop(columns=["normal"]).merge(normals, on=["family", "scope", "key", "day"], how="left")[[c for c, _ in COLUMNS]]
     n = writer.merge(table, df, KEYS)
     writer.prune(table, f"reference_date < current_timestamp() - INTERVAL {RETENTION_DAYS} DAYS")
     full = df[df["n_points"] >= 0.9 * N_POINTS_FULL]
-    summary = {"runs": done, "rows": n, "days": int(full["day"].nunique()), "keys": int(df["key"].nunique()),
-               "with_normal": int(df["normal"].notna().sum()), "waiting": waiting, "seconds": round(time.time() - t0)}
+    summary = {"runs": done, "rows": n, "families": df.groupby("family").size().to_dict(),
+               "days": int(full["day"].nunique()), "with_normal": int(df["normal"].notna().sum()),
+               "waiting": waiting, "seconds": round(time.time() - t0)}
     log.info("google weathernext done: %s", summary)
     return summary

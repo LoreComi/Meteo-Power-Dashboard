@@ -16,7 +16,10 @@ Tables written (all read by weather-power-desk-app/_data.py):
   pop_weights           persons per country per 0.5° grid point (GHS-POP 2025),
                         loaded once from pop_weights_0p5.csv — every Meteomatics
                         country mean below is population-weighted with it
-  fcst_runs             one row per (model_family, pattern, reference_date) kept
+  wind_weights          MW of wind farms per country per 0.5° grid point, loaded once
+                        from wind_weights_0p5.csv — the weights of the Meteomatics
+                        models' capacity-weighted wind speed in morning_daily (family 'ws')
+  fcst_runs            one row per (model_family, pattern, reference_date) kept
   fcst_daily            daily ensemble stats per provider/model/run/metric/area:
                         ens_mean, p10..p90, spread_std, min, max, n_members,
                         normal, anomaly, lead_day
@@ -166,6 +169,7 @@ CET_DAY = "DATE(from_utc_timestamp(delivery_start, 'CET'))"
 POP_WEIGHTS_PATH = os.environ.get(
     "POP_WEIGHTS_PATH",
     "/Workspace/Users/lorenzo.comi@axpo.com/Meteo-Power-Dashboard/weather-power-desk-app/pop_weights_0p5.csv")
+WIND_WEIGHTS_PATH = os.environ.get("WIND_WEIGHTS_PATH", os.path.join(os.path.dirname(POP_WEIGHTS_PATH), "wind_weights_0p5.csv"))
 POP_GRID_RES = 0.5                      # the weights' grid step — the Meteomatics silver grid
 # Pruning box for every gridded Meteomatics read (alias `t`): the weights' extent.
 MM_BBOX = "t.latitude BETWEEN 34 AND 72 AND t.longitude BETWEEN -12 AND 36"
@@ -203,6 +207,22 @@ else:
     print(f"!! {POP_WEIGHTS_PATH} not found — Meteomatics country means fall back to bounding-box "
           "averages until the file is uploaded and this cell re-run")
 POP_WEIGHTED = spark.catalog.tableExists(f"{SBX}.pop_weights")
+
+# Wind-capacity weights, the same way: per country and 0.5° grid point the MW of wind farms
+# standing in that cell (build_wind_weights.py, from wind_power_europe.gpkg) — the weights of
+# the capacity-weighted wind speed of cell 7. The local pipeline creates the table too
+# (pipeline/google_weathernext.py reads the same CSV), so it is normally already there.
+if spark.catalog.tableExists(f"{SBX}.wind_weights"):
+    print("wind_weights already loaded — skipping (drop the table to reload a new file)")
+elif os.path.exists(WIND_WEIGHTS_PATH):
+    import pandas as _pd
+    _ww = _pd.read_csv(WIND_WEIGHTS_PATH)
+    assert {"area", "latitude", "longitude", "capacity_mw"} <= set(_ww.columns), list(_ww.columns)
+    spark.createDataFrame(_ww).write.mode("overwrite").saveAsTable(f"{SBX}.wind_weights")
+    print(f"wind_weights: {len(_ww):,} cells, {_ww['area'].nunique()} countries, {_ww['capacity_mw'].sum() / 1e3:,.1f} GW")
+else:
+    print(f"!! {WIND_WEIGHTS_PATH} not found — no capacity-weighted wind speed for the Meteomatics models (cell 7)")
+WIND_WEIGHTED = spark.catalog.tableExists(f"{SBX}.wind_weights")
 
 
 def snap(col: str) -> str:
@@ -1168,6 +1188,52 @@ FROM mm LEFT JOIN n2 ON n2.region = mm.region AND n2.day = mm.day
 WHERE mm.region IS NOT NULL
 """)
 count("morning_daily")
+
+# The same models' 100 m wind speed on the report's wind regions (family 'ws', m/s), weighted by
+# installed wind capacity (wind_weights, cell 1a): the wind where the turbines stand — a region's
+# value is SUM(value × MW) / SUM(MW) over ALL the cells of its countries, offshore included. Not a
+# production figure. SEE is every south-eastern country with wind farms in the weights. Mirrored by
+# pipeline/google_weathernext.py (WIND_REGION_GROUPS) for the WeatherNext rows — keep them in sync.
+#   - No normal: Databricks has no 100 m wind-speed climatology (gold carries 200 / 10 hPa only).
+#   - What a row is: the silver 'p1d' wind rows hold ONE instantaneous value a day, at the load's
+#     time of day (≈ 07:18 UTC for the morning load, ≈ 19:18 for the evening one) — checked
+#     2026-11-23 against WeatherNext's 3-hourly fields: they match its wind at that hour (0.3–0.4 m/s)
+#     twice as well as any 24 h mean (0.6–0.7 m/s). So a run compares with the same cycle's earlier
+#     run, and a 00z row is the morning wind while a 12z row is the evening wind.
+MM_WIND_GROUPS = {"de": ["DE"], "uk": ["UK"], "fr": ["FR"], "it": ["IT"],
+                  "np": ["NO", "SE", "FI", "DK"], "ib": ["ES", "PT"],
+                  "see": ["HU", "HR", "RO", "BG", "GR", "RS", "BA", "MK", "ME", "AL", "XK"]}
+MORNING_MM_WIND = {"ecmwf-aifs-ens": "wind_speed_100m_ms_ecmwf_aifs_ens_p1d",
+                   "ecmwf-ens": "wind_speed_100m_ms_ecmwf_ens_p1d",
+                   "ncep-gfs-ens": "wind_speed_100m_ms_ncep_gfs_ens_p1d"}
+if WIND_WEIGHTED:
+    ws_region_values = ", ".join(f"('{r}', '{c}')" for r, cs in MM_WIND_GROUPS.items() for c in cs)
+    ws_blocks = []
+    for model, curve in MORNING_MM_WIND.items():
+        ws_blocks.append(f"""
+        SELECT 'ws' AS family, r.region, '{model}' AS pattern, c.reference_date, c.day,
+               SUM(c.value * c.weight) / SUM(c.weight) AS value
+        FROM (SELECT t.created_at AS reference_date, CAST(t.delivery_start AS DATE) AS day, t.value,
+                     w.area, w.capacity_mw AS weight
+              FROM {MM}.wind_speed_forecast t
+              JOIN {SBX}.wind_weights w ON w.latitude = {snap('t.latitude')} AND w.longitude = {snap('t.longitude')}
+              WHERE t.model = '{model}' AND t.curve_name = '{curve}'
+                AND t.created_at >= current_timestamp() - INTERVAL {MORNING_RUN_HISTORY_DAYS} DAYS
+                AND {MM_BBOX}) c
+        JOIN regions r ON r.area = c.area
+        GROUP BY r.region, c.reference_date, c.day
+        """)
+    spark.sql(f"""
+    INSERT INTO {SBX}.morning_daily
+    WITH regions AS (SELECT * FROM VALUES {ws_region_values} AS r(region, area)),
+    ws AS ({" UNION ALL ".join(ws_blocks)})
+    SELECT 'Meteomatics', ws.family, ws.region, ws.pattern, ws.pattern AS curve_name, ws.reference_date, ws.day, ws.value,
+           96 AS n_points, CAST(NULL AS DOUBLE) AS normal, current_timestamp()
+    FROM ws
+    """)
+    count("morning_daily")
+else:
+    print("no wind_weights table — the Meteomatics models carry no wind-speed rows")
 
 # COMMAND ----------
 

@@ -472,6 +472,10 @@ def _cell_html(r: pd.Series, c: RunCol, region: str, wtitle: str, block: dict, s
     sup = f'<sup class="mcg-n">{n_days}d</sup>' if span and 0 < n_days < span else ""
     tip = _cell_tip(c, region, wtitle, r, block, span)
     if view_key == "pair":
+        if not block.get("has_normal", True):
+            # a block without a normal (the AI models' wind speed): the change vs the earlier run is the pill
+            return (f'<td class="{cls}" title="{tip}"><div class="mcg-pair">{_pill(float(r["d_run"]), block)}</div>'
+                    f'<div class="mcg-abs">{fmt.format(v)}{sup}</div></td>')
         return (f'<td class="{cls}" title="{tip}"><div class="mcg-pair">{_pill(float(r["d_norm"]), block)}'
                 f'{_move(float(r["d_run"]), block)}</div><div class="mcg-abs">{fmt.format(v)}{sup}</div></td>')
     if view_key is None:
@@ -502,6 +506,9 @@ def _grid_block_html(cells: pd.DataFrame, name: str, block: dict, cols: list[Run
     colgroup = '<colgroup><col class="mcg-c0">' + "<col>" * (2 * per_win) + "</colgroup>"
     corner_sub = {"pair": f"Δ norm ▲▼ {delta_label} · abs", None: f"abs · {delta_label} · Δ norm", "d_norm": "Δ norm",
                   "d_run": delta_label, "d_ref": "Δ vs reference run", "value": "abs. value"}[view_key]
+    if not block.get("has_normal", True):
+        corner_sub = {"pair": f"{delta_label} · abs · no normal", None: f"abs · {delta_label} · no normal",
+                      "d_norm": "no normal"}.get(view_key, corner_sub)
     short = name.split(" (")[0]          # "Precip (sum of coming 2 weeks)" → "Precip"; the group header says the rest
     head1 = (f'<tr><th class="mcg-corner" rowspan="2"><div><span class="mcg-corner-name">{short}</span> '
              f'<span class="mcg-corner-unit">[{block["unit"]}]</span></div>'
@@ -834,7 +841,7 @@ def render_morning_call():
     st.markdown("#### MORNING CALL")
     source, phone = _layout_and_source()
     src = MORNING_SOURCES[source]
-    # the blocks this source can fill (the AI models carry temperature only)
+    # the blocks this source can fill (the AI models: temperature and capacity-weighted wind speed)
     blocks = {n: b for n, b in MORNING_BLOCKS.items() if not src.get("families") or b["family"] in src["families"]}
     if phone:
         st.markdown(PHONE_CSS, unsafe_allow_html=True)
@@ -908,8 +915,8 @@ def render_morning_call():
             cmp_keys = st.multiselect("Compare columns", keys, default=cmp_default, key="mcg_cols",
                                       help="Any runs — other models' latest, or earlier cycles of the same model. "
                                            "Each gets the same three numbers as the reference, plus its Δ vs the "
-                                           "reference; in the chart they are the diamonds. Meteomatics rows carry "
-                                           "temperature only.")
+                                           "reference; in the chart they are the diamonds. The AI models carry "
+                                           "temperature and 100 m wind speed only.")
         with c3:
             rule_key = st.selectbox("Δ run vs", list(MORNING_PREV_RULES), key="mcg_prev",
                                     help="The earlier run every column's Δ run is taken against — the same "

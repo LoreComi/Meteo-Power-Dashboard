@@ -66,7 +66,9 @@ RIVER_FORECAST_RUNS=1
 # GOOGLE_WN_CYCLES=0,12                  inits loaded (6 and 18 exist too, 360 h each)
 # GOOGLE_WN_STEP_HOURS=3                 lead times read per day: every N hours (1 = all 24; one 26 MB global field each)
 # GOOGLE_WN_MIN_AGE_HOURS=2              a cycle is tried once it is this old (>= 1: younger data is not CC BY; Google publishes ~6.5 h after the init)
-# GOOGLE_WN_RUN_SUFFIX=01                the <XX> of the run folder <YYYYMMDD>_<HH>hr_<XX>_preds
+# GOOGLE_WN_FAMILIES=tt,ws               fields loaded: tt = 2 m temperature (population weights), ws = 100 m wind speed (wind-capacity weights)
+# GOOGLE_WN_WIND_VARIABLE=wind_speed_100m_mean   GOOGLE_WN_WIND_WEIGHTS_CSV=...\weather-power-desk-app\wind_weights_0p5.csv
+# GOOGLE_WN_RUN_SUFFIX=01               the <XX> of the run folder <YYYYMMDD>_<HH>hr_<XX>_preds
 # GOOGLE_WN_RUNS=2   GOOGLE_WN_BACKFILL_RUNS=6   GOOGLE_WN_RETENTION_DAYS=10
 # GOOGLE_WN_BUCKET=weathernext3_statistics_spatial
 # GOOGLE_WN_PREFIX=weathernext_3_0_0_statistics/zarr/2026_to_present     GOOGLE_WN_VARIABLE=temperature_2m_mean

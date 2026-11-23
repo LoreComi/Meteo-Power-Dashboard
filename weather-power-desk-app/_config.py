@@ -240,6 +240,16 @@ GOOGLE_WN: dict = {
 # Run patterns whose reference_date already is the init time (_data.init_time_for)
 INIT_STAMPED_PATTERNS: set[str] = {GOOGLE_WN["pattern"]}
 
+# The model means the Forecast section's values view can add to the Volue fan (temperature only),
+# picked in its "AI models" selector: label -> the model_family of its rows and where they are
+# read ('fcst_daily' = the notebook's Meteomatics rows, 'google' = GOOGLE_WN['table']).
+FORECAST_OVERLAY_MODELS: dict[str, dict] = {
+    "EC-AI (AIFS-ENS)":    {"family": "Meteomatics AIFS-ENS", "source": "fcst_daily"},
+    "WeatherNext 3":       {"family": GOOGLE_WN["model_family"], "source": "google"},
+    "EC-ENS (Meteomatics)": {"family": "Meteomatics EC-ENS", "source": "fcst_daily"},
+}
+FORECAST_OVERLAY_DEFAULT: list[str] = ["EC-AI (AIFS-ENS)", "WeatherNext 3"]
+
 # ══════════════════════════════════════════════════════════════════════════════
 # UNCERTAINTY
 # ══════════════════════════════════════════════════════════════════════════════
@@ -258,6 +268,7 @@ SPREAD_RATIO_LOW = 0.7               # below this = unusually confident
 # ±heat_scale saturates the shade, so the same colour means the same magnitude
 # every morning. Polarity follows the app's diverging convention (_style.py):
 # red = warmer, or less wind / solar / precipitation; blue = colder, or more.
+MORNING_WS_BLOCK = "Wind speed (100 m, capacity-weighted)"      # the AI models' wind block (also named in _ai_brief.py)
 MORNING_BLOCKS: dict[str, dict] = {
     "Temperatures": {
         "family": "tt", "unit": "°C", "scale": 1.0, "agg": "mean", "fmt": "{:.1f}",
@@ -281,6 +292,20 @@ MORNING_BLOCKS: dict[str, dict] = {
         "heat_scale": 1.0, "warm_is_positive": False,
         # Alps = cwe + it-nord, exactly as the report does
         "rows": [("Alps", ["cwe", "it-nord"]), ("Nordic", "np"), ("SEE", "see"), ("Iberia", "ib")],
+    },
+    # The AI models' wind (family 'ws'): 100 m wind SPEED weighted by installed wind capacity per
+    # region (wind_weights_0p5.csv, build_wind_weights.py) — the wind where the turbines stand, not
+    # a GW figure, and without a normal (Databricks has no 100 m wind climatology), so Δ norm is n/a.
+    # Shown only by sources whose `families` list it. SEE here is HU HR RO BG GR RS BA MK ME AL XK.
+    # The Meteomatics rows are ONE instantaneous value a day (≈ 07:18 UTC on the morning load,
+    # ≈ 19:18 on the evening one — the silver 'p1d' wind curves); the WeatherNext rows are the
+    # mean of the UTC day.
+    MORNING_WS_BLOCK: {
+        "family": "ws", "unit": "m/s", "scale": 1.0, "agg": "mean", "fmt": "{:.1f}",
+        "heat_scale": 1.5, "warm_is_positive": False,
+        "has_normal": False,              # the grid's default cell leads with the Δ run instead of an n/a anomaly
+        "rows": [("DE", "de"), ("UK", "uk"), ("FRA", "fr"), ("ITA", "it"), ("SEE", "see"),
+                 ("Nordic", "np"), ("Iberia", "ib")],
     },
 }
 
@@ -330,20 +355,26 @@ MORNING_MODEL_LABELS: dict[str, str] = {
 MORNING_SOURCES: dict[str, dict] = {
     "Volue": {"table": "morning_daily_volue", "reference": "ec00ens", "enabled": True,
               "compare": ["gfs00ens", "ec12ens", "gfs12ens"], "lookback_days": 10,
+              "families": ["tt", "wnd", "spv", "rre"],
               "desc": "Volue 'Avg' ensemble means (00z / 12z) with the Volue normal, the Morning Report's own curves, "
                       "loaded by Power_dashboard/pipeline (--only volue, run_morning.bat)"},
     "AI models": {"table": "morning_daily", "provider": "Meteomatics", "reference": "ecmwf-aifs-ens", "enabled": True,
-                  "compare": ["google-weathernext", "ecmwf-ens", "ncep-gfs-ens"], "lookback_days": 10, "families": ["tt"],
+                  "compare": ["google-weathernext", "ecmwf-ens", "ncep-gfs-ens"], "lookback_days": 10,
+                  "families": ["tt", "ws"],
                   "google": True,              # + the Google WeatherNext runs of GOOGLE_WN['table'] (scope 'region')
-                  "note": "Temperature only: Meteomatics carries no wind, solar or precipitation-energy production, "
-                          "so the other blocks are not shown for this source.",
+                  "note": "Temperature and 100 m wind speed: the weather models carry no wind, solar or "
+                          "precipitation-energy production, so the wind is a capacity-weighted speed in m/s without a "
+                          "normal, and the solar and precipitation blocks are not shown for this source.",
                   "desc": "AI weather models through the Meteomatics method: the ECMWF AIFS-ENS ensemble mean on the "
                           "Meteomatics grid, reduced to population-weighted means on the report's regions (notebook cell 7) "
                           "with the Volue normal; Google WeatherNext 3 (ensemble mean from Google's own store, same "
                           "weights — contains WeatherNext data from Google, CC BY 4.0), Meteomatics EC-ENS and GFS-ENS "
-                          "next to it, on the same method"},
+                          "next to it, on the same method. Wind: 100 m wind speed weighted by installed wind capacity "
+                          "per region, in m/s, no normal — a daily mean for WeatherNext, one moment a day (about 07 UTC "
+                          "for a 00z run, 19 UTC for a 12z) for the Meteomatics models"},
     "EQ":    {"table": "morning_daily_eq", "reference": "ec-ens", "enabled": False,     # switched off: set True to bring it back
               "compare": ["gfs-ens", "aifs-ens", "ec", "gfs"], "lookback_days": 10,
+              "families": ["tt", "wnd", "spv", "rre"],
               "desc": "Energy Quantified: every model and cycle, EQ normals; loaded by Power_dashboard/pipeline "
                       "(--only morning) every couple of hours"},
 }

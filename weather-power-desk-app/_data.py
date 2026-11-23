@@ -276,18 +276,19 @@ def _google_version_for(cfg: dict) -> str:
 
 
 def _google_region_rows(lookback_days: int) -> pd.DataFrame:
-    """The WeatherNext runs in the layout of morning_daily (family 'tt', the Morning Call's
-    regions) — raw strings, as run_query returns them. Empty when there is nothing to read."""
+    """The WeatherNext runs in the layout of morning_daily (families 'tt' — temperature — and
+    'ws' — capacity-weighted 100 m wind speed — on the Morning Call's regions) — raw strings,
+    as run_query returns them. Empty when there is nothing to read."""
     if not GOOGLE_WN.get("enabled") or _google_wn_version() in ("off", "none"):
         return pd.DataFrame()
     try:
         return run_query(f"""
-            SELECT provider, 'tt' AS family, key AS region, pattern, reference_date, day,
+            SELECT provider, COALESCE(family, 'tt') AS family, key AS region, pattern, reference_date, day,
                    value, n_points, normal
             FROM {SBX_SCHEMA}.{GOOGLE_WN['table']}
             WHERE scope = 'region' AND pattern = :pattern
               AND reference_date >= current_timestamp() - INTERVAL {int(lookback_days)} DAYS
-            ORDER BY key, reference_date, day
+            ORDER BY family, key, reference_date, day
         """, {"pattern": GOOGLE_WN["pattern"]})
     except Exception as e:
         log.info("google weathernext rows not read: %s", str(e)[:200])
@@ -314,9 +315,10 @@ def _load_google_fcst_daily(areas: tuple[str, ...], version: str) -> pd.DataFram
                    'Temperature' AS metric, key AS area, day, lead_day, value AS ens_mean,
                    normal, value - normal AS anomaly
             FROM {t}
-            WHERE scope = 'country' AND pattern = :pattern AND key IN ({_in("area", areas, p)})
+            WHERE scope = 'country' AND family = 'tt' AND pattern = :pattern AND key IN ({_in("area", areas, p)})
               AND n_points >= {int(GOOGLE_WN['min_points'])}
-              AND reference_date = (SELECT MAX(reference_date) FROM {t} WHERE scope = 'country' AND pattern = :pattern)
+              AND reference_date = (SELECT MAX(reference_date) FROM {t}
+                                    WHERE scope = 'country' AND family = 'tt' AND pattern = :pattern)
             ORDER BY key, day
         """, p)
     except Exception as e:
@@ -735,7 +737,7 @@ def _load_gas_demand_daily(source: str, version: str) -> pd.DataFrame:
         if cfg.get("google"):
             extra = _google_region_rows(lookback)
             if not extra.empty:
-                extra = extra[extra["region"].isin(list(r2a))]
+                extra = extra[extra["region"].isin(list(r2a)) & extra["family"].isin(["tt", "wnd", "spv"])]
                 df = pd.concat([df, extra], ignore_index=True) if not df.empty else extra
         if df.empty:
             return df
