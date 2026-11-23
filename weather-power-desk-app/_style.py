@@ -424,7 +424,7 @@ hr {{ border-color: var(--border) !important; }}
 [data-baseweb="tag"] span {{ color: {CAT_BLUE} !important; font-weight: 600; }}
 [data-baseweb="tag"] svg {{ fill: {CAT_BLUE} !important; }}
 /* "How to read this ?" tips — explanations live only behind the "?" */
-.info-tip {{ font-size: 0.72rem; font-weight: 600; color: var(--text-muted) !important; margin: -2px 0 6px; }}
+.info-tip {{ display: inline-block; font-size: 0.72rem; font-weight: 600; color: var(--text-muted) !important; margin: -2px 0 6px; }}
 /* Morning Call table — the Excel sheet, as HTML */
 .mc-block {{
     background: var(--bg-surface);

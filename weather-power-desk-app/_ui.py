@@ -219,8 +219,12 @@ def page_header(icon: str, eyebrow: str, title: str, subtitle: str = "", color: 
 
 def info_tip(text: str, label: str = "How to read this") -> None:
     """An explanation kept out of the page: a small muted label with a "?" that shows `text`
-    on hover. On a Streamlit whose st.markdown has no `help`, nothing is drawn."""
+    on hover. On a Streamlit whose st.markdown has no `help`, nothing is drawn.
+
+    The label must be INLINE html: Streamlit draws the "?" by appending ` :help[]` to the
+    markdown source, and a line opening with a block tag (<div>) is a raw-HTML block in
+    CommonMark, which swallows that marker and prints it as text ("How to read this :help[]")."""
     try:
-        st.markdown(f'<div class="info-tip">{label}</div>', unsafe_allow_html=True, help=text)
+        st.markdown(f'<span class="info-tip">{label}</span>', unsafe_allow_html=True, help=text)
     except TypeError:
         pass
