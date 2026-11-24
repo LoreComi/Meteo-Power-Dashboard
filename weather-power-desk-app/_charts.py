@@ -24,6 +24,7 @@ from _style import (
 )
 
 from _config import MAP_EUROPE_BBOX, HYDRO_MAP_EXTENT
+from _hydro_quantify import year_label
 
 AREA_COLORS: dict[str, str] = {code: CATEGORICAL[i % len(CATEGORICAL)] for i, code in enumerate(AREAS)}
 RUN_OPACITY = {1: 1.0, 2: 0.55, 3: 0.4, 4: 0.3, 5: 0.22, 6: 0.16}
@@ -773,6 +774,8 @@ def make_hydro_climatology_chart(clim: dict, hist_years: list[int], recent_years
     with the latest value direct-labelled — same picture as the Hydro Report figures."""
     df_years: pd.DataFrame = clim["climatology"]
     this_year: pd.Series = clim["current_year"]
+    sm = clim.get("start_month", 1)           # 10 = hydrological year Oct–Sep: years named '2025/26'
+    lab = lambda y: year_label(y, sm)          # noqa: E731
     fig = _base_fig(title, height=height)
     x = df_years.index
 
@@ -780,27 +783,27 @@ def make_hydro_climatology_chart(clim: dict, hist_years: list[int], recent_years
         if y not in df_years.columns:
             continue
         fig.add_trace(go.Scatter(x=x, y=df_years[y], mode="lines", line=dict(color=HYDRO_HIST_GREY, width=0.8),
-                                 name=f"{min(hist_years)}–{max(hist_years)}", legendgroup="hist",
-                                 showlegend=(i == 0 and show_legend), hovertemplate=f"{y} %{{y:,.0f}}<extra></extra>"))
+                                 name=f"{lab(min(hist_years))}–{lab(max(hist_years))}", legendgroup="hist",
+                                 showlegend=(i == 0 and show_legend), hovertemplate=f"{lab(y)} %{{y:,.0f}}<extra></extra>"))
     for col, y in zip(hydro_recent_colours(len(recent_years)), recent_years):
         if y not in df_years.columns:
             continue
-        fig.add_trace(go.Scatter(x=x, y=df_years[y], mode="lines", line=dict(color=col, width=1.6), name=str(y),
-                                 showlegend=show_legend, hovertemplate=f"{y} %{{y:,.0f}}<extra></extra>"))
+        fig.add_trace(go.Scatter(x=x, y=df_years[y], mode="lines", line=dict(color=col, width=1.6), name=lab(y),
+                                 showlegend=show_legend, hovertemplate=f"{lab(y)} %{{y:,.0f}}<extra></extra>"))
     fig.add_trace(go.Scatter(x=x, y=df_years["norm"], mode="lines", line=dict(color=INK_PRIMARY, width=2, dash="dash"),
                              name="norm", showlegend=show_legend, hovertemplate="norm %{y:,.0f}<extra></extra>"))
     ty = this_year.dropna()
     if not ty.empty:
-        cur_year = pd.Timestamp.today().year
+        cur_year = lab(clim.get("current_hy", pd.Timestamp.today().year))
         fig.add_trace(go.Scatter(x=ty.index, y=ty.values, mode="lines", line=dict(color=HYDRO_CURRENT_RED, width=2.8),
                                  name=str(cur_year), showlegend=show_legend,
                                  hovertemplate=f"{cur_year} %{{y:,.0f}}<extra></extra>"))
         fig.add_trace(go.Scatter(x=[ty.index[-1]], y=[ty.iloc[-1]], mode="markers+text",
                                  marker=dict(size=9, color=HYDRO_CURRENT_RED, line=dict(color="#ffffff", width=1.5)),
-                                 text=[f"{ty.iloc[-1]:,.0f}"], textposition="middle right" if ty.index[-1].dayofyear < 300 else "middle left",
+                                 text=[f"{ty.iloc[-1]:,.0f}"], textposition="middle right" if x.get_loc(ty.index[-1]) < 300 else "middle left",
                                  textfont=dict(color=HYDRO_CURRENT_RED, size=11, family="Roboto Mono, monospace"),
                                  showlegend=False, hoverinfo="skip"))
-    fig.update_xaxes(tickformat="%b", dtick="M1", range=[x[0], x[-1]])
+    fig.update_xaxes(tickformat="%b", hoverformat="%d %b", dtick="M1", range=[x[0], x[-1]])
     fig.update_yaxes(title_text=unit, tickformat=",.0f")
     fig.update_layout(hovermode="x")
     return fig
@@ -956,7 +959,8 @@ def make_river_temp_chart(series: pd.DataFrame, title: str, hot_c: float | None 
     return make_river_chart(series, title, "°C", hot_c, height)
 
 
-def make_hydro_anomaly_bars(rows: list[dict], title: str = "Anomaly vs normal today (GWh)") -> go.Figure:
+def make_hydro_anomaly_bars(rows: list[dict], title: str = "Anomaly vs normal today (GWh)",
+                            unit: str = "GWh") -> go.Figure:
     """Diverging bars of today's anomaly per country (blue above, red below normal)."""
     fig = _base_fig(title, height=300)
     if not rows:
@@ -966,10 +970,10 @@ def make_hydro_anomaly_bars(rows: list[dict], title: str = "Anomaly vs normal to
     fig.add_trace(go.Bar(x=names, y=vals, marker_color=[DIV_NEG if v >= 0 else DIV_POS for v in vals],
                          marker_line_width=0, text=[f"{v:+,.0f}" for v in vals], textposition="outside",
                          textfont=dict(color=INK_PRIMARY, size=11), showlegend=False,
-                         hovertemplate="%{x}<br>%{y:+,.0f} GWh<extra></extra>"))
+                         hovertemplate=f"%{{x}}<br>%{{y:+,.0f}} {unit}<extra></extra>"))
     fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
     fig.update_layout(hovermode="closest", bargap=0.3)
-    fig.update_yaxes(title_text="GWh")
+    fig.update_yaxes(title_text=unit)
     return fig
 
 

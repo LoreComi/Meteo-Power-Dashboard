@@ -10,8 +10,8 @@ Then three section cards:
                solar, precipitation energy — as stat tiles per window (the report's
                first week, then the second, each with its outlook in words), then one
                grid with the variables as rows and the windows × runs as columns.
-  Hydro        the country's hydro state (reservoir levels, snow water, groundwater,
-               hydro balance — the Hydro section's own figures) and the two-week
+  Hydro        the country's hydro state (reservoir levels, snow water equivalent
+               — the Hydro section's own figures) and the two-week
                outlook: production observed and Volue's forecast, precipitation energy
                observed and expected, each against its normal, with the change of the
                expected precipitation and production since the previous issue.
@@ -358,7 +358,7 @@ def _render_hydro(country: str, cfg: dict, hy: dict) -> None:
             if flags:
                 _chips(flags)
         else:
-            _note(f"No reservoir / snow / groundwater series for {country} yet.")
+            _note(f"No reservoir / snow series for {country} yet.")
     # outlook — production and precipitation energy, last two weeks vs the next two
     if not hy.get("area"):
         return

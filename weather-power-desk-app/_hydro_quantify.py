@@ -85,58 +85,79 @@ def _strip_leap_day(s: pd.Series) -> pd.Series:
     return s.sort_index()
 
 
+def year_label(year: int, start_month: int = 1) -> str:
+    """A climatology year's name: '2025' for a calendar year, '2025/26' for a year
+    starting in another month (labelled by the year it starts in)."""
+    return str(year) if start_month == 1 else f"{year}/{(year + 1) % 100:02d}"
+
+
 def build_climatology(actual: pd.Series, norm: pd.Series | None = None,
-                      today: dt.date | None = None) -> dict:
+                      today: dt.date | None = None, start_month: int = 1) -> dict:
     """Reproduce the report's df_years pivot + this_year series.
 
+    `start_month` is the month the climatology year starts in: 1 (calendar year,
+    the report's) or e.g. 10 for a hydrological year Oct–Sep, so that a winter
+    series such as SWE is one unbroken curve. A year is named by the year it
+    starts in (Oct 2025 – Sep 2026 = 2025, shown '2025/26' by year_label).
+
     Returns dict with:
-      climatology  DataFrame indexed on the dummy PLOT_YEAR calendar (365 rows),
-                   one float column per completed historical year plus 'norm'
+      climatology  DataFrame indexed on a 365-day dummy calendar starting on
+                   1 <start_month> PLOT_YEAR, one float column per completed
+                   historical year plus 'norm'
       current_year Series of this year's values on the same dummy calendar
       years        list of completed historical years (ints)
       norm_source  'volue' (a complete normal year), 'mean_of_years' (no provider
                    normal) or 'volue_partial' (a series younger than a year: the
                    provider normal by day of year, no percentile possible)
+      start_month  as passed; current_hy the year today falls in; last_date the
+                   real date of this year's latest value (None without one)
     Mirrors the originals exactly where the originals apply: leap day removed,
-    partial years skipped for hydro balance, the Volue norm read off the most
-    recent completed year. This year's values are placed by day of year, which
-    is the report's positional mapping whenever the year is complete from 1 Jan.
+    the Volue norm read off the most recent complete year. Values are placed by
+    their day in the year, which is the report's positional mapping whenever a
+    year is complete, and right for a series that starts (or has a gap) later.
     """
     today = today or dt.date.today()
     actual = _strip_leap_day(actual.dropna())
     if actual.empty:
         raise ValueError("no actual data")
 
-    dates = pd.date_range(dt.date(PLOT_YEAR, 1, 1), dt.date(PLOT_YEAR, 12, 31))
-    all_years = sorted(actual.index.year.unique())
-    hist_years = [y for y in all_years if y < today.year]
+    # PLOT_YEAR and the year after are not leap years, so any start month gives 365 days
+    dates = pd.date_range(dt.date(PLOT_YEAR, start_month, 1), periods=365)
+    start0 = dates[0].dayofyear - 1
+
+    def _pos(idx: pd.DatetimeIndex) -> np.ndarray:
+        """0-based day within the climatology year (29 Feb already removed)."""
+        doy0 = np.asarray(idx.dayofyear) - 1 - np.asarray(idx.is_leap_year & (idx.month > 2), dtype=int)
+        return (doy0 - start0) % 365
+
+    def _year(idx: pd.DatetimeIndex) -> np.ndarray:
+        """The climatology year a date falls in (the year its season starts in)."""
+        return np.asarray(idx.year) - np.asarray(idx.month < start_month, dtype=int)
+
+    def _place(values: np.ndarray, pos: np.ndarray) -> np.ndarray:
+        col = np.full(365, np.nan)
+        col[pos] = values
+        return col
+
+    a_year, a_pos = _year(actual.index), _pos(actual.index)
+    current = int(_year(pd.DatetimeIndex([pd.Timestamp(today)]))[0])
+    hist_years = [int(y) for y in sorted(set(a_year)) if y < current]
 
     df_years = pd.DataFrame(index=dates, columns=hist_years, dtype=float)
     for y in hist_years:
-        vals = actual[actual.index.year == y].values
-        if len(vals) == 365:
-            df_years[y] = vals
-        elif len(vals) > 0:
-            # A year that started tracking late: align by day-of-year instead of dropping
-            yd = actual[actual.index.year == y]
-            doy = yd.index.dayofyear - (yd.index.is_leap_year & (yd.index.month > 2)).astype(int)
-            col = pd.Series(np.nan, index=dates)
-            col.iloc[doy.values - 1] = yd.values
-            df_years[y] = col.values
-    # hydro balance drops incomplete years entirely; keep the same behaviour
+        m = a_year == y
+        df_years[y] = _place(actual.values[m], a_pos[m])
     df_years = df_years.dropna(axis=1, how="all")
     hist_years = [int(c) for c in df_years.columns]
 
-    def _doy(idx: pd.DatetimeIndex) -> np.ndarray:
-        """Day of year on the 365-day dummy calendar (29 Feb already removed)."""
-        return (idx.dayofyear - (idx.is_leap_year & (idx.month > 2)).astype(int)).values
-
     if norm is not None and not norm.dropna().empty:
         norm = _strip_leap_day(norm.dropna())
-        ny = [y for y in sorted(norm.index.year.unique()) if (norm.index.year == y).sum() == 365]
+        n_year, n_pos = _year(norm.index), _pos(norm.index)
+        ny = [y for y in sorted(set(n_year)) if (n_year == y).sum() == 365]
         ref_year = ny[-1] if ny else None
         if ref_year is not None:
-            df_years["norm"] = norm[norm.index.year == ref_year].values
+            m = n_year == ref_year
+            df_years["norm"] = _place(norm.values[m], n_pos[m])
             norm_source = "volue"
         elif hist_years:
             df_years["norm"] = df_years[hist_years].mean(axis=1)
@@ -146,10 +167,8 @@ def build_climatology(actual: pd.Series, norm: pd.Series | None = None,
             # areas, from May 2026): no complete normal year yet, no history — take
             # the provider normal by day of year from what exists. Anomaly and the
             # week move work; the percentile needs completed years and stays empty.
-            col = pd.Series(np.nan, index=dates)
-            by_doy = norm.groupby(_doy(norm.index)).mean()
-            col.iloc[by_doy.index.values - 1] = by_doy.values
-            df_years["norm"] = col.values
+            by_pos = norm.groupby(n_pos).mean()
+            df_years["norm"] = _place(by_pos.values, by_pos.index.values)
             norm_source = "volue_partial"
     else:
         df_years["norm"] = df_years[hist_years].mean(axis=1) if hist_years else np.nan
@@ -158,20 +177,19 @@ def build_climatology(actual: pd.Series, norm: pd.Series | None = None,
     df_years["Month"] = df_years.index.month
     df_years["Day"] = df_years.index.day
 
-    # This year's values on the dummy calendar, placed by day of year — identical
-    # to the report's positional mapping when the year is complete from 1 Jan,
-    # and right for a series that starts (or has a gap) later in the year.
-    ty = actual[actual.index.year == today.year]
+    m = a_year == current
     this_year = pd.Series(np.nan, index=dates, name="current")
-    if not ty.empty:
-        doy = _doy(ty.index)
-        this_year.iloc[doy - 1] = ty.values
-        this_year = this_year.iloc[: int(doy[-1])]
+    if m.any():
+        this_year.iloc[a_pos[m]] = actual.values[m]
+        this_year = this_year.iloc[: int(a_pos[m].max()) + 1]
+        last_date = actual.index[m].max()
     else:
         this_year = this_year.iloc[:0]
+        last_date = None
 
     return {"climatology": df_years, "current_year": this_year,
-            "years": hist_years, "norm_source": norm_source}
+            "years": hist_years, "norm_source": norm_source,
+            "start_month": start_month, "current_hy": current, "last_date": last_date}
 
 
 def quantify_anomaly(clim: dict, today: dt.date | None = None) -> dict:
@@ -218,7 +236,8 @@ def quantify_anomaly(clim: dict, today: dt.date | None = None) -> dict:
         return round(x, nd) if nd is not None else round(x)
 
     return {
-        "as_of": last_idx.replace(year=today.year) if last_idx.month <= today.month else last_idx,
+        "as_of": (clim["last_date"] if clim.get("last_date") is not None
+                  else last_idx.replace(year=today.year) if last_idx.month <= today.month else last_idx),
         "latest_value": float(this_year.iloc[-1]),
         "norm_today": None if np.isnan(norm_today) else norm_today,
         "anomaly": _r(anom),
@@ -240,8 +259,10 @@ def split_recent_hist(years: list[int], n_recent: int = RECENT_YEARS_N) -> tuple
     return hist, recent
 
 
-def stats_text(family_title: str, per_country: dict[str, dict]) -> str:
-    """The stats_*.txt block the report writes, reproduced verbatim."""
+def stats_text(family_title: str, per_country: dict[str, dict], unit: str = "GWh", percent: bool = True) -> str:
+    """The stats_*.txt block the report writes, reproduced verbatim. percent=False
+    (a series whose norm sits near zero part of the year, such as SWE) drops the
+    % of normal and gives the week's variation in `unit`."""
     lines = [f"{family_title} ", ""]
     for country, q in per_country.items():
         lines.append(f"{country} ")
@@ -249,10 +270,17 @@ def stats_text(family_title: str, per_country: dict[str, dict]) -> str:
             lines += ["no data", "*** "]
             continue
         na = lambda v: "n/a" if v is None else v   # noqa: E731 — a series without a normal for the day
-        lines.append(f"current anomaly = {na(q['anomaly'])}GWh, at {na(q['anomaly_percent'])}% of seasonal normal")
-        lines.append(f"standing at {na(q['anomaly_quantile'])}th percentile of the distribution")
-        lines.append(f"last week anomaly = {na(q['anomaly_w-1'])}GWh, at {na(q['anomaly_percent_w-1'])}% of seasonal normal")
-        lines.append(f"variation of {na(q['week_change_pct_points'])}% compared to previous week")
+        if percent:
+            lines.append(f"current anomaly = {na(q['anomaly'])}{unit}, at {na(q['anomaly_percent'])}% of seasonal normal")
+            lines.append(f"standing at {na(q['anomaly_quantile'])}th percentile of the distribution")
+            lines.append(f"last week anomaly = {na(q['anomaly_w-1'])}{unit}, at {na(q['anomaly_percent_w-1'])}% of seasonal normal")
+            lines.append(f"variation of {na(q['week_change_pct_points'])}% compared to previous week")
+        else:
+            a, aw = q.get("anomaly"), q.get("anomaly_w-1")
+            lines.append(f"current anomaly = {na(a)}{unit}")
+            lines.append(f"standing at {na(q['anomaly_quantile'])}th percentile of the distribution")
+            lines.append(f"last week anomaly = {na(aw)}{unit}")
+            lines.append(f"variation of {na(None if a is None or aw is None else a - aw)}{unit} compared to previous week")
         lines.append("*** ")
     lines.append("")
     return "\n".join(lines)

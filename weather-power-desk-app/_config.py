@@ -946,7 +946,11 @@ HYDRO_AREA_CODES: dict[str, str] = {
     "Slovenia": "SI", "Croatia": "HR", "Bosnia and Herzegovina": "BA", "Serbia": "RS",
     "North Macedonia": "MK", "Bulgaria": "BG", "Romania": "RO", "Greece": "GR",
 }
-HYDRO_COMPONENTS = {"Reservoir levels": "WTR", "Groundwater": "SGW", "Hydro balance": "BAL"}
+# The Volue families shown (a tab each, and a map layer). Groundwater ("SGW") and
+# Hydro balance ("BAL") are switched off for now — too imprecise; the maths is
+# still in _hydro_quantify.HYDRO_FAMILIES, so re-adding them here (and their
+# HYDRO_OVERVIEW_LAYERS entries) brings both back.
+HYDRO_COMPONENTS = {"Reservoir levels": "WTR"}
 HYDRO_START_YEAR = 2013
 
 # ── Overview map (first tab of the section) ──────────────────────────────────
@@ -1004,15 +1008,22 @@ HYDRO_MAP_EXTENT = {"lat_min": 35.5, "lat_max": 71.0, "lon_min": -11.0, "lon_max
 # near zero part of the year — the hydro balance (a deviation) and SWE (no snow
 # in summer) — where any percentage turns into noise. The fast-drawdown / refill
 # flag applies to 'percent' layers only.
+#
+# `year_start_month` (default 1) starts the layer's climatology year in another
+# month: 10 = the hydrological year Oct–Sep, so a snow season is one unbroken
+# curve and the history / current year are seasons ('2025/26'), not calendar years.
 HYDRO_OVERVIEW_LAYERS: dict[str, dict] = {
     "Reservoir levels":      {"source": "hydro_daily", "family": "Reservoir levels", "colour_by": "anomaly_percent",
                               "level": "percent", "unit": "GWh"},
-    "Snow water equivalent": {"source": "swe_daily", "colour_by": "anomaly_quantile", "level": "anomaly", "unit": "mm"},
-    "Groundwater":           {"source": "hydro_daily", "family": "Groundwater", "colour_by": "anomaly_percent",
-                              "level": "percent", "unit": "GWh"},
-    "Hydro balance":         {"source": "hydro_daily", "family": "Hydro balance", "colour_by": "anomaly_quantile",
-                              "level": "anomaly", "unit": "GWh"},
+    "Snow water equivalent": {"source": "swe_daily", "colour_by": "anomaly_quantile", "level": "anomaly", "unit": "mm",
+                              "year_start_month": 10},
+    # switched off for now (see HYDRO_COMPONENTS):
+    # "Groundwater":   {"source": "hydro_daily", "family": "Groundwater", "colour_by": "anomaly_percent",
+    #                   "level": "percent", "unit": "GWh"},
+    # "Hydro balance": {"source": "hydro_daily", "family": "Hydro balance", "colour_by": "anomaly_quantile",
+    #                   "level": "anomaly", "unit": "GWh"},
 }
+HYDRO_SWE_LAYER = "Snow water equivalent"     # the HYDRO_OVERVIEW_LAYERS key of the SWE layer (also its tab)
 # swe_daily (pipeline/swe_upload.py): level = 'country', band = 'total', the model's
 # mean SWE in mm per Alpine country → the hydro area it paints.
 HYDRO_SWE_REGIONS: dict[str, str] = {"Austria": "AT", "Italy": "IT", "France": "FR", "Switzerland": "CH"}

@@ -2,8 +2,8 @@
 
 Overview tab   What you see on entering: a Europe map of the hydro outlook per
                country. Each hydro area is painted by one layer — reservoir
-               levels as % of normal by default; snow water equivalent, ground-
-               water and hydro balance are the other layers — with its numbers
+               levels as % of normal by default, snow water equivalent the
+               other layer — with its numbers
                written on the country and the full read-out on hover. River
                temperature stations (Energy Quantified and the Volue share) sit
                on the map as markers coloured by their anomaly vs normal. Under
@@ -32,10 +32,13 @@ outlook        level, moved by a weather term (season-specific k × the precip-
                hydro_reservoir_outlook (pipeline/volue_reservoir_outlook.py) and
                reservoir_model_fr.json (pipeline/fit_reservoir_model.py).
 Family tabs    Live version of P:/QFA/TonyWeather/Hydro_Report/quantify_*.py:
-               for each Volue hydro family (reservoir levels, groundwater = the
-               `sgw` snow + groundwater stock, hydro balance) and each country
-               the climatology chart and the report's numbers plus the
-               stats_*.txt text the report writes.
+               for each Volue hydro family shown (reservoir levels; groundwater
+               and hydro balance are switched off in _config.HYDRO_COMPONENTS)
+               and each country the climatology chart and the report's numbers
+               plus the stats_*.txt text the report writes.
+SWE tab        The same layout for the internal Exolabs SWE model per Alpine
+               country (swe_daily) on the hydrological year Oct–Sep: norm =
+               mean of the completed seasons, level read as an anomaly in mm.
 The maths is in _hydro_quantify.py; hydro data comes from {SBX_SCHEMA}.hydro_daily,
 SWE from swe_daily (pipeline/), rivers from river_temp_eq (pipeline/) and
 river_temp_volue (notebook cell 6b).
@@ -52,7 +55,7 @@ from _config import (
     HYDRO_AREA_CODES, HYDRO_COMPONENTS, HYDRO_MAP_REGIONS, HYDRO_MAP_LABEL_POS, HYDRO_OVERVIEW_LAYERS,
     HYDRO_OVERVIEW_DEFAULT_LAYER, HYDRO_COLOUR_MODES, HYDRO_PCT_OF_NORMAL_RANGE,
     HYDRO_PCTL_CRITICAL, HYDRO_PCTL_LOW, HYDRO_PCTL_HIGH, HYDRO_WEEK_MOVE_PTS,
-    HYDRO_SWE_REGIONS, HYDRO_DEEP_DIVE_RIVER_MONTHS, HYDRO_STATION_MODES,
+    HYDRO_SWE_REGIONS, HYDRO_SWE_LAYER, HYDRO_DEEP_DIVE_RIVER_MONTHS, HYDRO_STATION_MODES,
     RIVER_TEMP_WARM_ANOMALY_C, RIVER_TEMP_HOT_C, RIVER_TEMP_COLOUR_RANGE_C,
     RIVER_FLOW_CRITICAL_PCT, RIVER_FLOW_LOW_PCT, RIVER_FLOW_HIGH_PCT, RIVER_FLOW_COLOUR_RANGE_PCT, RIVER_STALE_DAYS,
     HYDRO_PROD_TABLE, HYDRO_PROD_AREAS, HYDRO_PROD_DEFAULT_AREAS, HYDRO_PROD_WINDOW_DAYS, HYDRO_PROD_PRECIP_PATTERNS,
@@ -71,6 +74,7 @@ from _charts import (
 from _style import DIV_NEG, DIV_MID, DIV_POS
 from _hydro_quantify import (
     HYDRO_FAMILIES, HYDRO_DEFAULT_COUNTRIES, build_climatology, quantify_anomaly, split_recent_hist, stats_text,
+    year_label,
     production_series, production_summary,
 )
 from _ui import info_tip, kpi_card, kpi_row, status_banner, ordinal, view_switch
@@ -195,6 +199,11 @@ def _layer_series_v(layer: str, version: str) -> dict[str, tuple[pd.Series, pd.S
     return series
 
 
+def _start_month(layer: str) -> int:
+    """The month the layer's climatology year starts in (10 = hydrological year for SWE)."""
+    return int(HYDRO_OVERVIEW_LAYERS[layer].get("year_start_month", 1))
+
+
 def _overview_metrics() -> dict[str, dict[str, dict]]:
     """layer -> hydro area code -> quantify_anomaly dict, for every area with a
     series — the report maths per area, exactly as the family tabs do it."""
@@ -210,7 +219,7 @@ def _overview_metrics_v(version: str) -> dict[str, dict[str, dict]]:
             if actual.dropna().empty:
                 continue
             try:
-                q = quantify_anomaly(build_climatology(actual, normal))
+                q = quantify_anomaly(build_climatology(actual, normal, start_month=_start_month(layer)))
             except Exception:
                 continue
             if q:
@@ -230,7 +239,7 @@ def _area_climatology_v(layer: str, area: str, version: str) -> dict | None:
     if not series:
         return None
     try:
-        return build_climatology(*series)
+        return build_climatology(*series, start_month=_start_month(layer))
     except Exception:
         return None
 
@@ -753,7 +762,7 @@ def _render_overview(avail: pd.DataFrame):
         info_tip(f"Flags: at or below the {ordinal(HYDRO_PCTL_CRITICAL)} percentile = critically low, the "
                    f"{ordinal(HYDRO_PCTL_LOW)} = low, at or above the {ordinal(HYDRO_PCTL_HIGH)} = very high; "
                    f"|Δ| ≥ {HYDRO_WEEK_MOVE_PTS} pts of normal in a week = fast drawdown / refill (level series "
-                   "only — the hydro balance and SWE are shown as anomalies, so their week move is in GWh / mm and "
+                   "only — SWE is shown as an anomaly, so its week move is in mm and "
                    f"not flagged). River temperature: ≥ {RIVER_TEMP_HOT_C:.0f} °C = hot, ≥ {RIVER_TEMP_WARM_ANOMALY_C:.0f} °C "
                    f"above normal = warm; river flow: ≤ {RIVER_FLOW_CRITICAL_PCT:.0f} % of normal = very low, "
                    f"≤ {RIVER_FLOW_LOW_PCT:.0f} % = low, ≥ {RIVER_FLOW_HIGH_PCT:.0f} % = high water (indicative — "
@@ -799,7 +808,10 @@ def _render_overview(avail: pd.DataFrame):
 # FAMILY TABS — the report's figures per country
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _country_kpis(country: str, q: dict, unit: str) -> list[str]:
+def _country_kpis(country: str, q: dict, unit: str = "GWh", level: str = "percent") -> list[str]:
+    """Latest value and percentile cards for one country. level='percent' gives the
+    anomaly with its % of normal and the week move in pts; level='anomaly' (SWE: no
+    snow in summer, so % of normal is noise) gives the anomaly and its week move in `unit`."""
     if not q:
         return [kpi_card(country, "N/A")]
     anom = q["anomaly"]
@@ -807,12 +819,22 @@ def _country_kpis(country: str, q: dict, unit: str) -> list[str]:
     cls = ("kpi-card-cool" if up else "kpi-card-warm") if anom is not None else "kpi-card-neutral"
     d_cls = "kpi-delta-down" if up else "kpi-delta-up"     # more water = blue
     pct = q["anomaly_percent"]
-    delta = f'<div class="kpi-delta {d_cls}">{"▲" if up else "▼"} {abs(anom):,.0f} GWh vs norm · {pct}% of normal</div>' \
-        if (pct is not None and anom is not None) else \
-        ('<div class="kpi-delta kpi-delta-flat">no normal for the latest day</div>' if anom is None else "")
-    wk = q.get("week_change_pct_points")
-    wk_html = (f'<div class="kpi-rank">{wk:+d} pts vs last week</div>' if wk is not None else "")
-    val = kpi_card(f"{country} · latest", f"{q['latest_value']:,.0f} GWh", cls, delta, wk_html)
+    if anom is None:
+        delta = '<div class="kpi-delta kpi-delta-flat">no normal for the latest day</div>'
+    elif level == "percent" and pct is not None:
+        delta = f'<div class="kpi-delta {d_cls}">{"▲" if up else "▼"} {abs(anom):,.0f} {unit} vs norm · {pct}% of normal</div>'
+    elif level == "percent":
+        delta = ""
+    else:
+        delta = f'<div class="kpi-delta {d_cls}">{"▲" if up else "▼"} {abs(anom):,.0f} {unit} vs norm</div>'
+    if level == "percent":
+        wk = q.get("week_change_pct_points")
+        wk_html = f'<div class="kpi-rank">{wk:+d} pts vs last week</div>' if wk is not None else ""
+    else:
+        aw = q.get("anomaly_w-1")
+        wk_html = (f'<div class="kpi-rank">anomaly {anom - aw:+,.0f} {unit} vs last week</div>'
+                   if (anom is not None and aw is not None) else "")
+    val = kpi_card(f"{country} · latest", f"{q['latest_value']:,.0f} {unit}", cls, delta, wk_html)
     qv = q["anomaly_quantile"]
     pc = kpi_card(f"{country} · percentile", f"{ordinal(round(qv))}" if qv is not None else "N/A", _pct_class(qv),
                   f'<div class="kpi-delta kpi-delta-flat">this week vs {q["n_hist_years"]} yrs</div>')
@@ -839,23 +861,27 @@ def _compute_v(country: str, family: str, version: str) -> tuple[dict | None, di
     return clim, q, None
 
 
-def _render_family(family: str, avail: pd.DataFrame):
-    fam = HYDRO_FAMILIES[family]
-    comp = HYDRO_COMPONENTS[family]
+def _compute_swe(country: str) -> tuple[dict | None, dict, str | None]:
+    """The SWE layer's climatology of one Alpine country (swe_daily, norm = mean of years)."""
+    clim = _area_climatology(HYDRO_SWE_LAYER, HYDRO_SWE_REGIONS[country])
+    if clim is None:
+        return None, {}, "no rows in swe_daily"
+    try:
+        return clim, quantify_anomaly(clim), None
+    except Exception as e:
+        return None, {}, str(e)
 
-    have = set(avail[(avail["component"] == comp) & (avail["data_type"] == "SA")]["area"]) if not avail.empty else set()
-    countries_all = [c for c, code in HYDRO_AREA_CODES.items() if code in have] or list(HYDRO_AREA_CODES.keys())
-    defaults = [c for c in HYDRO_DEFAULT_COUNTRIES[family] if c in countries_all] or countries_all[:6]
-    missing = [c for c in HYDRO_DEFAULT_COUNTRIES[family] if c not in countries_all]
-    if missing and not avail.empty:
-        status_banner(f"No {family.lower()} rows for {', '.join(missing)} in hydro_daily — check the Volue area "
-                      f"codes ({', '.join(HYDRO_AREA_CODES[c] for c in missing)}).", "warning")
 
+def _render_country_panels(key: str, name: str, countries_all: list[str], defaults: list[str], compute,
+                           unit: str, axis_unit: str, level: str, stats_title: str, stats_code: str) -> None:
+    """The family-tab body, shared by Reservoir levels and SWE: country picker, a
+    latest + percentile card pair per country, today's anomaly bars, the
+    climatology chart per country with the report numbers, and the stats_*.txt text."""
     c1, c2 = st.columns([4, 1.4])
     with c1:
-        countries = st.multiselect("Countries", countries_all, defaults, key=f"hy_c_{comp}", label_visibility="collapsed")
+        countries = st.multiselect("Countries", countries_all, defaults, key=f"hy_c_{key}", label_visibility="collapsed")
     with c2:
-        n_recent = st.slider("Recent years highlighted", 1, 5, 3, key=f"hy_n_{comp}")
+        n_recent = st.slider("Recent years highlighted", 1, 5, 3, key=f"hy_n_{key}")
     if not countries:
         st.info("Select at least one country.")
         return
@@ -863,7 +889,7 @@ def _render_family(family: str, avail: pd.DataFrame):
     results: dict[str, tuple[dict | None, dict, str | None]] = {}
     with st.spinner("Computing climatologies…"):
         for c in countries:
-            results[c] = _compute(c, family)
+            results[c] = compute(c)
 
     errs = {c: r[2] for c, r in results.items() if r[2]}
     for c, e in errs.items():
@@ -871,12 +897,13 @@ def _render_family(family: str, avail: pd.DataFrame):
 
     cards = []
     for c in countries:
-        cards.extend(_country_kpis(c, results[c][1], fam["unit"]))
+        cards.extend(_country_kpis(c, results[c][1], unit, level))
     kpi_row(cards, max_cols=6)
 
-    rows = [{"country": c, "anomaly": results[c][1]["anomaly"]} for c in countries if results[c][1]]
+    rows = [{"country": c, "anomaly": results[c][1]["anomaly"]} for c in countries
+            if results[c][1] and results[c][1].get("anomaly") is not None]
     if rows:
-        st.plotly_chart(make_hydro_anomaly_bars(rows, f"{family} — anomaly vs normal today (GWh)"),
+        st.plotly_chart(make_hydro_anomaly_bars(rows, f"{name} — anomaly vs normal today ({unit})", unit),
                         use_container_width=True)
 
     st.divider()
@@ -889,23 +916,66 @@ def _render_family(family: str, avail: pd.DataFrame):
             continue
         hist, recent = split_recent_hist(clim["years"], n_recent)
         with cols[i % 2]:
-            st.plotly_chart(make_hydro_climatology_chart(clim, hist, recent, f"{c} — {family.lower()}", fam["unit"]),
+            st.plotly_chart(make_hydro_climatology_chart(clim, hist, recent, f"{c} — {name.lower()}", axis_unit),
                             use_container_width=True)
             if q:
                 def _s(v, f="{:+,}"):
                     return "n/a" if v is None else f.format(v)
-                st.caption(f"current anomaly = {_s(q['anomaly'])} GWh, at {_s(q['anomaly_percent'], '{}')}% of seasonal normal · "
-                           f"{_s(q['anomaly_quantile'], '{}')}th percentile · last week {_s(q['anomaly_w-1'])} GWh "
-                           f"({_s(q['anomaly_percent_w-1'], '{}')}%) · variation {_s(q['week_change_pct_points'], '{:+d}')}% "
-                           + ("· norm = mean of years" if clim["norm_source"] == "mean_of_years" else "")
-                           + ("· series younger than a year (Volue share): no percentile" if clim["norm_source"] == "volue_partial" else ""))
+                sm = clim.get("start_month", 1)
+                yrs = (f" {year_label(min(clim['years']), sm)}–{year_label(max(clim['years']), sm)}"
+                       if clim["years"] else "")
+                tail = ((f"· norm = mean of {'years' if sm == 1 else 'seasons'}" + yrs
+                         if clim["norm_source"] == "mean_of_years" else "")
+                        + ("· series younger than a year (Volue share): no percentile"
+                           if clim["norm_source"] == "volue_partial" else ""))
+                if level == "percent":
+                    st.caption(f"current anomaly = {_s(q['anomaly'])} {unit}, at {_s(q['anomaly_percent'], '{}')}% of seasonal normal · "
+                               f"{_s(q['anomaly_quantile'], '{}')}th percentile · last week {_s(q['anomaly_w-1'])} {unit} "
+                               f"({_s(q['anomaly_percent_w-1'], '{}')}%) · variation {_s(q['week_change_pct_points'], '{:+d}')}% "
+                               + tail)
+                else:
+                    a, aw = q.get("anomaly"), q.get("anomaly_w-1")
+                    st.caption(f"latest {q['latest_value']:,.0f} {unit} · current anomaly = {_s(a)} {unit} · "
+                               f"{_s(q['anomaly_quantile'], '{}')}th percentile · last week {_s(aw)} {unit} · "
+                               f"variation {_s(None if a is None or aw is None else a - aw)} {unit} " + tail)
         i += 1
 
-    txt = stats_text(fam["stats_title"], {c: results[c][1] for c in countries})
-    with st.expander(f"Report text — stats_{fam['code']}.txt"):
+    txt = stats_text(stats_title, {c: results[c][1] for c in countries}, unit, percent=(level == "percent"))
+    with st.expander(f"Report text — stats_{stats_code}.txt"):
         st.code(txt, language="text")
-        st.download_button("Download", txt.encode(), f"stats_{fam['code']}_{dt.date.today():%Y%m%d}.txt", "text/plain",
-                           key=f"hy_dl_{comp}")
+        st.download_button("Download", txt.encode(), f"stats_{stats_code}_{dt.date.today():%Y%m%d}.txt", "text/plain",
+                           key=f"hy_dl_{key}")
+
+
+def _render_family(family: str, avail: pd.DataFrame):
+    fam = HYDRO_FAMILIES[family]
+    comp = HYDRO_COMPONENTS[family]
+
+    have = set(avail[(avail["component"] == comp) & (avail["data_type"] == "SA")]["area"]) if not avail.empty else set()
+    countries_all = [c for c, code in HYDRO_AREA_CODES.items() if code in have] or list(HYDRO_AREA_CODES.keys())
+    defaults = [c for c in HYDRO_DEFAULT_COUNTRIES[family] if c in countries_all] or countries_all[:6]
+    missing = [c for c in HYDRO_DEFAULT_COUNTRIES[family] if c not in countries_all]
+    if missing and not avail.empty:
+        status_banner(f"No {family.lower()} rows for {', '.join(missing)} in hydro_daily — check the Volue area "
+                      f"codes ({', '.join(HYDRO_AREA_CODES[c] for c in missing)}).", "warning")
+    _render_country_panels(comp, family, countries_all, defaults, lambda c: _compute(c, family),
+                           "GWh", fam["unit"], "percent", fam["stats_title"], fam["code"])
+
+
+def _render_swe():
+    """Snow water equivalent per Alpine country — the internal Exolabs SWE model's
+    mean mm (swe_daily, pipeline/swe_upload.py), laid out as the Reservoir levels
+    tab, on the hydrological year Oct–Sep (HYDRO_OVERVIEW_LAYERS' year_start_month).
+    No provider normal: the norm is the mean of the completed seasons, and the
+    level is read as an anomaly in mm (no snow in summer makes % of normal noise)."""
+    have = set(_layer_series(HYDRO_SWE_LAYER))
+    if not have:
+        status_banner("No SWE rows in swe_daily yet — run Power_dashboard/pipeline/run_daily.bat "
+                      "(it uploads the Exolabs model's CSVs).", "warning")
+        return
+    countries_all = [c for c, code in HYDRO_SWE_REGIONS.items() if code in have]
+    _render_country_panels("SWE", HYDRO_SWE_LAYER, countries_all, countries_all, _compute_swe,
+                           "mm", "Mean SWE (mm)", "anomaly", "SNOW WATER EQUIVALENT", "swe")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1167,7 +1237,8 @@ def render_hydro():
     for k, v in (("hy_dd_area", None), ("hy_dd_station", None)):
         st.session_state.setdefault(k, v)
     keep = {"Overview": ("hy_ov_",), "Production": ("hy_prod_",), "Reservoir outlook": ("hy_res_",)}
-    keep.update({f: (f"hy_c_{HYDRO_COMPONENTS[f]}", f"hy_n_{HYDRO_COMPONENTS[f]}") for f in HYDRO_FAMILIES})
+    keep.update({f: (f"hy_c_{c}", f"hy_n_{c}") for f, c in HYDRO_COMPONENTS.items()})
+    keep[HYDRO_SWE_LAYER] = ("hy_c_SWE", "hy_n_SWE")
     view = view_switch("View", list(keep), "hy_view", keep)
 
     # Cold cache: the three hydro_daily components (every view needs the availability
@@ -1177,6 +1248,8 @@ def render_hydro():
     calls = [lambda c=c: load_hydro_component(c) for c in HYDRO_COMPONENTS.values()]
     if view == "Overview":
         calls += [load_swe_country_daily, load_river_latest]
+    elif view == HYDRO_SWE_LAYER:
+        calls += [load_swe_country_daily]
     prefetch(*calls)
     try:
         avail = load_hydro_available()
@@ -1195,5 +1268,7 @@ def render_hydro():
         _render_production()
     elif view == "Reservoir outlook":
         _render_reservoir_outlook()
+    elif view == HYDRO_SWE_LAYER:
+        _render_swe()
     else:
         _render_family(view, avail)
