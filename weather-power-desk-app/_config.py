@@ -951,7 +951,30 @@ HYDRO_AREA_CODES: dict[str, str] = {
 # still in _hydro_quantify.HYDRO_FAMILIES, so re-adding them here (and their
 # HYDRO_OVERVIEW_LAYERS entries) brings both back.
 HYDRO_COMPONENTS = {"Reservoir levels": "WTR"}
-HYDRO_START_YEAR = 2013
+HYDRO_START_YEAR = 2000      # read every Volue hydro day there is (the silver table starts 2012–2017 by area)
+
+# ── Official reservoir content (the Reservoir levels scale and history) ───────
+# hydro_official_weekly (pipeline/official_reservoirs.py): weekly GWh per hydro area
+# from SFOE (CH, since 2000), NVE (NO, since 1995), ENTSO-E 16.1.D (FR AT IT ES SE FI
+# BG GR HR RO RS MK SI, since 2014/15) and NP = NO + SE + FI. Where an area has one,
+# the Reservoir levels layer shows the official scale: the published weeks as they
+# are (interpolated to days), Volue's daily level — rescaled by the slope of the
+# official series on Volue over the last HYDRO_OFFICIAL_FIT_WEEKS — after the last
+# published week and before the first, when the two correlate ≥ HYDRO_OFFICIAL_MIN_CORR
+# there. The normal is then the mean of the completed years. Areas without an
+# official series (DE, SEE, BA) stay on Volue, with the mean of their completed years
+# as normal once they have HYDRO_OWN_NORM_MIN_YEARS of them (Volue's normal before).
+# Volue vs official, 2017–2026: CH NO SE FI IT and the Eastern countries agree within
+# a few %; Volue's FR is 3.3× ENTSO-E's scope, AT 1.4×, ES 1.2×, MK 0.3×.
+HYDRO_OFFICIAL_TABLE = "hydro_official_weekly"
+HYDRO_OFFICIAL_FIT_WEEKS = 104
+HYDRO_OFFICIAL_MIN_CORR = 0.9
+HYDRO_OFFICIAL_MAX_GAP_DAYS = 7          # Volue must have a day this close to the official week it is anchored on
+HYDRO_OWN_NORM_MIN_YEARS = 3
+HYDRO_OFFICIAL_SOURCE_NAMES = {
+    "SFOE": "SFOE (Swiss Federal Office of Energy)", "NVE": "NVE (Norwegian Water Resources and Energy Directorate)",
+    "ENTSO-E": "ENTSO-E Transparency 16.1.D", "NVE + ENTSO-E": "NVE (NO) + ENTSO-E (SE, FI)",
+}
 
 # ── Overview map (first tab of the section) ──────────────────────────────────
 # Each hydro `area` is painted on a Europe map with its numbers. Values: the
@@ -1009,12 +1032,15 @@ HYDRO_MAP_EXTENT = {"lat_min": 35.5, "lat_max": 71.0, "lon_min": -11.0, "lon_max
 # in summer) — where any percentage turns into noise. The fast-drawdown / refill
 # flag applies to 'percent' layers only.
 #
+# `official` (hydro_daily layers): put the layer on the official scale where
+# hydro_official_weekly has the area (see HYDRO_OFFICIAL_TABLE).
+#
 # `year_start_month` (default 1) starts the layer's climatology year in another
 # month: 10 = the hydrological year Oct–Sep, so a snow season is one unbroken
 # curve and the history / current year are seasons ('2025/26'), not calendar years.
 HYDRO_OVERVIEW_LAYERS: dict[str, dict] = {
     "Reservoir levels":      {"source": "hydro_daily", "family": "Reservoir levels", "colour_by": "anomaly_percent",
-                              "level": "percent", "unit": "GWh"},
+                              "level": "percent", "unit": "GWh", "official": True},
     "Snow water equivalent": {"source": "swe_daily", "colour_by": "anomaly_quantile", "level": "anomaly", "unit": "mm",
                               "year_start_month": 10},
     # switched off for now (see HYDRO_COMPONENTS):

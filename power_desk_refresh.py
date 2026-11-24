@@ -923,7 +923,7 @@ except Exception as _e:   # no access to the silver table must not stop the rest
 
 # COMMAND ----------
 
-# DBTITLE 1,6. Hydro components — actual (SA) and normal (N): silver since 2013 + the share for the Eastern areas
+# DBTITLE 1,6. Hydro components — actual (SA) and normal (N): the whole silver history + the share for the Eastern areas
 # The silver hydro_reservoir table carries only the Western / Nordic areas (and
 # their bidding-zone sub-areas). The Volue share's reservoir_hydro view adds SEE
 # and the Eastern European countries with the same curve families
@@ -940,7 +940,8 @@ for comp in HYDRO_COMPONENTS:
     WHERE UPPER(area) IN ({hydro_area_sql}) AND data_type IN ('SA', 'N')
       AND array_contains(categories, 'RES') AND array_contains(categories, 'HYDRO')
       AND array_contains(categories, '{comp}')
-      AND delivery_start >= '2013-01-01'
+      -- no start cut: every day Volue has (NO/SE/FI from 2012, CH/AT/FR/DE from 2017) — the
+      -- app puts the reservoir levels on the official scale and history (hydro_official_weekly)
     GROUP BY area, {CET_DAY}, data_type
     """)
 

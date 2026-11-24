@@ -60,11 +60,12 @@ from _config import (
     RIVER_FLOW_CRITICAL_PCT, RIVER_FLOW_LOW_PCT, RIVER_FLOW_HIGH_PCT, RIVER_FLOW_COLOUR_RANGE_PCT, RIVER_STALE_DAYS,
     HYDRO_PROD_TABLE, HYDRO_PROD_AREAS, HYDRO_PROD_DEFAULT_AREAS, HYDRO_PROD_WINDOW_DAYS, HYDRO_PROD_PRECIP_PATTERNS,
     RESERVOIR_OUTLOOK_TABLE, RESERVOIR_OUTLOOK_AREAS, RESERVOIR_OUTLOOK_HISTORY_DAYS, RESERVOIR_OUTLOOK_PAST_ISSUES,
-    RESERVOIR_OUTLOOK_HORIZONS,
+    RESERVOIR_OUTLOOK_HORIZONS, HYDRO_OFFICIAL_TABLE, HYDRO_OFFICIAL_FIT_WEEKS, HYDRO_OFFICIAL_MIN_CORR,
+    HYDRO_OFFICIAL_MAX_GAP_DAYS, HYDRO_OWN_NORM_MIN_YEARS, HYDRO_OFFICIAL_SOURCE_NAMES,
 )
 from _data import (
     load_hydro_available, load_hydro_series, load_hydro_component, load_swe_country_daily, load_river_latest,
-    load_river_series, load_hydro_prod, load_reservoir_outlook, load_reservoir_model,
+    load_river_series, load_hydro_prod, load_reservoir_outlook, load_reservoir_model, load_hydro_official,
     data_version, load_snapshot_times, prefetch, VERSIONED_TTL,
 )
 from _charts import (
@@ -74,7 +75,7 @@ from _charts import (
 from _style import DIV_NEG, DIV_MID, DIV_POS
 from _hydro_quantify import (
     HYDRO_FAMILIES, HYDRO_DEFAULT_COUNTRIES, build_climatology, quantify_anomaly, split_recent_hist, stats_text,
-    year_label,
+    year_label, splice_official,
     production_series, production_summary,
 )
 from _ui import info_tip, kpi_card, kpi_row, status_banner, ordinal, view_switch
@@ -157,20 +158,38 @@ def _flags(q: dict, layer: str) -> list[tuple[str, str]]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _hydro_version() -> str:
-    """Cache key of everything computed from the hydro layers: hydro_daily and swe_daily."""
-    return f"{data_version('hydro_daily')}|{data_version('swe_daily')}"
+    """Cache key of everything computed from the hydro layers: hydro_daily, swe_daily
+    and the official reservoir weeks."""
+    return f"{data_version('hydro_daily')}|{data_version('swe_daily')}|{data_version(HYDRO_OFFICIAL_TABLE)}"
 
 
 def _layer_series(layer: str) -> dict[str, tuple[pd.Series, pd.Series | None]]:
-    return _layer_series_v(layer, _hydro_version())
+    return _layer_data_v(layer, _hydro_version())[0]
+
+
+def _layer_info(layer: str) -> dict[str, dict]:
+    """area code -> where the layer's series comes from: source ('volue' or the
+    official source's name) plus, for an official one, splice_official's info."""
+    return _layer_data_v(layer, _hydro_version())[1]
+
+
+def _completed_years(s: pd.Series) -> int:
+    idx = pd.DatetimeIndex(s.dropna().index)
+    return int(len(set(idx.year[idx.year < dt.date.today().year])))
 
 
 @st.cache_data(ttl=VERSIONED_TTL, max_entries=16, show_spinner=False)
-def _layer_series_v(layer: str, version: str) -> dict[str, tuple[pd.Series, pd.Series | None]]:
-    """area code -> (actual, normal) daily series for one layer.
+def _layer_data_v(layer: str, version: str) -> tuple[dict[str, tuple[pd.Series, pd.Series | None]], dict[str, dict]]:
+    """(area code -> (actual, normal) daily series, area code -> source info) for one layer.
 
     Sources (HYDRO_OVERVIEW_LAYERS[layer]['source']):
-      hydro_daily  a Volue component (actual SA, normal N where the family has one)
+      hydro_daily  a Volue component (actual SA, normal N where the family has one).
+                   An `official` layer is put on the official scale where
+                   hydro_official_weekly has the area (splice_official: the published
+                   weeks, Volue's daily level rescaled around them) with the mean of the
+                   completed years as normal; an area without an official series keeps
+                   Volue's level, and Volue's normal only until it has
+                   HYDRO_OWN_NORM_MIN_YEARS completed years of its own.
       swe_daily    the internal Exolabs SWE model's mean mm per Alpine country,
                    uploaded by pipeline/swe_upload.py; no normal → mean of years
     To add another (river levels, …): load its (area, day, actual[, normal])
@@ -180,23 +199,64 @@ def _layer_series_v(layer: str, version: str) -> dict[str, tuple[pd.Series, pd.S
     cfg = HYDRO_OVERVIEW_LAYERS[layer]
     src = cfg.get("source", "hydro_daily")
     series: dict[str, tuple[pd.Series, pd.Series | None]] = {}
+    info: dict[str, dict] = {}
     try:
         if src == "hydro_daily":
             family = cfg["family"]
             df = load_hydro_component(HYDRO_COMPONENTS[family])
+            off = load_hydro_official() if cfg.get("official") else pd.DataFrame()
+            off_by_area = {str(a): g for a, g in off.groupby("area")} if not off.empty else {}
             for area, g in (df.groupby("area") if not df.empty else []):
+                area = str(area)
                 actual = g[g["data_type"] == "SA"].set_index("day")["value"].sort_index()
                 normal = g[g["data_type"] == "N"].set_index("day")["value"].sort_index()
-                series[str(area)] = (actual, normal if (HYDRO_FAMILIES[family]["has_norm"] and not normal.empty) else None)
+                normal = normal if (HYDRO_FAMILIES[family]["has_norm"] and not normal.empty) else None
+                if area in off_by_area:
+                    o = off_by_area[area]
+                    actual, sp = splice_official(o.set_index("day")["value"].sort_index(), actual,
+                                                 HYDRO_OFFICIAL_FIT_WEEKS, HYDRO_OFFICIAL_MIN_CORR, HYDRO_OFFICIAL_MAX_GAP_DAYS)
+                    normal = None
+                    info[area] = {"source": str(o["source"].iloc[-1]), **sp}
+                else:
+                    if cfg.get("official") and _completed_years(actual) >= HYDRO_OWN_NORM_MIN_YEARS:
+                        normal = None
+                    info[area] = {"source": "volue"}
+                series[area] = (actual, normal)
+            for area, o in off_by_area.items():          # an official series Volue does not carry
+                if area not in series:
+                    actual, sp = splice_official(o.set_index("day")["value"].sort_index(), None)
+                    series[area] = (actual, None)
+                    info[area] = {"source": str(o["source"].iloc[-1]), **sp}
         elif src == "swe_daily":
             df = load_swe_country_daily()
             for region, g in (df.groupby("region") if not df.empty else []):
                 area = HYDRO_SWE_REGIONS.get(str(region))
                 if area:
                     series[area] = (g.set_index("day")["swe_mean_mm"].sort_index(), None)
+                    info[area] = {"source": "swe"}
     except Exception:
-        return {}
-    return series
+        return {}, {}
+    return series, info
+
+
+def _source_note(layer: str, area: str) -> str:
+    """Where an `official` layer's numbers for the area come from, for the captions."""
+    if not HYDRO_OVERVIEW_LAYERS.get(layer, {}).get("official"):
+        return ""
+    i = _layer_info(layer).get(area)
+    if not i:
+        return ""
+    if i["source"] == "volue":
+        return "Volue (no official series for this area)"
+    txt = (f"official: {i['source']} weekly {pd.Timestamp(i['first_official']):%b %Y} – "
+           f"{pd.Timestamp(i['last_official']):%d %b %Y}")
+    if i.get("bridged_to") is not None:
+        txt += (f", then Volue's daily change ×{i['slope']:.2f} to {pd.Timestamp(i['bridged_to']):%d %b}")
+    if i.get("extended_from") is not None:
+        txt += f"; Volue ×{i['slope']:.2f} before, from {pd.Timestamp(i['extended_from']):%b %Y}"
+    if i.get("slope") is None and i.get("corr") is not None:
+        txt += f" (Volue not used: correlation {i['corr']:.2f} with the official weeks)"
+    return txt
 
 
 def _start_month(layer: str) -> int:
@@ -620,12 +680,18 @@ def _render_deep_dive(area: str, metrics: dict[str, dict[str, dict]], rivers: li
                 st.plotly_chart(make_hydro_climatology_chart(clim, hist, recent, f"{cfg['name']} — {l.lower()}",
                                                              HYDRO_OVERVIEW_LAYERS[l]["unit"], height=360),
                                 use_container_width=True, key=f"hy_dd_chart_{area}_{i}")
+                note = _source_note(l, area)
                 if clim["norm_source"] == "mean_of_years":
-                    st.caption("norm = mean of completed years (no provider normal for this series)")
+                    sm = clim.get("start_month", 1)
+                    span = (f" {year_label(min(clim['years']), sm)}–{year_label(max(clim['years']), sm)}"
+                            if clim["years"] else "")
+                    st.caption(f"norm = mean of completed years{span}" + (f" · {note}" if note else ""))
                 elif clim["norm_source"] == "volue_partial":
                     first = _layer_series(l)[area][0].dropna().index.min()
                     st.caption(f"series starts {pd.Timestamp(first):%d %b %Y} (the Volue share) — anomaly vs the provider "
                                "normal only; the percentile and the grey history need completed years")
+                elif note:
+                    st.caption(note)
             i += 1
     elif stations:
         flags = [(lvl, r["name"], t) for r in stations for lvl, t in r["flags"]]
@@ -841,20 +907,31 @@ def _country_kpis(country: str, q: dict, unit: str = "GWh", level: str = "percen
     return [val, pc]
 
 
+def _family_layer(family: str) -> str | None:
+    """The overview layer that shows a Volue family (the family tab uses its series)."""
+    return next((l for l, c in HYDRO_OVERVIEW_LAYERS.items()
+                 if c.get("source", "hydro_daily") == "hydro_daily" and c.get("family") == family), None)
+
+
 def _compute(country: str, family: str) -> tuple[dict | None, dict, str | None]:
-    return _compute_v(country, family, data_version("hydro_daily"))
+    return _compute_v(country, family, _hydro_version())
 
 
 @st.cache_data(ttl=VERSIONED_TTL, max_entries=64, show_spinner=False)
 def _compute_v(country: str, family: str, version: str) -> tuple[dict | None, dict, str | None]:
+    layer = _family_layer(family)
     try:
-        actual, normal = load_hydro_series(country, family)
+        if layer:          # the overview layer's series: same scale, normal and numbers as the map
+            actual, normal = _layer_series(layer).get(HYDRO_AREA_CODES[country], (pd.Series(dtype=float), None))
+        else:
+            actual, normal = load_hydro_series(country, family)
+            normal = normal if HYDRO_FAMILIES[family]["has_norm"] else None
     except Exception as e:
         return None, {}, str(e)
     if actual.empty:
         return None, {}, "no rows"
     try:
-        clim = build_climatology(actual, normal if HYDRO_FAMILIES[family]["has_norm"] else None)
+        clim = build_climatology(actual, normal, start_month=_start_month(layer) if layer else 1)
         q = quantify_anomaly(clim)
     except Exception as e:
         return None, {}, str(e)
@@ -873,7 +950,8 @@ def _compute_swe(country: str) -> tuple[dict | None, dict, str | None]:
 
 
 def _render_country_panels(key: str, name: str, countries_all: list[str], defaults: list[str], compute,
-                           unit: str, axis_unit: str, level: str, stats_title: str, stats_code: str) -> None:
+                           unit: str, axis_unit: str, level: str, stats_title: str, stats_code: str,
+                           note=None) -> None:
     """The family-tab body, shared by Reservoir levels and SWE: country picker, a
     latest + percentile card pair per country, today's anomaly bars, the
     climatology chart per country with the report numbers, and the stats_*.txt text."""
@@ -928,6 +1006,8 @@ def _render_country_panels(key: str, name: str, countries_all: list[str], defaul
                          if clim["norm_source"] == "mean_of_years" else "")
                         + ("· series younger than a year (Volue share): no percentile"
                            if clim["norm_source"] == "volue_partial" else ""))
+                src = note(c) if note else ""
+                tail += f" · {src}" if src else ""
                 if level == "percent":
                     st.caption(f"current anomaly = {_s(q['anomaly'])} {unit}, at {_s(q['anomaly_percent'], '{}')}% of seasonal normal · "
                                f"{_s(q['anomaly_quantile'], '{}')}th percentile · last week {_s(q['anomaly_w-1'])} {unit} "
@@ -958,8 +1038,21 @@ def _render_family(family: str, avail: pd.DataFrame):
     if missing and not avail.empty:
         status_banner(f"No {family.lower()} rows for {', '.join(missing)} in hydro_daily — check the Volue area "
                       f"codes ({', '.join(HYDRO_AREA_CODES[c] for c in missing)}).", "warning")
+    layer = _family_layer(family)
+    official = bool(layer and HYDRO_OVERVIEW_LAYERS[layer].get("official"))
+    if official:
+        info = _layer_info(layer)
+        by_src: dict[str, list[str]] = {}
+        for c in countries_all:
+            src = info.get(HYDRO_AREA_CODES[c], {}).get("source")
+            if src:
+                by_src.setdefault("Volue only" if src == "volue" else HYDRO_OFFICIAL_SOURCE_NAMES.get(src, src), []).append(c)
+        st.caption("Official scale where an official series exists — the published weeks as they are, Volue's daily "
+                   "level rescaled to them after the last published week (and before the first); normal = mean of the "
+                   "completed years. " + " · ".join(f"{k}: {', '.join(v)}" for k, v in by_src.items()))
     _render_country_panels(comp, family, countries_all, defaults, lambda c: _compute(c, family),
-                           "GWh", fam["unit"], "percent", fam["stats_title"], fam["code"])
+                           "GWh", fam["unit"], "percent", fam["stats_title"], fam["code"],
+                           note=(lambda c: _source_note(layer, HYDRO_AREA_CODES[c])) if official else None)
 
 
 def _render_swe():

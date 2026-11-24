@@ -251,6 +251,63 @@ def quantify_anomaly(clim: dict, today: dt.date | None = None) -> dict:
     }
 
 
+def splice_official(official: pd.Series, volue: pd.Series | None, fit_weeks: int = 104,
+                    min_corr: float = 0.9, max_gap_days: int = 7) -> tuple[pd.Series, dict]:
+    """One daily series on the official scale: the official weekly values as
+    published (linearly interpolated to days, gaps up to five weeks), and Volue's
+    daily level carried on from them — after the last published week and before
+    the first — as official + slope × (Volue's change since the anchor day), the
+    slope being that of the official series regressed on Volue over the last
+    `fit_weeks` weeks they share (all of them when fewer than 8). Volue is used
+    only when the two correlate ≥ min_corr there, so a series of a different
+    shape (or none) leaves the official weeks alone.
+
+    Returns (series, info): info = first_official / last_official (dates),
+    slope, corr, n_fit, bridged_to (the last Volue day added after the official
+    weeks, or None) and extended_from (the first Volue day added before them)."""
+    off = official.dropna().astype(float).sort_index()
+    off.index = pd.DatetimeIndex(off.index).normalize()
+    off = off[~off.index.duplicated(keep="last")]
+    vol = pd.Series(dtype=float) if volue is None else volue.dropna().astype(float).sort_index()
+    if len(vol):
+        vol.index = pd.DatetimeIndex(vol.index).normalize()
+        vol = vol[~vol.index.duplicated(keep="last")]
+    info = {"first_official": None, "last_official": None, "slope": None, "corr": None, "n_fit": 0,
+            "bridged_to": None, "extended_from": None}
+    if off.empty:
+        return vol, info
+    t0, t1 = off.index[0], off.index[-1]
+    info.update(first_official=t0, last_official=t1)
+    daily = off.resample("D").mean().interpolate(method="time", limit=35, limit_area="inside").dropna()
+
+    common = pd.concat([off.rename("o"), vol.rename("v")], axis=1, join="inner").dropna()
+    fit = common[common.index > t1 - pd.Timedelta(weeks=fit_weeks)]
+    if len(fit) < 8:
+        fit = common
+    slope = None
+    if len(fit) >= 8 and fit["v"].std() > 0 and fit["o"].std() > 0:
+        corr = float(fit.corr().iloc[0, 1])
+        info.update(corr=corr, n_fit=int(len(fit)))
+        if corr >= min_corr:
+            slope = float(np.polyfit(fit["v"].values, fit["o"].values, 1)[0])
+    info["slope"] = slope
+
+    parts = [daily]
+    if slope is not None:
+        gap = pd.Timedelta(days=max_gap_days)
+        after = vol[vol.index > t1]
+        anchor = vol[(vol.index <= t1) & (vol.index >= t1 - gap)]
+        if len(after) and len(anchor):
+            parts.append(off.iloc[-1] + slope * (after - anchor.iloc[-1]))
+            info["bridged_to"] = after.index[-1]
+        before = vol[vol.index < t0]
+        anchor0 = vol[(vol.index >= t0) & (vol.index <= t0 + gap)]
+        if len(before) and len(anchor0):
+            parts.insert(0, off.iloc[0] + slope * (before - anchor0.iloc[0]))
+            info["extended_from"] = before.index[0]
+    return pd.concat(parts).sort_index(), info
+
+
 def split_recent_hist(years: list[int], n_recent: int = RECENT_YEARS_N) -> tuple[list[int], list[int]]:
     """Grey historical spread vs the last n completed years in the blue ramp."""
     years = sorted(int(y) for y in years)

@@ -8,6 +8,8 @@ Steps, each isolated so one failure does not stop the others:
   5. volue       Volue (wapi) Morning Call / Gas Demand input to {schema}.morning_daily_volue
   6. hydro-prod  Volue (wapi) hydro production, its forecast and precipitation energy to {schema}.hydro_prod_daily
   7. reservoir   the French reservoir outlook (reservoir_model_fr.json on today's Volue inputs) to {schema}.hydro_reservoir_outlook
+  7b. official   official weekly reservoir content (SFOE for CH, NVE for NO, ENTSO-E 16.1.D for the others, NP = NO+SE+FI)
+                 to {schema}.hydro_official_weekly — the scale and history of the Hydro section's Reservoir levels
   8. indices     all_daily_indices.csv (teleconnection indices) to {schema}.weather_indexes
   9. z500        EC-ENS 500 hPa geopotential members from the Meteomatics API to {schema}.fcst_member_spatial_ecens
  10. eq-members  AIFS-ENS per-member temperature / wind / solar by country from EQ to {schema}.fcst_members_eq
@@ -29,6 +31,7 @@ Steps, each isolated so one failure does not stop the others:
     python run_daily.py --only volue         the Volue feed (what the dashboard shows for now)
     python run_daily.py --only hydro-prod    the hydro Production tab's feed
     python run_daily.py --only reservoir     the Reservoir outlook tab's feed
+    python run_daily.py --only official      the official reservoir levels (SFOE, NVE, ENTSO-E)
     python run_daily.py --only indices       the Teleconnections tab's indices (after refreshing the CSV)
     python run_daily.py --only z500 --only eq-members --only wr-ecens   the Scenarios / Weather Regimes inputs (run_scenarios.bat, twice a day)
     python run_daily.py --only load          the Power Demand section's feed (--backfill reloads the history since 2015)
@@ -53,7 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pipeline_config import load_settings, setup_logging  # noqa: E402
 
 log = logging.getLogger("pipeline")
-STEPS = ["swe-model", "swe", "rivers", "morning", "volue", "hydro-prod", "reservoir", "indices", "z500", "eq-members",
+STEPS = ["swe-model", "swe", "rivers", "morning", "volue", "hydro-prod", "reservoir", "official", "indices", "z500", "eq-members",
          "wr-ecens", "load", "fcst-extra", "google"]
 UPLOAD_STEPS = [s for s in STEPS if s != "swe-model"]
 # Not part of the plain "everything" run: google needs zarr + obstore and a Google login on the machine
@@ -101,6 +104,7 @@ def main(argv=None) -> int:
     ap.add_argument("--skip-volue", action="store_true")
     ap.add_argument("--skip-hydro-prod", action="store_true")
     ap.add_argument("--skip-reservoir", action="store_true")
+    ap.add_argument("--skip-official", action="store_true")
     ap.add_argument("--skip-indices", action="store_true")
     ap.add_argument("--skip-z500", action="store_true")
     ap.add_argument("--skip-eq-members", action="store_true")
@@ -119,7 +123,7 @@ def main(argv=None) -> int:
     log.info("hydro pipeline start — schema %s, log %s", settings.schema, log_path)
 
     steps = list(a.only) if a.only else [s for s, skip in zip(STEPS, [a.skip_swe_model, a.skip_swe, a.skip_rivers, a.skip_morning,
-                                                                      a.skip_volue, a.skip_hydro_prod, a.skip_reservoir, a.skip_indices,
+                                                                      a.skip_volue, a.skip_hydro_prod, a.skip_reservoir, a.skip_official, a.skip_indices,
                                                                       a.skip_z500, a.skip_eq_members, a.skip_wr_ecens, a.skip_load,
                                                                       a.skip_fcst_extra])
                                         if not skip and s not in ONLY_ON_REQUEST]
@@ -177,6 +181,13 @@ def main(argv=None) -> int:
             except Exception as e:
                 log.exception("reservoir outlook failed")
                 results["reservoir"] = f"FAILED: {str(e)[:200]}"
+        if "official" in steps:
+            try:
+                import official_reservoirs
+                results["official"] = f"ok {official_reservoirs.run(settings, writer, backfill=a.backfill)}"
+            except Exception as e:
+                log.exception("official reservoir levels failed")
+                results["official"] = f"FAILED: {str(e)[:200]}"
         if "indices" in steps:
             try:
                 import indices_upload

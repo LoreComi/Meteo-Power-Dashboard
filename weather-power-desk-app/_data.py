@@ -26,7 +26,7 @@ from _config import (
     MEMBER_TABLES, SCENARIO_SPATIAL_SOURCES, SPATIAL_METRIC, WR_MODELS, WR_MEMBERS_TABLE,
     HYDRO_START_YEAR, HYDRO_PROD_TABLE, RESERVOIR_OUTLOOK_TABLE, RESERVOIR_OUTLOOK_RUNS_TABLE,
     MORNING_SOURCES, GAS_SOURCES, enabled_sources, POWER_LOAD_TABLE, POWER_LOAD_FCST_TABLE,
-    GOOGLE_WN, INIT_STAMPED_PATTERNS,
+    GOOGLE_WN, INIT_STAMPED_PATTERNS, HYDRO_OFFICIAL_TABLE,
 )
 
 log = logging.getLogger("power_desk.data")
@@ -1423,6 +1423,26 @@ def load_reservoir_model() -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+def load_hydro_official() -> pd.DataFrame:
+    """Official weekly reservoir content per hydro area (area, day, value GWh, capacity,
+    source) from hydro_official_weekly — written by pipeline/official_reservoirs.py.
+    Empty (never raises) until the pipeline has run."""
+    return _load_hydro_official(data_version(HYDRO_OFFICIAL_TABLE))
+
+
+@st.cache_data(ttl=VERSIONED_TTL, max_entries=4, show_spinner=False)
+def _load_hydro_official(version: str) -> pd.DataFrame:
+    cols = ["area", "day", "value", "capacity", "source"]
+    try:
+        df = run_query(f"SELECT area, day, value, capacity, source FROM {SBX_SCHEMA}.{HYDRO_OFFICIAL_TABLE} ORDER BY area, day")
+    except Exception:
+        return pd.DataFrame(columns=cols)
+    if df.empty:
+        return df
+    df = _dt(df, ["day"])
+    return _num(df, ["value", "capacity"])
+
+
 def load_swe_country_daily() -> pd.DataFrame:
     """The internal Exolabs SWE model per Alpine country (mean mm, daily) from
     swe_daily — written by Power_dashboard/pipeline, not by the notebook. Empty
@@ -1620,6 +1640,7 @@ def _versioned_tables() -> dict[str, str]:
     Morning Call / Gas sources switched off are left out: their table may not exist)."""
     tables = {"fcst_daily": "snapshot_ts", "fcst_members": "snapshot_ts", "hydro_daily": "snapshot_ts",
               "swe_daily": "loaded_at", HYDRO_PROD_TABLE: "loaded_at", RESERVOIR_OUTLOOK_TABLE: "loaded_at",
+              HYDRO_OFFICIAL_TABLE: "loaded_at",
               POWER_LOAD_TABLE: "loaded_at", POWER_LOAD_FCST_TABLE: "loaded_at"}
     for sources in (MORNING_SOURCES, GAS_SOURCES):
         for name in enabled_sources(sources):
