@@ -600,7 +600,95 @@ def load_morning_daily(source: str = "EQ") -> pd.DataFrame:
     (data_version), not on a timer.
     """
     cfg = MORNING_SOURCES[source]
-    return _load_morning_daily(source, data_version(cfg["table"]) + _google_version_for(cfg))
+    wp = cfg.get("wind_production")
+    return _load_morning_daily(source, data_version(cfg["table"]) + _google_version_for(cfg)
+                               + (data_version(wp["anchor_table"]) if wp else ""))
+
+
+def wind_production_rows(df: pd.DataFrame, anchor: pd.DataFrame, wp: dict) -> pd.DataFrame:
+    """Wind production (family wp['family'], the anchor's unit) for the runs that only carry a
+    capacity-weighted wind speed — the method and its check are at MORNING_WIND_ESTIMATE:
+
+        production = anchor production × (model wind speed / anchor model wind speed ÷ usual ratio) ^ exponent
+
+    df      the source's rows with init_time (the wp['speed_family'] rows are used);
+    anchor  the anchor model's production rows with init_time: region, day, value, normal, n_points.
+    Each run is scaled from the anchor run of its own init — while that one is missing, from the
+    latest earlier one within max_anchor_age_hours (the same cycle first); `anchor_init` says which.
+    The usual ratio is the median over the same-init pairs in the table per region, model and cycle
+    (both cycles when one has too few pairs; 1.0 when there are too few altogether). Pure: no query.
+    """
+    if df is None or df.empty or anchor is None or anchor.empty:
+        return pd.DataFrame()
+    ws = df[(df["family"] == wp["speed_family"]) & (df["value"] > 0) & df["init_time"].notna()]
+    base = ws[ws["pattern"] == wp["anchor_speed_pattern"]]
+    if base.empty:
+        return pd.DataFrame()
+    key = ["region", "init_time", "day"]
+    a = (anchor.dropna(subset=["value", "init_time"])[key + ["value", "normal", "n_points"]]
+         .merge(base[key + ["value"]].rename(columns={"value": "ws_anchor"}), on=key)
+         .rename(columns={"init_time": "anchor_init", "value": "prod", "normal": "prod_normal", "n_points": "prod_points"}))
+    if a.empty:
+        return pd.DataFrame()
+    inits = pd.DatetimeIndex(sorted(a["anchor_init"].unique()))
+    max_age = pd.Timedelta(hours=float(wp["max_anchor_age_hours"]))
+
+    def pick(t: pd.Timestamp):
+        ok = inits[(inits <= t) & (inits >= t - max_age)]
+        if not len(ok):
+            return pd.NaT
+        same_cycle = ok[ok.hour == t.hour]
+        return (same_cycle if len(same_cycle) else ok).max()
+
+    runs = ws[["pattern", "init_time"]].drop_duplicates()
+    runs["anchor_init"] = [pick(pd.Timestamp(t)) for t in runs["init_time"]]
+    m = (ws.merge(runs.dropna(subset=["anchor_init"]), on=["pattern", "init_time"])
+           .merge(a, on=["region", "anchor_init", "day"]))
+    if m.empty:
+        return pd.DataFrame()
+    m["ratio"] = m["value"] / m["ws_anchor"]
+    usual = np.ones(len(m))
+    if wp.get("remove_usual_ratio", True):
+        m["cycle"] = m["init_time"].dt.hour
+        same = m[m["anchor_init"] == m["init_time"]]
+        by_cycle = (same.groupby(["region", "pattern", "cycle"])["ratio"].agg(u_c="median", n_c="count").reset_index())
+        pooled = same.groupby(["region", "pattern"])["ratio"].agg(u_p="median", n_p="count").reset_index()
+        m = m.merge(by_cycle, how="left", on=["region", "pattern", "cycle"]).merge(pooled, how="left", on=["region", "pattern"])
+        n_min = int(wp["usual_min_samples"])
+        usual = np.where(m["n_c"].fillna(0) >= n_min, m["u_c"],
+                         np.where(m["n_p"].fillna(0) >= n_min, m["u_p"], 1.0)).astype(float)
+        usual = np.clip(usual, *wp["usual_clip"])
+    rel = np.clip(m["ratio"].to_numpy(dtype=float) / usual, *wp["ratio_clip"]) ** float(wp["exponent"])
+    return pd.DataFrame({
+        "provider": m["provider"].to_numpy(), "family": wp["family"], "region": m["region"].to_numpy(),
+        "pattern": m["pattern"].to_numpy(), "reference_date": m["reference_date"].to_numpy(), "day": m["day"].to_numpy(),
+        "value": m["prod"].to_numpy(dtype=float) * rel,
+        "n_points": np.minimum(m["n_points"].to_numpy(dtype=float), m["prod_points"].to_numpy(dtype=float)),
+        "normal": m["prod_normal"].to_numpy(dtype=float), "init_time": m["init_time"].to_numpy(),
+        "init_date": m["init_time"].dt.normalize().to_numpy(), "anchor_init": m["anchor_init"].to_numpy(),
+    })
+
+
+def _wind_anchor_rows(wp: dict, lookback_days: int) -> pd.DataFrame:
+    """The anchor model's production runs (Volue EC-ENS) with their init time; empty when unreadable."""
+    p: dict = {"family": wp["family"]}
+    try:
+        df = run_query(f"""
+            SELECT region, pattern, reference_date, day, value, n_points, normal
+            FROM {SBX_SCHEMA}.{wp['anchor_table']}
+            WHERE family = :family AND pattern IN ({_in("pat", sorted(set(wp["anchor_patterns"].values())), p)})
+              AND reference_date >= current_timestamp() - INTERVAL {int(lookback_days) + 1} DAYS
+        """, p)
+    except Exception as e:
+        log.info("wind production anchor rows not read: %s", str(e)[:200])
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    df = _dt(df, ["reference_date"], utc=True)
+    df = _dt(df, ["day"])
+    df = _num(df, ["value", "n_points", "normal"])
+    df["init_time"] = [init_time_for(p_, r) for r, p_ in zip(df["reference_date"], df["pattern"])]
+    return df
 
 
 @st.cache_data(ttl=VERSIONED_TTL, max_entries=8, show_spinner=False)
@@ -632,6 +720,16 @@ def _load_morning_daily(source: str, version: str) -> pd.DataFrame:
         # Volue patterns: CET issue day + cycle; Meteomatics: nearest cycle to created_at
         df["init_time"] = [init_time_for(p, r) for r, p in zip(df["reference_date"], df["pattern"])]
     df["init_date"] = df["init_time"].dt.normalize()
+    wp = cfg.get("wind_production")
+    if wp:
+        # the models' wind GW, scaled from Volue's EC-ENS production by their wind speed (MORNING_WIND_ESTIMATE)
+        try:
+            est = wind_production_rows(df, _wind_anchor_rows(wp, lookback), wp)
+        except Exception as e:
+            log.warning("wind production estimate failed: %s", str(e)[:200])
+            est = pd.DataFrame()
+        if not est.empty:
+            df = pd.concat([df[df["family"] != wp["family"]], est], ignore_index=True)
     return df
 
 
@@ -1525,8 +1623,9 @@ def _versioned_tables() -> dict[str, str]:
               POWER_LOAD_TABLE: "loaded_at", POWER_LOAD_FCST_TABLE: "loaded_at"}
     for sources in (MORNING_SOURCES, GAS_SOURCES):
         for name in enabled_sources(sources):
-            t = sources[name]["table"]
-            tables[t] = "snapshot_ts" if t in ("morning_daily", "gas_demand_daily") else "loaded_at"
+            for t in (sources[name]["table"], (sources[name].get("wind_production") or {}).get("anchor_table")):
+                if t:
+                    tables[t] = "snapshot_ts" if t in ("morning_daily", "gas_demand_daily") else "loaded_at"
     return tables
 
 

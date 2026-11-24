@@ -296,6 +296,7 @@ MORNING_BLOCKS: dict[str, dict] = {
     # The AI models' wind (family 'ws'): 100 m wind SPEED weighted by installed wind capacity per
     # region (wind_weights_0p5.csv, build_wind_weights.py) — the wind where the turbines stand, not
     # a GW figure, and without a normal (Databricks has no 100 m wind climatology), so Δ norm is n/a.
+    # The same source's "Wind" block (GW) is scaled from these rows: MORNING_WIND_ESTIMATE below.
     # Shown only by sources whose `families` list it. SEE here is HU HR RO BG GR RS BA MK ME AL XK.
     # The Meteomatics rows are ONE instantaneous value a day (≈ 07:18 UTC on the morning load,
     # ≈ 19:18 on the evening one — the silver 'p1d' wind curves); the WeatherNext rows are the
@@ -347,6 +348,38 @@ MORNING_MODEL_LABELS: dict[str, str] = {
     "aifs": "AIFS Op", "icon": "ICON", "ecsr": "EC short-range", "ec-ext": "EC-Extended", "gfs-ext": "GFS-Extended",
 }
 
+# Wind PRODUCTION for the models that only carry a wind speed (the AI models source): Volue's
+# EC-ENS production, scaled by how the model's capacity-weighted wind speed compares with the
+# Meteomatics EC-ENS one on the same region and day (_data.wind_production_rows):
+#     GW(model) = GW(Volue EC-ENS) × [ ws(model) / ws(MM EC-ENS) ÷ usual ratio ] ^ exponent
+# EC-ENS itself therefore shows Volue's own figure, and the normal is Volue's.
+#   - anchor: the EC-ENS run of the model's own init (ec00ens for 00z, ec12ens for 12z); while it
+#     has not landed, the latest earlier one within max_anchor_age_hours, the same cycle first.
+#   - usual ratio: the median of that ratio over the runs in the table, per region, model and
+#     cycle. Two models' 100 m winds differ by a steady few per cent (AIFS −7 % in Italy, GFS +8 %
+#     in France), and WeatherNext's row is a day mean against Meteomatics' single moment (−10 % in
+#     Germany on the 12z, +9 % in Iberia on the 00z); a production model would calibrate that out,
+#     so only the departure from the usual ratio moves the GW.
+#   - checked 2026-11-24 on the one model that has both, GFS-ENS (Volue production + Meteomatics
+#     wind, 20 runs, 7 regions): against Volue's own GFS figure the weekly-mean error is 9.4 % when
+#     EC-ENS is shown as it is, 6.1 % scaled, 5.1 % with the usual ratio removed (daily 14.4 / 9.6
+#     / 8.9 %). An exponent of 1.5 gave 5.0 % — no better than plain proportionality, so 1.0.
+MORNING_WIND_ESTIMATE: dict = {
+    "family": "wnd",                       # the rows written: the report's Wind block (GW)
+    "speed_family": "ws",                  # ... from the capacity-weighted wind-speed rows
+    "anchor_table": "morning_daily_volue", # Volue's production (pipeline --only volue)
+    "anchor_patterns": {0: "ec00ens", 12: "ec12ens"},      # init hour -> the Volue EC-ENS run
+    "anchor_speed_pattern": "ecmwf-ens",   # the Meteomatics EC-ENS wind speed the ratio is taken against
+    "exponent": 1.0,
+    "max_anchor_age_hours": 36,
+    "remove_usual_ratio": True,
+    "usual_min_samples": 28,               # region × model × cycle pairs needed (≈ 2 runs); else both cycles, else 1.0
+    "usual_clip": (0.8, 1.25),
+    "ratio_clip": (0.4, 2.5),              # guard against a near-calm denominator
+}
+MORNING_WIND_ESTIMATE_NOTE = ("estimate: Volue EC-ENS production × the model's capacity-weighted 100 m wind speed "
+                              "relative to EC-ENS (usual offset between the two removed); normal = Volue's")
+
 # Where the Morning Call reads its runs from. EQ (default) is the local pipeline's
 # morning_daily_eq — every model EQ has, every cycle (00/06/12/18), refreshed every
 # couple of hours by pipeline/run_morning.bat, so the latest issue of the reference
@@ -360,18 +393,24 @@ MORNING_SOURCES: dict[str, dict] = {
                       "loaded by Power_dashboard/pipeline (--only volue, run_morning.bat)"},
     "AI models": {"table": "morning_daily", "provider": "Meteomatics", "reference": "ecmwf-aifs-ens", "enabled": True,
                   "compare": ["google-weathernext", "ecmwf-ens", "ncep-gfs-ens"], "lookback_days": 10,
-                  "families": ["tt", "ws"],
+                  "families": ["tt", "wnd", "ws"],
                   "google": True,              # + the Google WeatherNext runs of GOOGLE_WN['table'] (scope 'region')
-                  "note": "Temperature and 100 m wind speed: the weather models carry no wind, solar or "
-                          "precipitation-energy production, so the wind is a capacity-weighted speed in m/s without a "
-                          "normal, and the solar and precipitation blocks are not shown for this source.",
+                  "wind_production": MORNING_WIND_ESTIMATE,     # 'wnd' rows scaled from Volue's EC-ENS production
+                  "block_notes": {"Wind": MORNING_WIND_ESTIMATE_NOTE},
+                  "note": "Temperature and wind: the weather models carry no wind, solar or precipitation-energy "
+                          "production. The wind GW is an estimate scaled from Volue's EC-ENS production by the "
+                          "capacity-weighted wind speed (in m/s, without a normal, in its own block); the solar and "
+                          "precipitation blocks are not shown for this source.",
                   "desc": "AI weather models through the Meteomatics method: the ECMWF AIFS-ENS ensemble mean on the "
                           "Meteomatics grid, reduced to population-weighted means on the report's regions (notebook cell 7) "
                           "with the Volue normal; Google WeatherNext 3 (ensemble mean from Google's own store, same "
                           "weights — contains WeatherNext data from Google, CC BY 4.0), Meteomatics EC-ENS and GFS-ENS "
                           "next to it, on the same method. Wind: 100 m wind speed weighted by installed wind capacity "
                           "per region, in m/s, no normal — a daily mean for WeatherNext, one moment a day (about 07 UTC "
-                          "for a 00z run, 19 UTC for a 12z) for the Meteomatics models"},
+                          "for a 00z run, 19 UTC for a 12z) for the Meteomatics models. Wind GW: an estimate — Volue's "
+                          "EC-ENS production of the same cycle, scaled by the model's wind speed relative to the "
+                          "Meteomatics EC-ENS one (the usual offset between the two removed), with Volue's normal; "
+                          "EC-ENS itself shows Volue's own figure"},
     "EQ":    {"table": "morning_daily_eq", "reference": "ec-ens", "enabled": False,     # switched off: set True to bring it back
               "compare": ["gfs-ens", "aifs-ens", "ec", "gfs"], "lookback_days": 10,
               "families": ["tt", "wnd", "spv", "rre"],

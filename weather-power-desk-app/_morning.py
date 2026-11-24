@@ -269,6 +269,23 @@ class RunCol:
     def temperature_only(self) -> bool:
         return not self.rows.empty and set(self.rows["family"].unique()) <= {"tt"}
 
+    @property
+    def wind_anchor(self) -> pd.Timestamp | None:
+        """Init of the EC-ENS run this column's wind GW is scaled from (MORNING_WIND_ESTIMATE);
+        None when its wind rows are the provider's own."""
+        if self.rows.empty or "anchor_init" not in self.rows.columns:
+            return None
+        a = self.rows["anchor_init"].dropna()
+        return pd.Timestamp(a.iloc[0]) if len(a) else None
+
+    @property
+    def wind_anchor_note(self) -> str:
+        a = self.wind_anchor
+        if a is None:
+            return ""
+        late = "" if a == self.init else f" (the {self.init:%a %H}z EC-ENS is not in yet)"
+        return f"wind GW scaled from Volue EC-ENS {a:%a %d %b %H}z{late}"
+
     def coverage(self) -> tuple[int, int]:
         return (int(self.rows["day"].nunique()) if not self.rows.empty else 0), EXPECTED_HORIZON.get(self.pattern, 15)
 
@@ -399,6 +416,8 @@ def _col_tip(c: RunCol, delta_label: str) -> str:
         lines.append(f"({c.prev_wanted:%a %d %b %H}z is not in the table; nearest earlier run taken)")
     if c.temperature_only:
         lines.append("temperature only")
+    if c.wind_anchor_note:
+        lines.append(c.wind_anchor_note)
     return _tip(lines)
 
 
@@ -510,8 +529,12 @@ def _grid_block_html(cells: pd.DataFrame, name: str, block: dict, cols: list[Run
         corner_sub = {"pair": f"{delta_label} · abs · no normal", None: f"abs · {delta_label} · no normal",
                       "d_norm": "no normal"}.get(view_key, corner_sub)
     short = name.split(" (")[0]          # "Precip (sum of coming 2 weeks)" → "Precip"; the group header says the rest
-    head1 = (f'<tr><th class="mcg-corner" rowspan="2"><div><span class="mcg-corner-name">{short}</span> '
-             f'<span class="mcg-corner-unit">[{block["unit"]}]</span></div>'
+    note = block.get("note")             # e.g. the AI models' wind GW is an estimate (the source's block_notes)
+    unit = f'{block["unit"]} · estimate' if note else block["unit"]
+    corner_tip = f' title="{_tip([note])}"' if note else ""
+    head1 = (f'<tr><th class="mcg-corner" rowspan="2"{corner_tip}>'
+             f'<div><span class="mcg-corner-name">{short}</span> '
+             f'<span class="mcg-corner-unit">[{unit}]</span></div>'
              f'<div class="mcg-corner-sub">{corner_sub}</div></th>')
     for wkey, title, (s, e) in windows:
         if is_sum:
@@ -602,6 +625,8 @@ def _grid_block_html_phone(cells: pd.DataFrame, name: str, block: dict, cols: li
             r = sel.loc[i]
             body += f"<td>{fmt.format(float(r['value']))}<span class='mcp-sub'>{_fmt_delta(r['d_ref'], fmt)}</span></td>"
         body += "</tr>"
+    if block.get("note"):
+        sub += " · estimate"
     return (f"<div class='mc-block'><div class='mcp-title'>{short} <span>{sub}</span></div>"
             f"<table class='mcp-table'>{head}{body}</table></div>")
 
@@ -626,6 +651,8 @@ def _grid_footer(cols: list[RunCol], delta_label: str, view_key: str | None) -> 
         cov = "" if n_days >= 0.9 * expected else f' · <span class="mc-neg">{n_days}/{expected} forecast days</span>'
         pairing = f"{delta_label} vs {c.prev_label}" + ("" if c.prev_exact else " (nearest earlier run)")
         extra = " · temperature only" if c.temperature_only else ""
+        if c.wind_anchor is not None and c.wind_anchor != c.init:      # the usual case is in the column's tooltip
+            extra += f' · <span class="mc-neg">{c.wind_anchor_note}</span>'
         lines.append(f"<b>{c.model}</b> {c.init:%a %d %b}{' · reference' if c.is_ref else ''} — {pairing}{extra}{cov}")
     return out + '<div class="mcg-runs">' + "<br>".join(lines) + "</div>"
 
@@ -666,7 +693,7 @@ def build_brief_context(cur: pd.DataFrame, prev: pd.DataFrame, win: dict, model:
                 has_data = True
             if block["agg"] == "mean":
                 covered = max(covered, max((r["n_days"] for r in rows), default=0))
-            blocks_out[name] = {"unit": block["unit"], "rows": rows}
+            blocks_out[name] = {"unit": block["unit"], "rows": rows, "note": block.get("note")}
         if not blocks_out or not has_data:
             continue
         if wkey == "w3" and covered < SCENARIO_MIN_WEEK_DAYS:
@@ -841,8 +868,11 @@ def render_morning_call():
     st.markdown("#### MORNING CALL")
     source, phone = _layout_and_source()
     src = MORNING_SOURCES[source]
-    # the blocks this source can fill (the AI models: temperature and capacity-weighted wind speed)
-    blocks = {n: b for n, b in MORNING_BLOCKS.items() if not src.get("families") or b["family"] in src["families"]}
+    # the blocks this source can fill (the AI models: temperature, an estimated wind GW and the
+    # capacity-weighted wind speed it is scaled from); block_notes mark what is an estimate
+    notes = src.get("block_notes") or {}
+    blocks = {n: ({**b, "note": notes[n]} if n in notes else b) for n, b in MORNING_BLOCKS.items()
+              if not src.get("families") or b["family"] in src["families"]}
     if phone:
         st.markdown(PHONE_CSS, unsafe_allow_html=True)
         # the phone layout hides the sidebar, so its two jobs (go home, switch layout) sit here
@@ -861,8 +891,9 @@ def render_morning_call():
                       "(run_morning.bat, run_daily.py --only volue).", "warning")
         return
     df = _drop_partial_days(df)
-    if src.get("note"):
-        pass
+    # an estimated block with nothing to scale from (no EC-ENS anchor in the table) is left out, not shown empty
+    have = set(df["family"].unique())
+    blocks = {n: b for n, b in blocks.items() if not b.get("note") or b["family"] in have}
 
     runs = _list_runs(df)
     if not runs:
@@ -916,7 +947,8 @@ def render_morning_call():
                                       help="Any runs — other models' latest, or earlier cycles of the same model. "
                                            "Each gets the same three numbers as the reference, plus its Δ vs the "
                                            "reference; in the chart they are the diamonds. The AI models carry "
-                                           "temperature and 100 m wind speed only.")
+                                           "temperature and 100 m wind speed; their wind GW is an estimate scaled "
+                                           "from Volue's EC-ENS production by that wind speed.")
         with c3:
             rule_key = st.selectbox("Δ run vs", list(MORNING_PREV_RULES), key="mcg_prev",
                                     help="The earlier run every column's Δ run is taken against — the same "

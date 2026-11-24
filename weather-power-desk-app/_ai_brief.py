@@ -239,8 +239,9 @@ No bullets, no headers, no preamble.
 
 # ── Agent families ────────────────────────────────────────────────────────────
 # key -> (label, system prompt, which Morning Call blocks it is shown)
-# _WS_BLOCK is _config.MORNING_WS_BLOCK: the AI models source has no GW wind block, its wind is a
-# capacity-weighted 100 m wind speed in m/s without a normal — the block's name and unit say so.
+# _WS_BLOCK is _config.MORNING_WS_BLOCK: the AI models' own wind is a capacity-weighted 100 m wind
+# speed in m/s without a normal — the block's name and unit say so. Their "Wind" block in GW is an
+# estimate scaled from Volue's EC-ENS production (MORNING_WIND_ESTIMATE); the block's note says so.
 _WS_BLOCK = "Wind speed (100 m, capacity-weighted)"
 POWER_FAMILY: dict[str, tuple[str, str, list[str]]] = {
     "pw_temp":       ("Temperature → load",              _SYS_PW_TEMP,       ["Temperatures"]),
@@ -285,9 +286,10 @@ def _fmt_signed(v, fmt: str = "{:+.1f}") -> str:
     return fmt.format(v)
 
 
-def _block_table(name: str, unit: str, rows: list[dict]) -> str:
-    """One Morning Call block as fixed-width text."""
-    lines = [f"  {name} [{unit}]",
+def _block_table(name: str, unit: str, rows: list[dict], note: str | None = None) -> str:
+    """One Morning Call block as fixed-width text; `note` says what the reader must know about
+    the block's numbers (an estimate, not the provider's own figure)."""
+    lines = [f"  {name} [{unit}]" + (f" — {note}" if note else ""),
              f"    {'Region':<12}{'value':>9}{'Δrun':>9}{'Δnorm':>9}"]
     for r in rows:
         lines.append(f"    {r['region']:<12}{_fmt_num(r.get('value')):>9}"
@@ -323,7 +325,7 @@ def format_morning_doc(ctx: dict, block_names: list[str]) -> str:
             continue
         body.append(f"{win['title']} ({win['range']})")
         for bname, b in blocks.items():
-            body.append(_block_table(bname, b["unit"], b["rows"]))
+            body.append(_block_table(bname, b["unit"], b["rows"], b.get("note")))
         body.append("")
     if not body:
         return "\n".join(h for h in header if h) + "\nNo data available for this block in any window."
