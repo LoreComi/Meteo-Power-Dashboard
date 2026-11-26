@@ -51,8 +51,8 @@ from _config import (
     WR_CLIM_DOY_WINDOW, WR_CLIM_MIN_YEARS, WR_COLORS, SBX_SCHEMA,
 )
 from _charts import (
-    make_wr_iwr_chart, make_wr_percent_chart, make_wr_clim_compare, make_wr_seasonal_clim,
-    make_wr_persistence, make_wr_transition_heatmap,
+    make_wr_iwr_chart, make_wr_clim_compare, make_wr_seasonal_clim,
+    make_wr_persistence, make_wr_transition_heatmap, make_wr_forecast_change_chart,
 )
 from _data import load_wr_forecast_members, load_wr_reanalysis
 from _ui import kpi_card, kpi_row, status_banner, view_switch
@@ -260,6 +260,54 @@ def window_climatology(clim: dict, days: pd.DatetimeIndex) -> pd.Series:
     return rows.mean() if len(rows) else pd.Series(dtype=float)
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def reanalysis_episodes(rean: pd.DataFrame) -> pd.DataFrame:
+    """The reanalysis, one-day flips cleaned, as consecutive episodes:
+    regime, duration (days), start day-of-year. Consecutive rows never share a regime."""
+    if rean.empty:
+        return pd.DataFrame(columns=["regime", "duration", "doy"])
+    ds = rean.sort_values("day").reset_index(drop=True)
+    doy = doy_365(ds["day"])
+    return pd.DataFrame([(r, n, int(doy.iloc[i])) for r, n, i in episodes(clean_singles(list(ds["regime"])))],
+                        columns=["regime", "duration", "doy"])
+
+
+def path_outcomes(eps: pd.DataFrame, path: list[str], min_days: int = 1,
+                  season_doy: int | None = None, season_days: int = 30) -> pd.DataFrame:
+    """What history did next after a given sequence of episodes.
+
+    `path` = [start, step 1, ...]. Every place in the record where those regimes
+    follow one another as consecutive episodes is found and the episode after them
+    is tallied. Every step after the start, and the outcome itself, must last at
+    least `min_days`. With `season_doy`, only sequences whose start episode begins
+    within +/- `season_days` of that calendar day (any year) are kept.
+
+    Returns one row per outcome: n, share (%), median_days — most frequent first.
+    """
+    empty = pd.DataFrame(columns=["n", "share", "median_days"])
+    k = len(path)
+    reg, dur, doy = (eps[c].to_numpy() for c in ("regime", "duration", "doy"))
+    m = len(reg) - k
+    if m <= 0:
+        return empty
+    mask = np.ones(m, dtype=bool)
+    for j, lab in enumerate(path):
+        mask &= reg[j:j + m] == lab
+        if j > 0:
+            mask &= dur[j:j + m] >= min_days
+    mask &= dur[k:k + m] >= min_days
+    if season_doy is not None:
+        gap = np.abs(doy[:m].astype(int) - season_doy)
+        mask &= np.minimum(gap, 365 - gap) <= season_days
+    idx = np.nonzero(mask)[0] + k
+    if not len(idx):
+        return empty
+    out = pd.DataFrame({"state": reg[idx], "days": dur[idx]}).groupby("state")["days"]
+    res = pd.DataFrame({"n": out.size(), "median_days": out.median()})
+    res["share"] = res["n"] / res["n"].sum() * 100
+    return res.sort_values(["n", "median_days"], ascending=False)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # RENDERING
 # ══════════════════════════════════════════════════════════════════════════════
@@ -288,8 +336,28 @@ def _render_headline(perc: pd.DataFrame, clim_share: pd.Series, n_members: int, 
     kpi_row(cards, max_cols=4)
 
 
+def _compare_run(sub: pd.DataFrame, run_ts, clean: bool, days: pd.DatetimeIndex):
+    """Pick the run to compare against (default: the one just before) and return
+    (its member shares on this run's days, its label) — or (None, None)."""
+    earlier = sorted({pd.Timestamp(t) for t in sub["reference_date"].unique()
+                      if pd.Timestamp(t) < pd.Timestamp(run_ts)}, reverse=True)
+    if not earlier:
+        st.caption("No earlier run of this model in the table — the change panel needs one.")
+        return None, None
+    key = "wr_cmp_run"
+    if st.session_state.get(key) not in earlier:
+        st.session_state[key] = earlier[0]
+    prev_ts = st.selectbox("Change against run", earlier, key=key,
+                           format_func=lambda t: t.strftime("%a %d %b %H:%Mz"),
+                           help="The bottom panel is this run's member share minus that run's, "
+                                "per regime and day, in percentage points.")
+    prev = sub[sub["reference_date"].map(pd.Timestamp) == prev_ts]
+    prev_perc = member_percentages(prev, clean=clean).reindex(days).dropna(how="all")
+    return prev_perc, prev_ts.strftime("%Hz %a %d %b")
+
+
 def _render_forecast(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, model_label: str, n_members: int,
-                     extended: bool) -> None:
+                     extended: bool, sub: pd.DataFrame, run_ts, clean: bool) -> None:
     mean, thr, band, no_days = ensemble_iwr(run)
     if perc.empty:
         status_banner("This run has no member rows to summarise.", "warning")
@@ -299,9 +367,21 @@ def _render_forecast(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, model_la
     clim_share = window_climatology(clim, days)
     _render_headline(perc, clim_share, n_members, days)
 
-    st.plotly_chart(make_wr_percent_chart(perc[[c for c in WR_ALL_LABELS if perc[c].sum() > 0]],
-                                          f"Share of members per regime — {model_label}", n_members),
-                    use_container_width=True)
+    cc, _ = st.columns([1.6, 4])
+    with cc:
+        prev_perc, prev_label = _compare_run(sub, run_ts, clean, perc.index)
+    change = None
+    if prev_perc is not None and not prev_perc.empty:
+        change = (perc.reindex(prev_perc.index) - prev_perc).reindex(columns=WR_ALL_LABELS)
+    run_label = pd.Timestamp(run_ts).strftime("%Hz %Y-%m-%d")
+    st.plotly_chart(make_wr_forecast_change_chart(
+        perc, change, clim_share,
+        f"Weather regime forecast — {model_label} {run_label}",
+        f"Change from the {prev_label} run (pp)" if prev_label else "", n_members),
+        use_container_width=True)
+    if change is not None and len(change) < len(perc):
+        st.caption(f"The comparison run does not reach the last {len(perc) - len(change)} day(s), "
+                   "so those days have no change bar.")
 
     show_band = st.checkbox("Show the P25–P75 member band behind each mean line",
                             value=False, key="wr_band")
@@ -408,6 +488,72 @@ def _render_climatology(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, clean
             use_container_width=True)
 
 
+def _render_explorer(rean: pd.DataFrame, perc: pd.DataFrame) -> None:
+    """Pick a regime, then the next one, then the one after: at each step, what the
+    reanalysis did next — over the whole year and within +/- 30 days of today."""
+    eps = reanalysis_episodes(rean) if not rean.empty else pd.DataFrame()
+    if eps.empty:
+        status_banner(f"{SBX_SCHEMA}.wr_reanalysis_daily is empty — the explorer needs the "
+                      "classified reanalysis.", "warning")
+        return
+    today = pd.Timestamp.today().normalize()
+    tdoy = int(doy_365(pd.Series([today])).iloc[0])
+    season = f"±30 d of {today:%d %b}"
+
+    c1, c2 = st.columns([1.6, 3])
+    with c1:
+        key = "wr_x_start"
+        if st.session_state.get(key) not in WR_ALL_LABELS:
+            first = dominant_regime(perc).iloc[0] if not perc.empty else WR_REGIMES[0]
+            st.session_state[key] = first if first in WR_ALL_LABELS else WR_REGIMES[0]
+        start = st.selectbox("Start from", WR_ALL_LABELS, key=key,
+                             format_func=lambda r: f"{r} — {WR_REGIME_LONG.get(r, r)}")
+    with c2:
+        st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+        strict = st.checkbox(f"Every step must last at least {WR_TRANS_MIN_DAYS} days", value=False,
+                             key="wr_x_strict",
+                             help="Counts a sequence only if each regime after the start — including "
+                                  "'no regime' — lasts at least that long. Samples shrink fast, "
+                                  "especially within ±30 days.")
+    min_days = WR_TRANS_MIN_DAYS if strict else 1
+    durs = eps.loc[eps["regime"] == start, "duration"]
+    st.caption(f"Reanalysis {rean['day'].min():%Y}–{rean['day'].max():%Y}, one-day flips removed. "
+               f"{start} episodes: {len(durs)}, median length {durs.median():.0f} days. Each step "
+               f"is the next episode — a change of regime — so staying in {start} is not an option; "
+               "'Median days' is how long that next state then lasts.")
+
+    path = [start]
+    cols = st.columns(3)
+    for step in range(3):
+        with cols[step]:
+            st.markdown(f"###### Step {step + 1} — after {' → '.join(path)}")
+            allyr = path_outcomes(eps, path, min_days)
+            seas = path_outcomes(eps, path, min_days, season_doy=tdoy)
+            if allyr.empty:
+                st.caption("This sequence never occurs in the record.")
+                break
+            tbl = pd.DataFrame({
+                "All year": allyr["share"].astype(float),
+                "n": allyr["n"].astype(int),
+                season: seas["share"].reindex(allyr.index).astype(float).fillna(0.0),
+                "n ": seas["n"].reindex(allyr.index).astype(float).fillna(0).astype(int),
+                "Median days": allyr["median_days"].astype(float),
+            })
+            st.dataframe(tbl.style.format({"All year": "{:.0f}%", season: "{:.0f}%",
+                                           "Median days": "{:.0f}"})
+                         .background_gradient(cmap="Blues", subset=["All year", season], vmin=0, vmax=100),
+                         use_container_width=True)
+            st.caption(f"{int(allyr['n'].sum())} cases all year · {int(seas['n'].sum())} within {season}"
+                       + (" — too few to read much into" if seas["n"].sum() < 10 else ""))
+            if step < 2:
+                key = f"wr_x_step{step + 1}"
+                options = list(allyr.index)
+                if st.session_state.get(key) not in options:
+                    st.session_state[key] = options[0]
+                path.append(st.selectbox(f"Step {step + 1} goes to", options, key=key,
+                                         format_func=lambda r: f"{r} — {WR_REGIME_LONG.get(r, r)}"))
+
+
 def render_regimes():
     """Forecast → Weather Regimes."""
     st.markdown("##### European Weather Regimes")
@@ -465,8 +611,14 @@ def render_regimes():
     st.session_state["_wr_rean"] = rean
 
     perc = member_percentages(run, clean=clean)
-    if view_switch("Regime view", ["Forecast", "Climatology"], "wr_view", {"Forecast": ("wr_band",)}) == "Forecast":
-        _render_forecast(run, perc, clim, model_label, n_members, extended=int(horizon) > WR_DEFAULT_HORIZON_DAYS)
+    view = view_switch("Regime view", ["Forecast", "Climatology", "Explorer"], "wr_view",
+                       {"Forecast": ("wr_band", "wr_cmp"), "Climatology": ("wr_season",),
+                        "Explorer": ("wr_x_",)})
+    if view == "Forecast":
+        _render_forecast(run, perc, clim, model_label, n_members,
+                         extended=int(horizon) > WR_DEFAULT_HORIZON_DAYS, sub=sub, run_ts=run_ts, clean=clean)
+    elif view == "Explorer":
+        _render_explorer(rean, perc)
     elif not perc.empty:
         _render_climatology(run, perc, clim, clean)
 

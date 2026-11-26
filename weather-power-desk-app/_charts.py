@@ -1114,6 +1114,121 @@ def make_wr_transition_heatmap(matrix: pd.DataFrame, title: str, unit: str = "%"
     return fig
 
 
+# Bottom-to-top stacking of the forecast bars, so the blocked / Atlantic regimes
+# sit together and "no regime" caps the column.
+WR_STACK_ORDER = ["ZO", "AT", "ScTr", "EuBl", "ScBl", "AR", "GL", "no"]
+
+
+def make_wr_forecast_change_chart(perc: pd.DataFrame, change: pd.DataFrame | None,
+                                  clim_share: pd.Series | None, title: str, change_title: str,
+                                  n_members: int, majority: float = 50.0) -> go.Figure:
+    """Member share per regime per day, stacked, with the run-to-run change below.
+
+    Top strip: the day's regime when more than `majority` % of members agree on one
+    (grey when none does). Main panel: stacked member shares, labelled when >= 10 %,
+    with the climatological share for the window as one column on the right. Bottom
+    panel (when `change` is given): this run minus the comparison run, in percentage
+    points, one bar per regime per day.
+    """
+    from plotly.subplots import make_subplots
+
+    has_change = change is not None and not change.empty
+    rows = 3 if has_change else 2
+    titles = ["", "", "", ""] + ([change_title, ""] if has_change else [])
+    fig = make_subplots(rows=rows, cols=2, column_widths=[0.95, 0.05],
+                        row_heights=[0.05, 0.6, 0.35] if has_change else [0.07, 0.93],
+                        shared_xaxes=True, vertical_spacing=0.05, horizontal_spacing=0.012,
+                        subplot_titles=titles)
+    fig.update_layout(**PLOTLY_LAYOUT)
+    fig.update_layout(title=dict(text=title, font=dict(size=14), y=0.985, yanchor="top"),
+                      height=700 if has_change else 490, barmode="relative", hovermode="closest",
+                      margin=dict(t=95),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, traceorder="normal"))
+    if perc.empty:
+        return fig
+
+    # Numeric x (one slot per day) rather than categories: the change bars are placed
+    # side by side by hand, which keeps the stacked panel's bars full width.
+    n = len(perc)
+    pos = np.arange(n, dtype=float)
+    labels = [d.strftime("%a %d<br>%b") for d in perc.index]
+    hover_day = [d.strftime("%a %d %b") for d in perc.index]
+    regimes = [r for r in WR_STACK_ORDER if r in perc.columns and perc[r].sum() > 0]
+    if clim_share is not None and len(clim_share):
+        regimes = [r for r in WR_STACK_ORDER
+                   if r in regimes or float(clim_share.get(r, 0.0)) > 0]
+
+    # majority strip
+    lead = perc[[r for r in perc.columns if r != "no"]]
+    top, top_share = lead.idxmax(axis=1), lead.max(axis=1)
+    strip_col = [WR_COLORS.get(t, INK_MUTED) if v > majority else "#dcdcdc"
+                 for t, v in zip(top, top_share)]
+    strip_txt = [f"{t}: {v:.0f}% of members" if v > majority else f"no regime above {majority:.0f}%"
+                 for t, v in zip(top, top_share)]
+    fig.add_trace(go.Bar(x=pos, y=[1] * n, width=0.94, marker_color=strip_col,
+                         marker_line=dict(color=INK_SECONDARY, width=0.6), showlegend=False,
+                         customdata=np.column_stack([hover_day, strip_txt]),
+                         hovertemplate="%{customdata[0]}<br>%{customdata[1]}<extra></extra>"),
+                  row=1, col=1)
+
+    w = 0.9 / max(len(regimes), 1)                      # width of one change bar
+    for k, regime in enumerate(regimes):                # bottom of the stack first
+        c = WR_COLORS.get(regime, INK_MUTED)
+        y = perc[regime] if regime in perc.columns else pd.Series(0.0, index=perc.index)
+        chg = (change[regime].reindex(perc.index) if has_change and regime in change.columns
+               else pd.Series(np.nan, index=perc.index))
+        chg_txt = ["n/a" if pd.isna(v) else f"{v:+.0f} pp" for v in chg]
+        fig.add_trace(go.Bar(x=pos, y=y, width=0.94, name=regime, legendgroup=regime,
+                             legendrank=len(regimes) - k,       # legend reads top of stack first
+                             marker_color=c, marker_line=dict(color="white", width=0.5),
+                             customdata=np.column_stack([hover_day, chg_txt]),
+                             text=[f"{v:.0f}" if v >= 10 else "" for v in y],
+                             textposition="inside", insidetextanchor="end",
+                             textfont=dict(color="white", size=11),
+                             hovertemplate=(f"{regime} %{{customdata[0]}}<br>%{{y:.0f}}% of {n_members} "
+                                            "members<br>change from previous: %{customdata[1]}"
+                                            "<extra></extra>")),
+                      row=2, col=1)
+        if clim_share is not None and len(clim_share):
+            v = float(clim_share.get(regime, 0.0))
+            fig.add_trace(go.Bar(x=[0], y=[v], width=0.9, legendgroup=regime, showlegend=False,
+                                 marker_color=c, marker_line=dict(color="white", width=0.5),
+                                 text=[f"{v:.0f}" if v >= 8 else ""],
+                                 textposition="inside", insidetextanchor="end",
+                                 textfont=dict(color="white", size=10),
+                                 hovertemplate=f"{regime}<br>climatology %{{y:.0f}}%<extra></extra>"),
+                          row=2, col=2)
+        if has_change and regime in change.columns:
+            fig.add_trace(go.Bar(x=pos - 0.45 + w * (k + 0.5), y=chg, width=w * 0.9,
+                                 legendgroup=regime, showlegend=False,
+                                 marker_color=c, marker_line_width=0, customdata=hover_day,
+                                 hovertemplate=f"{regime} %{{customdata}}<br>%{{y:+.0f}} pp<extra></extra>"),
+                          row=3, col=1)
+
+    xr = [-0.5, n - 0.5]
+    last_row = 3 if has_change else 2
+    for r in range(1, last_row + 1):
+        fig.update_xaxes(range=xr, tickmode="array", tickvals=list(pos), ticktext=labels,
+                         showticklabels=(r == last_row), showgrid=False, row=r, col=1)
+    fig.update_yaxes(visible=False, range=[0, 1], row=1, col=1)
+    fig.update_yaxes(title_text="% of members", range=[0, 100], row=2, col=1)
+    fig.update_xaxes(tickmode="array", tickvals=[0], ticktext=["climo"], range=[-0.5, 0.5],
+                     showticklabels=True, row=2, col=2)
+    fig.update_yaxes(range=[0, 100], showticklabels=False, row=2, col=2)
+    for r in range(1, last_row + 1):
+        if r != 2:
+            fig.update_xaxes(visible=False, row=r, col=2)
+            fig.update_yaxes(visible=False, row=r, col=2)
+    if has_change:
+        vals = change.to_numpy(dtype=float)
+        lim = float(np.ceil(np.nanmax(np.abs(vals)) / 25) * 25) if np.isfinite(vals).any() else 25.0
+        fig.update_yaxes(title_text="pp", range=[-max(lim, 25.0), max(lim, 25.0)], zeroline=True,
+                         zerolinecolor=BASELINE, row=3, col=1)
+        for i in range(1, n):
+            fig.add_vline(x=i - 0.5, line_color=GRIDLINE, line_width=1, row=3, col=1)
+    return fig
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # MORNING CALL — anomaly and change, as arrows
 # ══════════════════════════════════════════════════════════════════════════════
