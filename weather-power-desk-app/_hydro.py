@@ -62,6 +62,7 @@ from _config import (
     RESERVOIR_OUTLOOK_TABLE, RESERVOIR_OUTLOOK_AREAS, RESERVOIR_OUTLOOK_HISTORY_DAYS, RESERVOIR_OUTLOOK_PAST_ISSUES,
     RESERVOIR_OUTLOOK_HORIZONS, HYDRO_OFFICIAL_TABLE, HYDRO_OFFICIAL_FIT_WEEKS, HYDRO_OFFICIAL_MIN_CORR,
     HYDRO_OFFICIAL_MAX_GAP_DAYS, HYDRO_OWN_NORM_MIN_YEARS, HYDRO_OFFICIAL_SOURCE_NAMES,
+    HYDRO_OFFICIAL_MAX_BRIDGE_DAYS, HYDRO_OFFICIAL_DRIFT_SD,
 )
 from _data import (
     load_hydro_available, load_hydro_series, load_hydro_component, load_swe_country_daily, load_river_latest,
@@ -214,9 +215,10 @@ def _layer_data_v(layer: str, version: str) -> tuple[dict[str, tuple[pd.Series, 
                 if area in off_by_area:
                     o = off_by_area[area]
                     actual, sp = splice_official(o.set_index("day")["value"].sort_index(), actual,
-                                                 HYDRO_OFFICIAL_FIT_WEEKS, HYDRO_OFFICIAL_MIN_CORR, HYDRO_OFFICIAL_MAX_GAP_DAYS)
+                                                 HYDRO_OFFICIAL_FIT_WEEKS, HYDRO_OFFICIAL_MIN_CORR, HYDRO_OFFICIAL_MAX_GAP_DAYS,
+                                                 HYDRO_OFFICIAL_MAX_BRIDGE_DAYS, HYDRO_OFFICIAL_DRIFT_SD)
                     normal = None
-                    info[area] = {"source": str(o["source"].iloc[-1]), **sp}
+                    info[area] = {**_sources(o), **sp}
                 else:
                     if cfg.get("official") and _completed_years(actual) >= HYDRO_OWN_NORM_MIN_YEARS:
                         normal = None
@@ -226,7 +228,7 @@ def _layer_data_v(layer: str, version: str) -> tuple[dict[str, tuple[pd.Series, 
                 if area not in series:
                     actual, sp = splice_official(o.set_index("day")["value"].sort_index(), None)
                     series[area] = (actual, None)
-                    info[area] = {"source": str(o["source"].iloc[-1]), **sp}
+                    info[area] = {**_sources(o), **sp}
         elif src == "swe_daily":
             df = load_swe_country_daily()
             for region, g in (df.groupby("region") if not df.empty else []):
@@ -237,6 +239,17 @@ def _layer_data_v(layer: str, version: str) -> tuple[dict[str, tuple[pd.Series, 
     except Exception:
         return {}, {}
     return series, info
+
+
+def _sources(o: pd.DataFrame) -> dict:
+    """The official rows' source, and - when the latest weeks come from another
+    one (CH: SFOE's figures via ENTSO-E) - that source and where it starts."""
+    o = o.sort_values("day")
+    first, last = str(o["source"].iloc[0]), str(o["source"].iloc[-1])
+    out = {"source": first, "tail_source": None, "tail_from": None}
+    if last != first:
+        out.update(tail_source=last, tail_from=o.loc[o["source"] == last, "day"].min())
+    return out
 
 
 def _source_note(layer: str, area: str) -> str:
@@ -250,6 +263,11 @@ def _source_note(layer: str, area: str) -> str:
         return "Volue (no official series for this area)"
     txt = (f"official: {i['source']} weekly {pd.Timestamp(i['first_official']):%b %Y} – "
            f"{pd.Timestamp(i['last_official']):%d %b %Y}")
+    if i.get("tail_source"):
+        txt += f" (from {pd.Timestamp(i['tail_from']):%d %b} {HYDRO_OFFICIAL_SOURCE_NAMES.get(i['tail_source'], i['tail_source'])})"
+    if i.get("drift") is not None:
+        txt += (f"; Volue not used after it: its level is {i['drift']:+,.0f} GWh off the official week "
+                "(a synthetic actual not yet corrected)")
     if i.get("bridged_to") is not None:
         txt += (f", then Volue's daily change ×{i['slope']:.2f} to {pd.Timestamp(i['bridged_to']):%d %b}")
     if i.get("extended_from") is not None:

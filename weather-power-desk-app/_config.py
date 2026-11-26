@@ -965,15 +965,23 @@ HYDRO_START_YEAR = 2000      # read every Volue hydro day there is (the silver t
 # official series (DE, SEE, BA) stay on Volue, with the mean of their completed years
 # as normal once they have HYDRO_OWN_NORM_MIN_YEARS of them (Volue's normal before).
 # Volue vs official, 2017–2026: CH NO SE FI IT and the Eastern countries agree within
-# a few %; Volue's FR is 3.3× ENTSO-E's scope, AT 1.4×, ES 1.2×, MK 0.3×.
+# a few %; Volue's FR is 3.3× ENTSO-E's scope, AT 1.4×, ES 1.2×, MK 0.3×. CH = SFOE,
+# with the weeks after the OGD file's last one from ENTSO-E (identical figures since 2025).
 HYDRO_OFFICIAL_TABLE = "hydro_official_weekly"
 HYDRO_OFFICIAL_FIT_WEEKS = 104
 HYDRO_OFFICIAL_MIN_CORR = 0.9
 HYDRO_OFFICIAL_MAX_GAP_DAYS = 7          # Volue must have a day this close to the official week it is anchored on
+# Volue's 'sa' is a synthetic actual and drifts while the official figures are not
+# yet published (CH, Oct-Nov 2026: Volue +800 GWh while the lakes fell 750), so it
+# bridges at most this many days past the last published week, and only when it
+# still agrees with that week (within HYDRO_OFFICIAL_DRIFT_SD robust sd of the fit).
+HYDRO_OFFICIAL_MAX_BRIDGE_DAYS = 14
+HYDRO_OFFICIAL_DRIFT_SD = 4.0
 HYDRO_OWN_NORM_MIN_YEARS = 3
 HYDRO_OFFICIAL_SOURCE_NAMES = {
     "SFOE": "SFOE (Swiss Federal Office of Energy)", "NVE": "NVE (Norwegian Water Resources and Energy Directorate)",
     "ENTSO-E": "ENTSO-E Transparency 16.1.D", "NVE + ENTSO-E": "NVE (NO) + ENTSO-E (SE, FI)",
+    "SFOE via ENTSO-E": "SFOE's figures via ENTSO-E",
 }
 
 # ── Overview map (first tab of the section) ──────────────────────────────────

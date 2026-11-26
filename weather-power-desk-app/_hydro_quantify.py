@@ -252,7 +252,8 @@ def quantify_anomaly(clim: dict, today: dt.date | None = None) -> dict:
 
 
 def splice_official(official: pd.Series, volue: pd.Series | None, fit_weeks: int = 104,
-                    min_corr: float = 0.9, max_gap_days: int = 7) -> tuple[pd.Series, dict]:
+                    min_corr: float = 0.9, max_gap_days: int = 7, max_bridge_days: int = 14,
+                    drift_sd: float = 4.0, drift_min_share: float = 0.02) -> tuple[pd.Series, dict]:
     """One daily series on the official scale: the official weekly values as
     published (linearly interpolated to days, gaps up to five weeks), and Volue's
     daily level carried on from them — after the last published week and before
@@ -262,9 +263,18 @@ def splice_official(official: pd.Series, volue: pd.Series | None, fit_weeks: int
     only when the two correlate ≥ min_corr there, so a series of a different
     shape (or none) leaves the official weeks alone.
 
+    Volue's 'sa' is a synthetic actual: it tracks the official figures once they
+    are published and can drift while they are not (CH, Oct-Nov 2026: +800 GWh
+    against an official -750). So Volue carries the series on only
+      - from an official week where it still agrees with it: the residual of that
+        week against the fit within drift_sd robust standard deviations of the
+        fit's residuals (and at least drift_min_share of the official range), and
+      - for at most max_bridge_days after the last published week.
+
     Returns (series, info): info = first_official / last_official (dates),
     slope, corr, n_fit, bridged_to (the last Volue day added after the official
-    weeks, or None) and extended_from (the first Volue day added before them)."""
+    weeks, or None), extended_from (the first Volue day added before them) and
+    drift (Volue's residual at the last official week, GWh, when it blocked the bridge)."""
     off = official.dropna().astype(float).sort_index()
     off.index = pd.DatetimeIndex(off.index).normalize()
     off = off[~off.index.duplicated(keep="last")]
@@ -273,7 +283,7 @@ def splice_official(official: pd.Series, volue: pd.Series | None, fit_weeks: int
         vol.index = pd.DatetimeIndex(vol.index).normalize()
         vol = vol[~vol.index.duplicated(keep="last")]
     info = {"first_official": None, "last_official": None, "slope": None, "corr": None, "n_fit": 0,
-            "bridged_to": None, "extended_from": None}
+            "bridged_to": None, "extended_from": None, "drift": None}
     if off.empty:
         return vol, info
     t0, t1 = off.index[0], off.index[-1]
@@ -284,25 +294,37 @@ def splice_official(official: pd.Series, volue: pd.Series | None, fit_weeks: int
     fit = common[common.index > t1 - pd.Timedelta(weeks=fit_weeks)]
     if len(fit) < 8:
         fit = common
-    slope = None
+    slope = intercept = None
+    tol = 0.0
     if len(fit) >= 8 and fit["v"].std() > 0 and fit["o"].std() > 0:
         corr = float(fit.corr().iloc[0, 1])
         info.update(corr=corr, n_fit=int(len(fit)))
         if corr >= min_corr:
-            slope = float(np.polyfit(fit["v"].values, fit["o"].values, 1)[0])
+            slope, intercept = (float(x) for x in np.polyfit(fit["v"].values, fit["o"].values, 1))
+            res = fit["o"] - (slope * fit["v"] + intercept)
+            robust_sd = float(1.4826 * (res - res.median()).abs().median())
+            tol = max(drift_sd * robust_sd, drift_min_share * float(off.max() - off.min()))
     info["slope"] = slope
+
+    def _agrees(t: pd.Timestamp, v: float) -> tuple[bool, float]:
+        r = float(off.loc[t] - (slope * v + intercept))
+        return abs(r) <= tol, r
 
     parts = [daily]
     if slope is not None:
         gap = pd.Timedelta(days=max_gap_days)
-        after = vol[vol.index > t1]
+        after = vol[(vol.index > t1) & (vol.index <= t1 + pd.Timedelta(days=max_bridge_days))]
         anchor = vol[(vol.index <= t1) & (vol.index >= t1 - gap)]
         if len(after) and len(anchor):
-            parts.append(off.iloc[-1] + slope * (after - anchor.iloc[-1]))
-            info["bridged_to"] = after.index[-1]
+            ok, r = _agrees(t1, anchor.iloc[-1])
+            if ok:
+                parts.append(off.iloc[-1] + slope * (after - anchor.iloc[-1]))
+                info["bridged_to"] = after.index[-1]
+            else:
+                info["drift"] = -r
         before = vol[vol.index < t0]
         anchor0 = vol[(vol.index >= t0) & (vol.index <= t0 + gap)]
-        if len(before) and len(anchor0):
+        if len(before) and len(anchor0) and _agrees(t0, anchor0.iloc[0])[0]:
             parts.insert(0, off.iloc[0] + slope * (before - anchor0.iloc[0]))
             info["extended_from"] = before.index[0]
     return pd.concat(parts).sort_index(), info

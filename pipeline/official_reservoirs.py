@@ -5,7 +5,12 @@ official series exists (the app splices Volue's daily level onto it — see
 _hydro_quantify.splice_official). Sources, all public:
 
   CH  SFOE / BFE energy dashboard, total Swiss storage lakes (OGD CSV, weekly
-      since 2000, stamped Monday). ENTSO-E's CH figure covers only ~74 % of it.
+      since 2000, stamped Monday). The OGD file can lag the dashboard by weeks
+      (it ended 28 Sep 2026 in late November), so the weeks after its last one are
+      taken from ENTSO-E's CH series, which since 2025 carries exactly SFOE's
+      Monday figures and is published sooner (before 2025 it covered 50–78 % of
+      SFOE's total, so it is not used for the history). The append is checked:
+      on the weeks both have since 2025, ENTSO-E must equal SFOE within 1 %.
   NO  NVE magasinstatistikk, national (weekly since 1995, stamped Sunday).
   FR AT IT ES SE FI BG GR HR RO RS MK SI
       ENTSO-E Transparency 16.1.D, "aggregated filling rate of water reservoirs
@@ -47,6 +52,7 @@ NVE_URL = "https://biapi.nve.no/magasinstatistikk/api/Magasinstatistikk/HentOffe
 ENTSOE_TABLE = "dna_prod_silver.entsoe.hydro_reservoir_level"
 # ENTSO-E map code -> dashboard hydro area (CH and NO come from SFOE / NVE instead)
 ENTSOE_AREAS = {a: a for a in ("FR", "AT", "IT", "ES", "SE", "FI", "BG", "GR", "HR", "RO", "RS", "MK", "SI")}
+CH_ENTSOE_SINCE = pd.Timestamp("2025-01-01")   # from here ENTSO-E's CH week = SFOE's Monday reading
 
 
 def _get(url: str, timeout: int = 90) -> bytes:
@@ -82,8 +88,9 @@ def fetch_nve() -> pd.DataFrame:
 
 
 def fetch_entsoe(writer) -> pd.DataFrame:
-    """The latest revision of every (area, ISO week), stamped on the week's Sunday."""
-    codes = ",".join(f"'{c}'" for c in ENTSOE_AREAS)
+    """The latest revision of every (area, ISO week), stamped on the week's Sunday
+    (CH included, for extend_ch — it is not an area of its own here)."""
+    codes = ",".join(f"'{c}'" for c in list(ENTSOE_AREAS) + ["CH"])
     df = writer.query_df(f"""
         SELECT area_map_code AS area, CAST(year AS INT) AS year, CAST(week AS INT) AS week,
                stored_energy / 1000.0 AS value
@@ -95,8 +102,33 @@ def fetch_entsoe(writer) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=[c for c, _ in COLUMNS if c != "loaded_at"])
     days = [dt.date.fromisocalendar(int(y), int(w), 7) for y, w in zip(df["year"], df["week"])]
-    return pd.DataFrame({"area": df["area"].map(ENTSOE_AREAS), "day": days, "value": df["value"].astype(float),
+    return pd.DataFrame({"area": df["area"].map(lambda a: ENTSOE_AREAS.get(a, a)), "day": days, "value": df["value"].astype(float),
                          "capacity": float("nan"), "source": "ENTSO-E"})
+
+
+def extend_ch(sfoe: pd.DataFrame, ent_ch: pd.DataFrame) -> pd.DataFrame:
+    """SFOE's weeks after its last one, from ENTSO-E's CH series (restamped from the
+    week's Sunday to its Monday, SFOE's day) — only when ENTSO-E reproduces SFOE on
+    the weeks both have since CH_ENTSOE_SINCE."""
+    if sfoe.empty or ent_ch.empty:
+        return pd.DataFrame(columns=sfoe.columns)
+    e = ent_ch.assign(day=pd.to_datetime(ent_ch["day"]) - pd.Timedelta(days=6))
+    e = e[e["day"] >= CH_ENTSOE_SINCE]
+    sf = sfoe.assign(day=pd.to_datetime(sfoe["day"]))
+    both = sf.merge(e, on="day", suffixes=("_s", "_e"))
+    if len(both) < 8:
+        log.warning("CH: only %d weeks shared by SFOE and ENTSO-E since %s — not appending ENTSO-E", len(both),
+                    CH_ENTSOE_SINCE.date())
+        return pd.DataFrame(columns=sfoe.columns)
+    match = float(((both["value_e"] / both["value_s"] - 1).abs() < 0.01).mean())
+    if match < 0.9:
+        log.warning("CH: ENTSO-E equals SFOE on only %.0f %% of the shared weeks — not appending it", match * 100)
+        return pd.DataFrame(columns=sfoe.columns)
+    tail = e[e["day"] > sf["day"].max()]
+    log.info("CH: SFOE ends %s; %d later weeks from ENTSO-E (equal to SFOE on %.0f %% of %d shared weeks), to %s",
+             sf["day"].max().date(), len(tail), match * 100, len(both), tail["day"].max().date() if len(tail) else "-")
+    return pd.DataFrame({"area": "CH", "day": tail["day"].dt.date, "value": tail["value"].values,
+                         "capacity": float(sfoe["capacity"].iloc[-1]), "source": "SFOE via ENTSO-E"})
 
 
 def nordic_sum(parts: pd.DataFrame) -> pd.DataFrame:
@@ -124,7 +156,9 @@ def run(settings, writer, backfill: bool = False, today: dt.date | None = None) 
     if not parts:
         raise RuntimeError("no official source could be read")
     df = pd.concat(parts, ignore_index=True)
-    df = pd.concat([df, nordic_sum(df)], ignore_index=True)
+    ent_ch = df[(df["area"] == "CH") & (df["source"] == "ENTSO-E")]
+    df = df.drop(ent_ch.index)
+    df = pd.concat([df, extend_ch(df[df["area"] == "CH"], ent_ch), nordic_sum(df)], ignore_index=True)
     df = df.drop_duplicates(KEYS, keep="first").sort_values(KEYS).reset_index(drop=True)
     df["loaded_at"] = pd.Timestamp.now(tz="UTC").tz_localize(None)
 
