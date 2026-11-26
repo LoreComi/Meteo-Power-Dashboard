@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 
@@ -794,6 +795,57 @@ def load_wr_reanalysis() -> pd.DataFrame:
     # moved on between refreshes (seen 2026-11-03: three identical rows for 28 Oct)
     df = df.drop_duplicates(subset=["day"], keep="last").reset_index(drop=True)
     return _num(df, ["max_iwr"] + [f"iwr_{r}" for r in WR_REGIMES])
+
+
+def _region_key(region: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", region.lower())
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_wr_impact_daily() -> pd.DataFrame:
+    """Regional daily anomalies for the regime-impact composites, one row per day.
+
+    t_<region>   temperature anomaly, °C — population-weighted across the region's countries
+    w_<region>   wind generation anomaly, GW — summed over the region's countries
+    wn_<region>  wind normal, GW — summed likewise (the base for the % anomaly)
+
+    A region's value is NULL on a day where any of its countries is missing, so a
+    partly-loaded recent day never passes for a small anomaly.
+    """
+    from _config import WR_IMPACT_TEMP_REGIONS, WR_IMPACT_WIND_REGIONS
+    sel = []
+    for region, weights in WR_IMPACT_TEMP_REGIONS.items():
+        k, codes = _region_key(region), list(weights)
+        inr = f"metric = 'Temperature' AND area IN ({_sql_list(codes)})"
+        w = "CASE area " + " ".join(f"WHEN '{c}' THEN {float(v)}" for c, v in weights.items()) + " END"
+        sel.append(f"CASE WHEN COUNT(CASE WHEN {inr} THEN anomaly END) = {len(codes)} "
+                   f"THEN SUM(CASE WHEN {inr} THEN anomaly * {w} END) / "
+                   f"SUM(CASE WHEN {inr} THEN {w} END) END AS t_{k}")
+    for region, codes in WR_IMPACT_WIND_REGIONS.items():
+        k = _region_key(region)
+        inr = f"metric = 'Wind' AND area IN ({_sql_list(codes)})"
+        ok = f"COUNT(CASE WHEN {inr} THEN anomaly END) = {len(codes)}"
+        sel.append(f"CASE WHEN {ok} THEN SUM(CASE WHEN {inr} THEN anomaly END) END AS w_{k}")
+        sel.append(f"CASE WHEN {ok} THEN SUM(CASE WHEN {inr} THEN normal END) END AS wn_{k}")
+    areas = sorted({c for w in WR_IMPACT_TEMP_REGIONS.values() for c in w}
+                   | {c for v in WR_IMPACT_WIND_REGIONS.values() for c in v})
+    try:
+        df = run_query(f"""
+            SELECT day, {", ".join(sel)}
+            FROM {SBX_SCHEMA}.hist_daily
+            WHERE area IN ({_sql_list(areas)})
+              AND ((metric = 'Temperature' AND source = 'Meteomatics')
+                   OR (metric = 'Wind' AND source = 'Reanalysis'))
+            GROUP BY day ORDER BY day
+        """)
+    except Exception as e:
+        if not _table_missing(e):
+            raise
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    df = _dt(df, ["day"])
+    return _num(df, [c for c in df.columns if c != "day"])
 
 
 # ══════════════════════════════════════════════════════════════════════════════

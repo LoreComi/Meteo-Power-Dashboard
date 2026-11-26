@@ -1153,6 +1153,7 @@ def make_wr_forecast_change_chart(perc: pd.DataFrame, change: pd.DataFrame | Non
     pos = np.arange(n, dtype=float)
     labels = [d.strftime("%a %d<br>%b") for d in perc.index]
     hover_day = [d.strftime("%a %d %b") for d in perc.index]
+    iso_day = [d.strftime("%Y-%m-%d") for d in perc.index]
     regimes = [r for r in WR_STACK_ORDER if r in perc.columns and perc[r].sum() > 0]
     if clim_share is not None and len(clim_share):
         regimes = [r for r in WR_STACK_ORDER
@@ -1181,7 +1182,7 @@ def make_wr_forecast_change_chart(perc: pd.DataFrame, change: pd.DataFrame | Non
         fig.add_trace(go.Bar(x=pos, y=y, width=0.94, name=regime, legendgroup=regime,
                              legendrank=len(regimes) - k,       # legend reads top of stack first
                              marker_color=c, marker_line=dict(color="white", width=0.5),
-                             customdata=np.column_stack([hover_day, chg_txt]),
+                             customdata=np.column_stack([hover_day, chg_txt, iso_day]),
                              text=[f"{v:.0f}" if v >= 10 else "" for v in y],
                              textposition="inside", insidetextanchor="end",
                              textfont=dict(color="white", size=11),
@@ -1201,8 +1202,9 @@ def make_wr_forecast_change_chart(perc: pd.DataFrame, change: pd.DataFrame | Non
         if has_change and regime in change.columns:
             fig.add_trace(go.Bar(x=pos - 0.45 + w * (k + 0.5), y=chg, width=w * 0.9,
                                  legendgroup=regime, showlegend=False,
-                                 marker_color=c, marker_line_width=0, customdata=hover_day,
-                                 hovertemplate=f"{regime} %{{customdata}}<br>%{{y:+.0f}} pp<extra></extra>"),
+                                 marker_color=c, marker_line_width=0,
+                                 customdata=np.column_stack([hover_day, chg_txt, iso_day]),
+                                 hovertemplate=f"{regime} %{{customdata[0]}}<br>%{{y:+.0f}} pp<extra></extra>"),
                           row=3, col=1)
 
     xr = [-0.5, n - 0.5]
@@ -1226,6 +1228,45 @@ def make_wr_forecast_change_chart(perc: pd.DataFrame, change: pd.DataFrame | Non
                          zerolinecolor=BASELINE, row=3, col=1)
         for i in range(1, n):
             fig.add_vline(x=i - 0.5, line_color=GRIDLINE, line_width=1, row=3, col=1)
+    return fig
+
+
+def make_wr_impact_chart(stats: pd.DataFrame, title: str, unit: str, warm_is_positive: bool,
+                        below_label: str) -> go.Figure:
+    """Composite anomaly per region for one regime: bar = mean over the regime's
+    days in the seasonal window, whisker = P25–P75 of those days, hollow diamond =
+    the regime's all-year mean. Red / blue follow the desk convention: red is
+    warmer, or less wind; blue colder, or more wind."""
+    fig = _base_fig(title, height=330)
+    if stats.empty:
+        return fig
+    x = list(stats.index)
+    m = stats["mean"].to_numpy(dtype=float)
+    pos_col, neg_col = (DIV_POS, DIV_NEG) if warm_is_positive else (DIV_NEG, DIV_POS)
+    nd = 1 if unit == "°C" else 0
+    fmt = lambda v: f"{(round(v, nd) + 0.0):+.{nd}f}"     # + 0.0: no "-0"
+    extra = stats.get("extra", pd.Series("", index=stats.index)).fillna("")
+    hover = [f"<b>{r}</b><br>mean {fmt(mm)} {unit} · P25–P75 {fmt(a)} to {fmt(b)}"
+             f"<br>{bl:.0f}% of days {below_label}<br>all-year mean {fmt(ay)} {unit}"
+             f"<br>{int(n)} days{ex}"
+             for r, mm, a, b, bl, ay, n, ex in zip(x, m, stats["p25"], stats["p75"], stats["below"],
+                                                   stats["all_mean"], stats["n"], extra)]
+    fig.add_trace(go.Bar(
+        x=x, y=m, marker_color=[pos_col if v >= 0 else neg_col for v in m], marker_line_width=0,
+        error_y=dict(type="data", symmetric=False, array=stats["p75"] - m, arrayminus=m - stats["p25"],
+                     color=INK_SECONDARY, thickness=1.2, width=5),
+        showlegend=False, hovertext=hover, hovertemplate="%{hovertext}<extra></extra>"))
+    fig.add_trace(go.Scatter(
+        x=x, y=stats["all_mean"], mode="markers", name="regime's all-year mean",
+        marker=dict(symbol="diamond-open", size=10, color=INK_PRIMARY, line=dict(width=1.6)),
+        hovertemplate="%{x} all-year mean %{y:+.1f}" + f" {unit}<extra></extra>"))
+    fig.add_hline(y=0, line_color=BASELINE, line_width=1.2)
+    fig.update_layout(hovermode="closest", bargap=0.35,
+                      legend=dict(orientation="h", yanchor="bottom", y=1.0, x=1, xanchor="right"))
+    # the values sit under the region names, where whiskers and markers cannot cover them
+    fig.update_xaxes(tickmode="array", tickvals=x,
+                     ticktext=[f"{r}<br><b>{fmt(v)}</b>" for r, v in zip(x, m)])
+    fig.update_yaxes(title_text=unit, zeroline=False)
     return fig
 
 

@@ -49,12 +49,14 @@ from _config import (
     WR_REGIMES, WR_NO_REGIME, WR_ALL_LABELS, WR_REGIME_LONG, WR_MODELS, WR_DEFAULT_MODEL,
     WR_THRESHOLD, WR_LEAD_FACTOR, WR_DEFAULT_HORIZON_DAYS, WR_MAX_HORIZON_DAYS,
     WR_CLIM_DOY_WINDOW, WR_CLIM_MIN_YEARS, WR_COLORS, SBX_SCHEMA,
+    WR_IMPACT_TEMP_REGIONS, WR_IMPACT_WIND_REGIONS, WR_IMPACT_SEASON_DAYS,
 )
 from _charts import (
     make_wr_iwr_chart, make_wr_clim_compare, make_wr_seasonal_clim,
     make_wr_persistence, make_wr_transition_heatmap, make_wr_forecast_change_chart,
+    make_wr_impact_chart,
 )
-from _data import load_wr_forecast_members, load_wr_reanalysis
+from _data import load_wr_forecast_members, load_wr_reanalysis, load_wr_impact_daily, _region_key
 from _ui import kpi_card, kpi_row, status_banner, view_switch
 
 IWR_COLS = [f"iwr_{r}" for r in WR_REGIMES]
@@ -308,6 +310,54 @@ def path_outcomes(eps: pd.DataFrame, path: list[str], min_days: int = 1,
     return res.sort_values(["n", "median_days"], ascending=False)
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def impact_frame(rean: pd.DataFrame, impact: pd.DataFrame) -> pd.DataFrame:
+    """Reanalysis regime (one-day flips cleaned, as everywhere else) joined to the
+    regional daily anomalies; adds the wind anomaly in % of normal per region."""
+    if rean.empty or impact.empty:
+        return pd.DataFrame()
+    r = rean.sort_values("day")[["day"]].copy()
+    r["regime"] = clean_singles(list(rean.sort_values("day")["regime"]))
+    r["doy"] = doy_365(r["day"])
+    df = r.merge(impact, on="day", how="inner")
+    for region in WR_IMPACT_WIND_REGIONS:
+        k = _region_key(region)
+        df[f"wp_{k}"] = df[f"w_{k}"] / df[f"wn_{k}"].where(df[f"wn_{k}"] > 0) * 100
+    return df
+
+
+def regime_impact(df: pd.DataFrame, regime: str, center_doy: int,
+                  season_days: int = WR_IMPACT_SEASON_DAYS) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(temperature, wind) composites for one regime — per region: mean, p25, p75,
+    share of days below normal, n days in the seasonal window, and the regime's
+    all-year mean. Wind is in % of normal: the mean is the ratio of the mean GW
+    anomaly to the mean normal, so a windy day weighs by its GW, not its percentage."""
+    gap = (df["doy"] - center_doy).abs()
+    in_season = np.minimum(gap, 365 - gap) <= season_days
+    reg = df["regime"] == regime
+    s, a = df[reg & in_season], df[reg]
+    trows, wrows = [], []
+    for region in WR_IMPACT_TEMP_REGIONS:
+        c = f"t_{_region_key(region)}"
+        v = s[c].dropna()
+        trows.append({"region": region, "mean": v.mean(), "p25": v.quantile(0.25), "p75": v.quantile(0.75),
+                      "below": (v < 0).mean() * 100 if len(v) else np.nan, "n": len(v),
+                      "all_mean": a[c].mean()})
+    for region in WR_IMPACT_WIND_REGIONS:
+        k = _region_key(region)
+        sv = s[[f"w_{k}", f"wn_{k}", f"wp_{k}"]].dropna()
+        av = a[[f"w_{k}", f"wn_{k}"]].dropna()
+        mean_gw = sv[f"w_{k}"].mean()
+        wrows.append({"region": region,
+                      "mean": mean_gw / sv[f"wn_{k}"].mean() * 100 if len(sv) else np.nan,
+                      "p25": sv[f"wp_{k}"].quantile(0.25), "p75": sv[f"wp_{k}"].quantile(0.75),
+                      "below": (sv[f"w_{k}"] < 0).mean() * 100 if len(sv) else np.nan, "n": len(sv),
+                      "all_mean": av[f"w_{k}"].mean() / av[f"wn_{k}"].mean() * 100 if len(av) else np.nan,
+                      "extra": f"<br>mean {mean_gw:+.1f} GW on a normal of {sv[f'wn_{k}'].mean():.1f} GW"
+                               if len(sv) else ""})
+    return pd.DataFrame(trows).set_index("region"), pd.DataFrame(wrows).set_index("region")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # RENDERING
 # ══════════════════════════════════════════════════════════════════════════════
@@ -374,11 +424,17 @@ def _render_forecast(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, model_la
     if prev_perc is not None and not prev_perc.empty:
         change = (perc.reindex(prev_perc.index) - prev_perc).reindex(columns=WR_ALL_LABELS)
     run_label = pd.Timestamp(run_ts).strftime("%Hz %Y-%m-%d")
-    st.plotly_chart(make_wr_forecast_change_chart(
+    fig = make_wr_forecast_change_chart(
         perc, change, clim_share,
         f"Weather regime forecast — {model_label} {run_label}",
-        f"Change from the {prev_label} run (pp)" if prev_label else "", n_members),
-        use_container_width=True)
+        f"Change from the {prev_label} run (pp)" if prev_label else "", n_members)
+    try:
+        event = st.plotly_chart(fig, use_container_width=True, key="wr_fc_chart",
+                                on_select="rerun", selection_mode="points")
+    except TypeError:                     # a Streamlit without chart selections
+        st.plotly_chart(fig, use_container_width=True)
+        event = None
+    _take_chart_click(event, perc.index)
     if change is not None and len(change) < len(perc):
         st.caption(f"The comparison run does not reach the last {len(perc) - len(change)} day(s), "
                    "so those days have no change bar.")
@@ -394,6 +450,8 @@ def _render_forecast(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, model_la
     if extended:
         status_banner(f"Showing beyond day {WR_DEFAULT_HORIZON_DAYS - 1}: the threshold's lead decay "
                       "was fitted over leads 0–14, so it is extrapolated on the last days.", "warning")
+
+    _render_impact(perc)
 
     dom = dominant_regime(perc)
     tbl = perc.copy()
@@ -486,6 +544,88 @@ def _render_climatology(run: pd.DataFrame, perc: pd.DataFrame, clim: dict, clean
         st.plotly_chart(make_wr_transition_heatmap(
             clim_t["transitions"], clim_title),
             use_container_width=True)
+
+
+def _take_chart_click(event, days: pd.DatetimeIndex) -> None:
+    """A click on a regime's bar in the forecast chart selects that regime and day
+    for the impact panel. Only a new click is applied, so the selectors below the
+    chart can still be changed by hand afterwards."""
+    try:
+        points = event.selection.points if event is not None else []
+    except AttributeError:
+        points = (event or {}).get("selection", {}).get("points", [])
+    for p in points or []:
+        regime, cd = p.get("legendgroup"), p.get("customdata")
+        if regime not in WR_ALL_LABELS or not isinstance(cd, (list, tuple)) or len(cd) < 3:
+            continue
+        day = pd.Timestamp(cd[2])
+        sig = f"{regime}|{day:%Y-%m-%d}"
+        if sig != st.session_state.get("wr_imp_last_click") and day in days:
+            st.session_state["wr_imp_last_click"] = sig
+            st.session_state["wr_imp_regime"] = regime
+            st.session_state["wr_imp_day"] = day
+        return
+
+
+def _render_impact(perc: pd.DataFrame) -> None:
+    """What the selected regime has usually meant for temperature and wind."""
+    st.markdown("###### What the regime usually brings — click a regime in the chart")
+    try:
+        rean, impact = load_wr_reanalysis(), load_wr_impact_daily()
+    except Exception as e:
+        st.caption(f"Regime impact unavailable: cannot read the historical anomalies ({e}).")
+        return
+    df = impact_frame(rean, impact) if not rean.empty and not impact.empty else pd.DataFrame()
+    if df.empty:
+        st.caption("Regime impact unavailable: the classified reanalysis or the historical "
+                   "temperature / wind anomalies are not loaded.")
+        return
+
+    days = list(perc.index)
+    dom = dominant_regime(perc)
+    if st.session_state.get("wr_imp_day") not in days:
+        st.session_state["wr_imp_day"] = days[0]
+    if st.session_state.get("wr_imp_regime") not in WR_ALL_LABELS:
+        st.session_state["wr_imp_regime"] = dom.loc[st.session_state["wr_imp_day"]]
+    c1, c2, c3 = st.columns([1.6, 1.4, 3])
+    with c1:
+        regime = st.selectbox("Regime", WR_ALL_LABELS, key="wr_imp_regime",
+                              format_func=lambda r: f"{r} — {WR_REGIME_LONG.get(r, r)}")
+    with c2:
+        day = st.selectbox("Season of", days, key="wr_imp_day",
+                           format_func=lambda d: pd.Timestamp(d).strftime("%a %d %b"),
+                           help=f"The composite pools the regime's days within ±{WR_IMPACT_SEASON_DAYS} "
+                                "days of this date, in every year — a regime's effect depends "
+                                "strongly on the season.")
+    share = float(perc.loc[day, regime]) if regime in perc.columns else 0.0
+    with c3:
+        st.markdown(f"<div style='height:1.9rem'></div><span style='color:{WR_COLORS.get(regime)}'>■</span> "
+                    f"<b>{regime}</b> holds <b>{share:.0f}%</b> of members on {pd.Timestamp(day):%a %d %b}.",
+                    unsafe_allow_html=True)
+
+    center = int(doy_365(pd.Series([pd.Timestamp(day)])).iloc[0])
+    temp, wind = regime_impact(df, regime, center)
+    lo = pd.Timestamp(day) - pd.Timedelta(days=WR_IMPACT_SEASON_DAYS)
+    hi = pd.Timestamp(day) + pd.Timedelta(days=WR_IMPACT_SEASON_DAYS)
+    window = f"{lo:%d %b}–{hi:%d %b}"
+    n = int(temp["n"].max()) if len(temp) else 0
+    if n == 0:
+        st.caption(f"{regime} never occurred between {window} in the reanalysis.")
+        return
+    t1, t2 = st.columns(2)
+    with t1:
+        st.plotly_chart(make_wr_impact_chart(temp, f"Temperature anomaly under {regime}, {window}", "°C",
+                                             True, "colder than normal"), use_container_width=True)
+    with t2:
+        st.plotly_chart(make_wr_impact_chart(wind, f"Wind generation anomaly under {regime}, {window}",
+                                             "% of normal", False, "below the normal"),
+                        use_container_width=True)
+    years = f"{df['day'].min():%Y}–{df['day'].max():%Y}"
+    st.caption(f"{n} {regime} days between {window} in {years}"
+               + (" — few enough that the averages are rough" if n < 60 else "")
+               + ". Bars: mean anomaly on those days; whiskers: P25–P75 of the days; ◇: the regime's "
+               "all-year mean. Temperature: ERA5, population-weighted (Iberia = ES + PT, Nordics = "
+               "SE + DK + FI + NO). Wind: today's fleet on past weather, summed per region, % of its normal.")
 
 
 def _render_explorer(rean: pd.DataFrame, perc: pd.DataFrame) -> None:

@@ -552,6 +552,28 @@ WR_COLORS: dict[str, str] = {
     "no":   "#7f7f7f",   # gray50
 }
 
+# Regime impact — click a regime in the forecast chart to see what it has usually
+# meant for temperature and wind. Composites of the daily anomalies on the
+# reanalysis days classified in that regime, 1979 onwards:
+#   temperature  hist_daily, source 'Meteomatics' (ERA5, population-weighted country
+#                means). A region of several countries is weighted by population
+#                (millions, 2024), so Iberia is mostly Spain and the Nordics mostly Sweden.
+#   wind         hist_daily, source 'Reanalysis' (Meteologica ERA5: today's fleet on
+#                past weather, GW). A region sums its countries' GW, and the anomaly is
+#                shown in % of the summed normal.
+WR_IMPACT_TEMP_REGIONS: dict[str, dict[str, float]] = {
+    "DE": {"DE": 1.0}, "FR": {"FR": 1.0}, "IT": {"IT": 1.0},
+    "Iberia": {"ES": 48.6, "PT": 10.6},
+    "Nordics": {"SE": 10.6, "DK": 6.0, "FI": 5.6, "NO": 5.6},
+    "HU": {"HU": 1.0},
+}
+WR_IMPACT_WIND_REGIONS: dict[str, list[str]] = {
+    "DE": ["DE"], "FR": ["FR"], "IT": ["IT"],
+    "Iberia": ["ES", "PT"],
+    "Nordics": ["NO", "SE", "FI", "DK"],
+}
+WR_IMPACT_SEASON_DAYS = 30       # ± days around the clicked day's date, pooled over all years
+
 # ══════════════════════════════════════════════════════════════════════════════
 # GAS DEMAND (port of EU-gas-demand/ldz_forecast.py + rdl_forecast.py)
 # ══════════════════════════════════════════════════════════════════════════════
